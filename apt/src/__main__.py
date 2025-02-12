@@ -1,7 +1,16 @@
-import marimo
+from marimo import App
+from .runtime import inline_module, inline
+from .include import *
+from .datasets import GOT10k
 
 __generated_with = "0.11.2"
-app = marimo.App(width="full", auto_download=["ipynb"])
+app = App(width="full", auto_download=["ipynb"])
+
+
+@app.cell
+def _():
+    import marimo as mo
+    return (mo,)
 
 
 @app.cell
@@ -17,57 +26,13 @@ def _(mo):
 
 
 @app.cell
+@inline_module(__file__)
 def _():
-    import marimo as mo
-    return (mo,)
+    from . import include
 
 
 @app.cell
 def _():
-    from os import path, rename, mkdir, listdir, system
-
-    import torch
-    from torch import nn, optim
-    from torch.utils.data import DataLoader
-
-    from torchvision import datasets, utils
-    from torchvision import transforms
-    from ultralytics import YOLO
-
-    import numpy as np
-    import pandas as pd
-
-    from tqdm.notebook import tqdm
-    import matplotlib.pyplot as plt
-    import pygwalker as pyg
-    import wandb
-
-    datasets.utils.tqdm = tqdm
-    return (
-        DataLoader,
-        YOLO,
-        datasets,
-        listdir,
-        mkdir,
-        nn,
-        np,
-        optim,
-        path,
-        pd,
-        plt,
-        pyg,
-        rename,
-        system,
-        torch,
-        tqdm,
-        transforms,
-        utils,
-        wandb,
-    )
-
-
-@app.cell
-def _(wandb):
     # WandB Initialization
     wandb.init(project="plugin-TTA-ideaA")
     return
@@ -80,13 +45,13 @@ def _(mo):
 
 
 @app.cell
-def _(system):
+def _():
     system("nvidia-smi")
     return
 
 
 @app.cell
-def _(torch):
+def _():
     # Set CUDA Device Number 0~7
     DEVICE_NUM = 4
     ADDITIONAL_GPU = 1
@@ -106,100 +71,28 @@ def _(torch):
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md("""## Load Dataset""")
     return
 
 
 @app.cell
-def _(mo):
-    mo.md(
-        """
-        ### GOT-10k Dataset for Next-frame Prediction Task (Default Pretraining Process)
-        http://got-10k.aitestunion.com/downloads
-
-        #### Data File Structure
-        The downloaded and extracted full dataset should follow the file structure:
-        ```
-          |-- GOT-10k/
-             |-- train/
-             |  |-- GOT-10k_Train_000001/
-             |  |   ......
-             |  |-- GOT-10k_Train_009335/
-             |  |-- list.txt
-             |-- val/
-             |  |-- GOT-10k_Val_000001/
-             |  |   ......
-             |  |-- GOT-10k_Val_000180/
-             |  |-- list.txt
-             |-- test/
-             |  |-- GOT-10k_Test_000001/
-             |  |   ......
-             |  |-- GOT-10k_Test_000180/
-             |  |-- list.txt
-        ```
-
-        #### Annotation Description
-        Each sequence folder contains 4 annotation files and 1 meta file. A brief description of these files follows (let N denotes sequence length):
-
-        * groundtruth.txt -- An N×4 matrix with each line representing object location [xmin, ymin, width, height] in one frame.
-        * cover.label -- An N×1 array representing object visible ratios, with levels ranging from 0~8.
-        * absense.label -- An binary N×1 array indicating whether an object is absent or present in each frame.
-        * cut_by_image.label -- An binary N×1 array indicating whether an object is cut by image in each frame.
-        * meta_info.ini -- Meta information about the sequence, including object and motion classes, video URL and more.
-        * Values 0~8 in file cover.label correspond to ranges of object visible ratios: 0%, (0%, 15%], (15%~30%], (30%, 45%], (45%, 60%], (60%, 75%], (75%, 90%], (90%, 100%) and 100% respectively.
-        """
-    )
+def _():
+    mo.md(help(GOT10k))
     return
 
 
 @app.cell
-def _(datasets, path, pd, tqdm):
-    from typing import Callable, Optional
-
-    datasets.utils.tqdm = tqdm
-
-
-    class FoodImageDataset(datasets.ImageFolder):
-        download_method = datasets.utils.download_and_extract_archive
-        download_url = "https://www.kaggle.com/api/v1/datasets/download/trolukovich/food11-image-dataset"
-
-        def __init__(self, root: str, force_download: bool = True, train: bool = True, valid: bool = False, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
-            self.download(root, force=force_download)
-
-            if train:
-                if valid:
-                    root = path.join(root, "validation")
-                else:
-                    root = path.join(root, "training")
-            else:
-                root = path.join(root, "evaluation")
-
-            super().__init__(root=root, transform=transform, target_transform=target_transform)
-
-        @classmethod
-        def download(cls, root: str, force: bool = False):
-            if force or not path.isfile(path.join(root, "archive.zip")):
-                cls.download_method(cls.download_url, download_root=root, extract_root=root, filename="archive.zip")
-                print("INFO: Dataset archive downloaded and extracted.")
-            else:
-                print("INFO: Dataset archive found in the root directory. Skipping download.")
-
-        @property
-        def df(self) -> pd.DataFrame:
-            return pd.DataFrame(dict(path=[d[0] for d in self.samples], label=[self.classes[lb] for lb in self.targets]))
-    return Callable, FoodImageDataset, Optional
+@inline
+def _():
+    from .datasets import GOT10kDataset
+    return GOT10kDataset
 
 
 @app.cell
-def _(FoodImageDataset, augmenter, path, resizer):
-    DATA_ROOT = path.join(".", "data", "food11")
-
-    train_dataset = FoodImageDataset(root=DATA_ROOT, force_download=False, train=True, transform=augmenter)
-    valid_dataset = FoodImageDataset(root=DATA_ROOT, force_download=False, valid=True, transform=resizer)
-    test_dataset = FoodImageDataset(root=DATA_ROOT, force_download=False, train=False, transform=resizer)
-
-    print(f"INFO: Dataset loaded successfully. Number of samples - Train({len(train_dataset)}), Valid({len(valid_dataset)}), Test({len(test_dataset)})")
+@inline
+def _():
+    from .datasets import get_GOT10k_dataset
     return DATA_ROOT, test_dataset, train_dataset, valid_dataset
 
 
@@ -231,30 +124,9 @@ def _():
 
 
 @app.cell
-def _(BATCH_SIZE, DataLoader, test_dataset, train_dataset, valid_dataset):
-    MULTI_PROCESSING = True  # Set False if DataLoader is causing issues
-
-    from platform import system
-    if MULTI_PROCESSING and system() != "Windows":  # Multiprocess data loading is not supported on Windows
-        import multiprocessing
-        cpu_cores = multiprocessing.cpu_count()
-        print(f"INFO: Number of CPU cores - {cpu_cores}")
-    else:
-        cpu_cores = 0
-        print("INFO: Using DataLoader without multi-processing.")
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE[0], shuffle=True, num_workers=cpu_cores)
-    valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE[1], shuffle=False, num_workers=cpu_cores)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE[2], shuffle=False, num_workers=cpu_cores)
-    return (
-        MULTI_PROCESSING,
-        cpu_cores,
-        multiprocessing,
-        system,
-        test_loader,
-        train_loader,
-        valid_loader,
-    )
+def _():
+    from . import dataloader
+    return
 
 
 @app.cell
