@@ -1,14 +1,17 @@
 import marimo
 
+import os
+import sys
+
+workdir = os.path.dirname(os.path.abspath(__file__))
+if workdir not in sys.path:
+    sys.path.insert(0, workdir)
+
+
 from apt.runtime import inline_module, inline
 from apt.include import *
 from apt.datasets import GOT10k
 
-import os
-import sys
-workdir = os.path.dirname(os.path.abspath(__file__))
-if workdir not in sys.path:
-    sys.path.insert(0, workdir)
 
 __generated_with = "0.11.2"
 app = marimo.App(width="full", auto_download=["ipynb"])
@@ -21,13 +24,13 @@ def _():
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md("""# Pluggable TTA Implementation using light-weight sparse autoencoder""")
     return
 
 
 @app.cell
-def _(mo):
+def _():
     mo.md(r"""## Import Libraries""")
     return
 
@@ -84,8 +87,8 @@ def _():
 
 
 @app.cell
-def _():
-    mo.md(help(GOT10k))
+def _(data=GOT10k.__doc__):
+    mo.md(data)
     return
 
 
