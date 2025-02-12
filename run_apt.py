@@ -1,10 +1,17 @@
-from marimo import App
-from .runtime import inline_module, inline
-from .include import *
-from .datasets import GOT10k
+import marimo
+
+from apt.runtime import inline_module, inline
+from apt.include import *
+from apt.datasets import GOT10k
+
+import os
+import sys
+workdir = os.path.dirname(os.path.abspath(__file__))
+if workdir not in sys.path:
+    sys.path.insert(0, workdir)
 
 __generated_with = "0.11.2"
-app = App(width="full", auto_download=["ipynb"])
+app = marimo.App(width="full", auto_download=["ipynb"])
 
 
 @app.cell
@@ -28,7 +35,7 @@ def _(mo):
 @app.cell
 @inline_module(__file__)
 def _():
-    from . import include
+    from apt import include
 
 
 @app.cell
@@ -85,14 +92,14 @@ def _():
 @app.cell
 @inline
 def _():
-    from .datasets import GOT10kDataset
+    from apt.datasets import GOT10kDataset
     return GOT10kDataset
 
 
 @app.cell
 @inline
 def _():
-    from .datasets import get_GOT10k_dataset
+    from apt.datasets import get_GOT10k_dataset
     return DATA_ROOT, test_dataset, train_dataset, valid_dataset
 
 
