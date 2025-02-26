@@ -1,0 +1,106 @@
+# Ultralytics AGPL-3.0 License - https://ultralytics.com/license
+
+# ImageNet VID dataset https://huggingface.co/datasets/guanxiongsun/imagenetvid
+# Example usage: yolo train data=imagenetvid.yaml
+
+# Train/val/test sets
+id: guanxiongsun/imagenetvid
+path: ../datasets/ILSVRC2015_VID  # dataset root dir
+train: train  # train images (relative to 'path')
+val: val  # val images (relative to 'path')
+test: test  # test images (optional)
+
+# Classes
+names:
+  0: airplane
+  1: antelope
+  2: bear
+  3: bicycle
+  4: bird
+  5: bus
+  6: car
+  7: cattle
+  8: dog
+  9: domestic cat
+  10: elephant
+  11: fox
+  12: giant panda
+  13: hamster
+  14: horse
+  15: lion
+  16: lizard
+  17: monkey
+  18: motorcycle
+  19: rabbit
+  20: red panda
+  21: sheep
+  22: snake
+  23: squirrel
+  24: tiger
+  25: train
+  26: turtle
+  27: watercraft
+  28: whale
+  29: zebra
+
+# Download script/URL - POSIX shell
+download: |
+  import os
+  import subprocess
+  from pathlib import Path
+  from huggingface_hub import snapshot_download
+
+  # Dataset info
+  DATASET_ID = yaml['id']
+
+  # Download dataset
+  target_dir = Path(yaml['path'])  # dataset root dir
+  print(f"INFO: Downloading dataset {DATASET_ID} to {target_dir}...")
+  snapshot_download(
+      repo_id=DATASET_ID,
+      repo_type="dataset",
+      local_dir=target_dir,
+      ignore_patterns=["*.git*", "*.md", "*ILSVRC2017*", "annotations"]
+  )
+  print(f"INFO: Dataset snapshot is downloaded to {target_dir}")
+  
+  # Combine split files for ILSVRC2015_VID
+  print("INFO: Preprocessing data files...")
+  if not os.path.exists(f"{target_dir}/ILSVRC2015_VID.tar.gz"):
+      cmd = f"cat {target_dir}/ILSVRC2015_VID.tar.gz.a* > {target_dir}/ILSVRC2015_VID.tar.gz"
+      subprocess.run(cmd, shell=True)
+      print("INFO: Data file preprocessing is done")
+  else:
+      print("INFO: Skipping data file preprocessing")
+
+  # Extract dataset
+  print("INFO: Extracting dataset...")
+  if os.path.isfile(f"{target_dir}/train/train.json") and os.path.isfile(f"{target_dir}/val/val.json"):
+      print("INFO: Dataset is already extracted")
+  else:
+      try:
+          cmd = f"tar -I pigz -xf {target_dir}/ILSVRC2015_VID.tar.gz -C {target_dir}"
+          subprocess.run(cmd, shell=True, check=True)
+      except subprocess.CalledProcessError:
+          print("ERROR: Cannot find pigz in the system, using default tar command instead")
+          cmd = f"tar -xzf {target_dir}/ILSVRC2015_VID.tar.gz -C {target_dir}"
+          if subprocess.run(cmd, shell=True).returncode != 0:
+              raise Exception(f"Failed to extract {target_dir}/ILSVRC2015_VID.tar.gz")
+      print("INFO: Dataset is extracted successfully")
+
+      # Move files to the correct directories
+      os.system(f"mv {target_dir}/ILSVRC2015/ImageSets/VID/* {target_dir}")
+      # ----
+      os.system(f"mv {target_dir}/ILSVRC2015/Data/VID/* {target_dir}")
+      os.system(f"mv {target_dir}/train/* {target_dir}/train/images/")
+      os.system(f"mv {target_dir}/val/* {target_dir}/val/images")
+      os.system(f"mv {target_dir}/test/* {target_dir}/test/images")
+      # ----
+      os.system(f"mkdir {target_dir}/train/labels/")
+      os.system(f"mv {target_dir}/ILSVRC2015/Annotations/VID/train/* {target_dir}/train/labels/")
+      os.system(f"mkdir {target_dir}/val/labels/")
+      os.system(f"mv {target_dir}/ILSVRC2015/Annotations/VID/val/* {target_dir}/val/labels/")
+      os.system(f"mkdir {target_dir}/test/labels/")
+      os.system(f"mv {target_dir}/ILSVRC2015/Annotations/VID/test/* {target_dir}/test/labels/")
+      # ----
+      os.system(f"rm -r {target_dir}/ILSVRC2015/")
