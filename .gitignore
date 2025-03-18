@@ -108,7 +108,8 @@ saved/
 datasets/
 wandb/
 yolo_with_imagenetvid/
-
+apt/dataset/environment/foggy/leftImg8bit_trainvaltest_foggy.zip
+apt/dataset/environment/foggy/leftImg8bit_trainvaltest.zip
 # editor, os cache directory
 .vscode/
 .idea/
