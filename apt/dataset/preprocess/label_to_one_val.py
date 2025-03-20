@@ -21,8 +21,8 @@ for root, _, files in os.walk(label_source_root):
         if os.path.getsize(src_txt_path) > 0:
             valid_files.append(file)
     
-    # 상위 5개 유효한 라벨 파일만 선택
-    for file in valid_files[:5]:
+    # 전체 파일 선택
+    for file in valid_files:
         src_txt_path = os.path.join(root, file)
         
         parts = root.split(os.sep)
