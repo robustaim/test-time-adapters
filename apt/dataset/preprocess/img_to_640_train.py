@@ -1,14 +1,15 @@
 import os
 from PIL import Image
+from tqdm import tqdm
 
 # 기존 이미지 및 라벨 저장 폴더
-label_source_root = "/shared_hdd/annasdfghjkl13/APT/data/real_data/train/labels"
-image_source_root = "/shared_hdd/annasdfghjkl13/APT/data/ILSVRC2015/Data/VID/train"
-output_dir = "/shared_hdd/annasdfghjkl13/APT/data/real_data/train/img"  # 640x640 변환된 이미지 저장 폴더
+label_source_root = "./apt/data/real_data/train/labels"
+image_source_root = "./apt/data/ILSVRC2015/Data/VID/train"
+output_dir = "./apt/data/real_data/train/img"  # 640x640 변환된 이미지 저장 폴더
 os.makedirs(output_dir, exist_ok=True)
 
 # 라벨 파일을 기반으로 해당하는 이미지 찾기
-for root, _, files in os.walk(label_source_root):
+for root, _, files in tqdm(os.walk(label_source_root)):
     txt_files = sorted([f for f in files if f.endswith(".txt")])
     
     for file in txt_files:
