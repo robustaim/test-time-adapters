@@ -2,8 +2,8 @@ import os
 import xml.etree.ElementTree as ET
 
 # 데이터 경로 설정
-annotations_root = "/shared_hdd/annasdfghjkl13/APT/data/ILSVRC2015/Annotations/VID/val"  # XML 파일이 저장된 최상위 폴더
-output_dir = "/shared_hdd/annasdfghjkl13/APT/data/my_data/val/labels"  # YOLO 라벨 저장 폴더
+annotations_root = "./apt/data/ILSVRC2015/Annotations/VID/val"  # XML 파일이 저장된 최상위 폴더
+output_dir = "./apt/data/my_data/val/labels"  # YOLO 라벨 저장 폴더
 os.makedirs(output_dir, exist_ok=True)
 
 # WordNet Synset ID → YOLO class_id 변환
