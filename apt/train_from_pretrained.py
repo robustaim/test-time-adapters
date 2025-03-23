@@ -8,7 +8,7 @@ proj = "yolo_pretraining"
 model_name = "yolo11m"
 
 # Hyperparameters
-dataset_path = f"{os.getcwd()}/apt/dataset/real_data.yaml"
+dataset_path = f"{os.getcwd()}/dataset/real_data.yaml"
 batch_size = 32
 devices = 'cuda:0'
 optim = 'AdamW'
