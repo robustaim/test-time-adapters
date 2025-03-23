@@ -29,5 +29,5 @@ names:
   27: watercraft
   28: whale
   29: zebra
-train: /shared_hdd/annasdfghjkl13/APT/data/real_data/train/
-val: /shared_hdd/annasdfghjkl13/APT/data/real_data/val/
+train: ./data/real_data/train/
+val: ./data/real_data/val/
