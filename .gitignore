@@ -115,4 +115,4 @@ apt/dataset/environment/foggy/leftImg8bit_trainvaltest.zip
 .vscode/
 .idea/
 __MACOSX/
-yolo11n.pt
+yolo11*.pt
