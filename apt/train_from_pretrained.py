@@ -3,46 +3,57 @@ import wandb
 import os
 
 # wandb
+os.system("yolo settings wandb=True")
 wandb.login()
 proj = "yolo_pretraining"
 model_name = "yolo11m"
 
 # Hyperparameters
 dataset_path = f"{os.getcwd()}/dataset/real_data.yaml"
-batch_size = 32
-devices = 'cuda:0'
-optim = 'AdamW'
-moment = 0.9  # momentum
-lr_0 = 1e-5
-lr_fit = 1e-6
+batch_size = 30
+devices = "cuda:0"
+optim = "AdamW"
+decay = 5e-4
+lr = 1e-3
 
 # YOLO
-if not os.path.isdir(f"./{proj}/{model_name}"):
-    pretrained = YOLO(f"./pretrained/{model_name}.pt")
-    model = YOLO(f"{model_name}.yaml")
-
-    for k, v in pretrained.state_dict().items():
-        # 분류 레이어(detection head)를 제외한 가중치만 복사
-        if 'head.cls' not in k and 'head.reg' not in k and k in model.state_dict():
-            if model.state_dict()[k].shape == v.shape:
-                model.state_dict()[k] = v.clone()
-            else:
-                print(f"Shape mismatch in layer {k}: {v.shape} vs {model.state_dict()[k].shape}, skipping")
+if not os.path.isdir(f"./{proj}"):
+    model = YOLO(f"./pretrained/{model_name}.pt")
 else:
     model = YOLO(f"./{proj}/{model_name}/weights/best.pt")
 
 
-if __name__ == '__main__':
-    print(f"Loaded Model: {model.model}")
+########################################################################################################################
+# Train
+result = model.train(
+    data=dataset_path, pretrained=True,
+    epochs=30, batch=batch_size, imgsz=640, exist_ok=True,
+    project=proj, name=model_name, plots=True, resume=False,
+    optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
+    warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
+    device=devices, fraction=0.1, save_period=1, val=False
+)
 
-    result = model.train(
-        data=dataset_path,
-        epochs=10000, batch=batch_size, imgsz=640, fraction=0.005,
-        project=proj, name=model_name, plots=True, resume=False,
-        optimizer=optim, lr0=lr_0, lrf=lr_fit, momentum=moment,
-        device=devices
-    )
+print(f"Result: {result}")
 
-    print(f"Result: {result}")
+result = model.train(
+    data=dataset_path, pretrained=True,
+    epochs=20, batch=batch_size, imgsz=640, exist_ok=True,
+    project=proj, name=model_name, plots=True, resume=False,
+    optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
+    warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
+    device=devices, fraction=0.5, save_period=1
+)
 
-# python train_from_pretrained.py | tee output.log
+print(f"Result: {result}")
+
+result = model.train(
+    data=dataset_path, pretrained=True,
+    epochs=10, batch=batch_size, imgsz=640, exist_ok=True,
+    project=proj, name=model_name, plots=True, resume=False,
+    optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
+    warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
+    device=devices, fraction=1, save_period=1
+)
+
+print(f"Result: {result}")
