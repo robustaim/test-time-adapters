@@ -2,10 +2,10 @@ import os
 import shutil
 
 # 기존 라벨 루트 폴더
-label_source_root = "./apt/data/my_data/train/labels"
+label_source_root = "./apt/dataset/data/my_data/train/labels"
 
 # 새로운 라벨 저장 폴더
-label_output_dir = "./apt/data/real_data/train/labels"
+label_output_dir = "./apt/dataset/data/real_data/train/labels"
 os.makedirs(label_output_dir, exist_ok=True)
 
 # 모든 하위 폴더에서 `.txt` 파일을 찾아 빈 파일 제외 후 처리

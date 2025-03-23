@@ -1,8 +1,8 @@
 import yaml
 
 data = {
-    "train" : '/shared_hdd/annasdfghjkl13/APT/data/real_data/train', #절대경로 작성
-        "val" : '/shared_hdd/annasdfghjkl13/APT/data/real_data/val', #절대경로 작성
+    "train" : './data/real_data/train',
+        "val" : '/data/real_data/val',
         "names" : {
             0: 'airplane',
             1: 'antelope',

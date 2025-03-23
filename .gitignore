@@ -107,6 +107,7 @@ input/
 saved/
 datasets/
 wandb/
+yolo_pretraining/
 yolo_with_imagenetvid/
 apt/dataset/environment/foggy/leftImg8bit_trainvaltest_foggy.zip
 apt/dataset/environment/foggy/leftImg8bit_trainvaltest.zip
@@ -114,3 +115,4 @@ apt/dataset/environment/foggy/leftImg8bit_trainvaltest.zip
 .vscode/
 .idea/
 __MACOSX/
+yolo11n.pt
