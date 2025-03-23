@@ -8,7 +8,7 @@ import glob
 # 경로 설정
 label_source_root = "./apt/dataset/data/real_data/train/labels"
 image_source_root = "./apt/dataset/data/ILSVRC2015/Data/VID/train"
-output_dir = "./apt/dataset/data/real_data/train/img"
+output_dir = "./apt/dataset/data/real_data/train/images"
 os.makedirs(output_dir, exist_ok=True)
 
 def process_image(file, label_source_root, image_source_root, output_dir):
