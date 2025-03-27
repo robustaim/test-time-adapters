@@ -21,16 +21,19 @@ if not os.path.isdir(f"./{proj}"):
     model = YOLO(f"./pretrained/{model_name}.pt")
     resume = False
 else:
-    model = YOLO(f"./{proj}/{model_name}/weights/best.pt")
+    model = YOLO(f"./{proj}/{model_name}/weights/last.pt")
+    #model = YOLO(f"./{proj}/{model_name}/weights/best.pt")
     resume = True
 
-result = model.train(
-    data=dataset_path, pretrained=False, freeze=0,
-    epochs=100, batch=batch_size, imgsz=640, exist_ok=True,
-    project=proj, name=model_name, plots=True, resume=resume,
-    optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
-    warmup_epochs=5.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
-    device=devices, fraction=1, save_period=1, val=False
-)
 
-print(f"Result: {result}")
+if __name__ == '__main__':
+    result = model.train(
+        data=dataset_path, pretrained=False, freeze=0,
+        epochs=100, batch=batch_size, imgsz=640, exist_ok=True,
+        project=proj, name=model_name, plots=True, resume=resume,
+        optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
+        warmup_epochs=5.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
+        device=devices, fraction=1, save_period=1, val=True
+    )
+
+    print(f"Result: {result}")
