@@ -31,7 +31,7 @@ result = model.train(
     project=proj, name=model_name, plots=True, resume=False,
     optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
     warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
-    device=devices, fraction=0.1, save_period=1, val=False
+    device=devices, fraction=0.1, save_period=1, val=True
 )
 
 print(f"Result: {result}")
@@ -42,7 +42,7 @@ result = model.train(
     project=proj, name=model_name, plots=True, resume=False,
     optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
     warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
-    device=devices, fraction=0.5, save_period=1
+    device=devices, fraction=0.5, save_period=1, val=True
 )
 
 print(f"Result: {result}")
@@ -53,7 +53,7 @@ result = model.train(
     project=proj, name=model_name, plots=True, resume=False,
     optimizer=optim, lr0=lr, cos_lr=True, weight_decay=decay,
     warmup_epochs=3.0, warmup_momentum=0.8, warmup_bias_lr=0.1,
-    device=devices, fraction=1, save_period=1
+    device=devices, fraction=1, save_period=1, val=True
 )
 
 print(f"Result: {result}")
