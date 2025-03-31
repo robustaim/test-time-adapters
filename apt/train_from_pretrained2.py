@@ -6,7 +6,7 @@ import os
 os.system("yolo settings wandb=True")
 wandb.login()
 proj = "yolo_pretraining"
-model_name = "yolo11m"
+model_name = "yolo11m_vid"
 
 # Hyperparameters
 dataset_path = f"{os.getcwd()}/dataset/real_data.yaml"
@@ -17,7 +17,7 @@ decay = 5e-4
 lr = 1e-4
 
 # YOLO
-if not os.path.isdir(f"./{proj}"):
+if not os.path.isdir(f"./{proj}/{model_name}"):
     model = YOLO(f"./pretrained/{model_name}.pt")
     resume = False
 else:
