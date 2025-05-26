@@ -2,6 +2,7 @@
 Pluggable Test-time Adapter Implementations
 
 > This repository suggests a pluggable implementation of Test-Time Adaptation (TTA) module.
+
 > It is designed to be easily integrated into existing Transformer-family models, enhancing their capabilities to adapt during inference time under the distribution shift.
 
 
