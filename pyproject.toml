@@ -1,7 +1,7 @@
 [project]
-name = "p-tta"
+name = "ttadapters"
 version = "1.0.0"
-description = "Pluggable TTA Implementation"
+description = "Pluggable Test-time Adapter Implementations"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
