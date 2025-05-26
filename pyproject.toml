@@ -1,0 +1,12 @@
+[project]
+name = "p-tta"
+version = "1.0.0"
+description = "Pluggable TTA Implementation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "shift-dev",
+]
+
+[tool.uv.sources]
+shift-dev = { git = "https://github.com/robustaim/shift-dev" }
