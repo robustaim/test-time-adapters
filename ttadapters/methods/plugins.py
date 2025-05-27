@@ -1,23 +1,13 @@
 from transformers import PreTrainedModel, PretrainedConfig
 from torch import nn
 
+from .configs import PluginConfig
+
 
 class AdaptationPlugin(nn.Module):
-    def __init__(self, basemodel: PreTrainedModel, config: PretrainedConfig):
+    def __init__(self, basemodel: PreTrainedModel, config: PluginConfig):
         super().__init__()
-        self.module = PreTrainedModel(config)
-        self.module.model = basemodel
-
-        # Combine the configurations
-        self.config = config
-        if hasattr(basemodel.config, 'to_dict'):
-            config_dict = basemodel.config.to_dict()
-            for key, value in config_dict.items():
-                self.config.__dict__[key] = value
-        elif hasattr(basemodel.config, '__dict__'):
-            for key, value in basemodel.config.__dict__.items():
-                if not key.startswith('_'):  # exclude private attributes
-                    self.config.__dict__[key] = value
+        self.module = basemodel
 
     def forward(self, *args, **kwargs):
         return self.module(*args, **kwargs)
