@@ -44,18 +44,23 @@ import torch
 
 import numpy as np
 import pandas as pd
-
 from PIL import Image
 
+from .base import BaseDataset
 
-class GOT10kDataset(datasets.ImageFolder):
+
+class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     download_method = datasets.utils.download_and_extract_archive
     download_url = "https://drive.google.com/file/d/1b75MBq7MbDQUc682IoECIekoRim_Ydk1/view?usp=sharing"
     dataset_name = "GOT10k"
     file_name = "full_data.zip"
     extract_method = datasets.utils.extract_archive
 
-    def __init__(self, root: str, force_download: bool = True, train: bool = True, valid: bool = False, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
+    def __init__(
+        self, root: str, force_download: bool = False,
+        train: bool = True, valid: bool = False,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+    ):
         self.root = path.join(root, self.dataset_name)
         self.download(self.root, force=force_download)
 
@@ -199,11 +204,4 @@ class PairedGOT10kDataset(Dataset):
         return cls(train_dataset), cls(val_dataset)
 
 
-def get_GOT10k_dataset():
-    DATA_ROOT = path.join(".", "data", "food11")
-
-    train_dataset = GOT10kDataset(root=DATA_ROOT, force_download=False, train=True, transform=None)
-    valid_dataset = GOT10kDataset(root=DATA_ROOT, force_download=False, valid=True, transform=None)
-    test_dataset = GOT10kDataset(root=DATA_ROOT, force_download=False, train=False, transform=None)
-
-    print(f"INFO: Dataset loaded successfully. Number of samples - Train({len(train_dataset)}), Valid({len(valid_dataset)}), Test({len(test_dataset)})")
+GOT10kDatasetForObjectTracking = GOT10kDataset
