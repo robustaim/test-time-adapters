@@ -1,2 +1,4 @@
-from .GOT10k import GOT10kDataset, PairedGOT10kDataset, get_GOT10k_dataset
-from .ImagenetVID import ImageNetVIDDataset
+from .GOT10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
+from .SHIFT import SHIFTDiscreteDatasetForObjectDetection, SHIFTContinuousDatasetForObjectDetection, SHIFTContinuous10DatasetForObjectDetection, SHIFTContinuous100DatasetForObjectDetection
+
+from .base import DatasetHolder, DataLoaderHolder
