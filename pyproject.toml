@@ -5,7 +5,11 @@ description = "Pluggable Test-time Adapter Implementations"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "transformers>=4.52.3",
     "shift-dev",
+    "torchvision",
+    "torchaudio",
+    "torch"
 ]
 
 [tool.uv.sources]
