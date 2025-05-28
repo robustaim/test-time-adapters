@@ -6,10 +6,8 @@ class BaseModel(nn.Module):
     model_name = "BaseModel"
     dataset_name = "Dataset"
 
-    def __init__(self, image_size: int, num_classes: int):
+    def __init__(self):
         super().__init__()
-        self.image_size = image_size
-        self.num_classes = num_classes
 
     def forward(self, x, *args, **kwargs):
         raise NotImplementedError("The forward method must be implemented in subclasses.")
