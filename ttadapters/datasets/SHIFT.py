@@ -19,7 +19,7 @@ import shutil
 
 class SHIFTDataset(SHIFTDataset):
     dataset_name = "SHIFT"
-    categories = ["pedestrian", "car", "truck", "bus", "motorcycle", "bicycle"]
+    classes = ["pedestrian", "car", "truck", "bus", "motorcycle", "bicycle"]
 
     class Type(Enum):
         DISCRETE = "discrete"
