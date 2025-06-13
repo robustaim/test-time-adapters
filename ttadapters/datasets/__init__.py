@@ -1,4 +1,4 @@
 from .GOT10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
 from .SHIFT import SHIFTDiscreteDatasetForObjectDetection, SHIFTContinuousDatasetForObjectDetection, SHIFTContinuous10DatasetForObjectDetection, SHIFTContinuous100DatasetForObjectDetection
 
-from .base import DatasetHolder, DataLoaderHolder
+from .base import BaseDataset, DatasetHolder, DataLoaderHolder
