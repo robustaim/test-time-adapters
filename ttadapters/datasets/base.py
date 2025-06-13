@@ -16,10 +16,12 @@ class DatasetHolder:
     def __post_init__(self):
         print(f"INFO: Dataset loaded successfully. Number of samples - ", end='')
         if self.train:
-            print(f"Train: {len(self.train)}", end=', ')
+            print(f"Train: {len(self.train)}", end='')
         if self.valid:
-            print(f"Valid: {len(self.valid)}", end=', ')
+            if self.train: print(', ', end='')
+            print(f"Valid: {len(self.valid)}", end='')
         if self.test:
+            if self.train: print(', ', end='')
             print(f"Test: {len(self.test)}", end='')
         print('\n')
 
