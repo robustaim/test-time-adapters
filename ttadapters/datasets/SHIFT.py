@@ -122,7 +122,6 @@ class SHIFTDataset(SHIFTDataset):
             shutil.rmtree(root, ignore_errors=True)
         check_dirs = [path.isdir(path.join(train_dir, view.value)) for view in cls.views_to_load]
         if False in check_dirs:
-            raise RuntimeError()
             makedirs(root, exist_ok=True)
             frame_param = f"[{cls.framerate.value}]" if cls.framerate != cls.FrameRate.ALL else "all"
             view_param = ", ".join(f'"{view.value}"' for view in cls.views_to_load)
