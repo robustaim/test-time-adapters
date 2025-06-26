@@ -9,7 +9,12 @@ dependencies = [
     "torchaudio",
     "torchvision",
     "transformers>=4.52.3",
+    "accelerate",
     "shift-dev",
+    "torchmetrics",
+
+    "notebook",
+    "ipywidgets",
 ]
 
 [tool.uv.sources]
