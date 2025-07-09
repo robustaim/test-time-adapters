@@ -237,13 +237,15 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         train: bool = True, valid: bool = False, subset_type: SubsetType = SubsetType.NORMAL,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
     ):
+        # Let the original constructor operate correctly
+        self.dataset_name = SHIFTDataset.dataset_name
+
         # Ensure the dataset is downloaded and split correctly
         super().download(path.join(root, self.dataset_name), force=force_download)
         new_root = path.join(root, self.dataset_name, subset_type.value)
         self.subset_split(root=new_root, origin=self.root, force=force_download)
 
-        # Let the original constructor operate correctly.
-        self.dataset_name = SHIFTDataset.dataset_name
+        # Create an instant _SHIFTScalabelLabels class to create a new one for the subset
         from shift_dev.dataloader import shift_dataset
         shift_dataset._SHIFTScalabelLabels = create_instant_labelclass(annotation_root_suffix="_SUBSET", subset_name=subset_type.value)
         super().__init__(
@@ -251,10 +253,10 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
             train=train, valid=valid,
             transform=transform, target_transform=target_transform
         )
-        del self.dataset_name
-        shift_dataset._SHIFTScalabelLabels = _SHIFTScalabelLabels  # Restore the original class
 
         # Set the root directory based on the subset type
+        del self.dataset_name
+        shift_dataset._SHIFTScalabelLabels = _SHIFTScalabelLabels  # Restore the original class
         self.root = new_root
 
     @classmethod
