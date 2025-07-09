@@ -3,6 +3,7 @@ SHIFT Dataset DevKit
 python download.py --view "[front]" --group "[img, det_2d]" --split "all" --framerate "[images]" --shift "discrete" ./data/SHIFT
 """
 from shift_dev import SHIFTDataset as _SHIFTDataset
+from shift_dev.dataloader.shift_dataset import _SHIFTScalabelLabels, DataBackend, HDF5Backend, _get_extension
 from shift_dev.types import Keys, DataDict
 from shift_dev.utils.backend import ZipBackend
 
@@ -15,6 +16,50 @@ from json import load, dump
 from sys import executable
 from enum import Enum
 import shutil
+
+
+def create_instant_labelclass(annotation_root_suffix: str = "_SUBSET", subset_name: str = "normal"):
+    class SHIFTScalabelLabelsForSubset(_SHIFTScalabelLabels):
+        def __init__(
+            self,
+            data_root: str,
+            split: str,
+            data_file: str = "",
+            annotation_file: str = "",
+            view: str = "front",
+            framerate: str = "images",
+            shift_type: str = "discrete",
+            backend: DataBackend = HDF5Backend(),
+            verbose: bool = False,
+            num_workers: int = 1,
+            **kwargs,
+        ) -> None:
+            self.verbose = verbose
+            self.num_workers = num_workers
+
+            # Validate input
+            assert split in set(("train", "val", "test")), f"Invalid split '{split}'"
+            assert view in _SHIFTScalabelLabels.VIEWS, f"Invalid view '{view}'"
+
+            # Set attributes
+            ext = _get_extension(backend)
+            if shift_type.startswith("continuous"):
+                shift_speed = shift_type.split("/")[-1]
+                annotation_path = path.join(
+                    data_root+annotation_root_suffix, subset_name, "continuous", framerate, shift_speed, split, view, annotation_file
+                )
+                data_path = path.join(
+                    data_root, "continuous", framerate, shift_speed, split, view, f"{data_file}{ext}"
+                )
+            else:
+                annotation_path = path.join(
+                    data_root+annotation_root_suffix, subset_name, "discrete", framerate, split, view, annotation_file
+                )
+                data_path = path.join(
+                    data_root, "discrete", framerate, split, view, f"{data_file}{ext}"
+                )
+            super().__init__(data_path, annotation_path, data_backend=backend, **kwargs)
+    return SHIFTScalabelLabelsForSubset
 
 
 class SHIFTDataset(_SHIFTDataset):
@@ -109,8 +154,8 @@ class SHIFTDataset(_SHIFTDataset):
             break
 
     @classmethod
-    def download(cls, root: str, force: bool = False):
-        print(f"INFO: Downloading '{cls.dataset_name}' from file server to {root}...")
+    def download(cls, root: str, force: bool = False, silent: bool = False):
+        if not silent: print(f"INFO: Downloading '{cls.dataset_name}' from file server to {root}...")
         frame_dir = cls.framerate.value if cls.framerate != cls.FrameRate.ALL else "images"
         if "continuous\\" in root:
             root = root.split("continuous\\")
@@ -129,9 +174,9 @@ class SHIFTDataset(_SHIFTDataset):
             type_param = cls.shift_type.value
             if system(f"{executable} -m shift_dev.download --view \"{view_param}\" --group \"all\" --split \"all\" --framerate \"{frame_param}\" --shift \"{type_param}\" {root}") != 0:
                 raise RuntimeError("Failed to download the SHIFT dataset. Please check your internet connection and try again.")
-            print("INFO: Dataset archive downloaded and extracted.")
+            if not silent: print("INFO: Dataset archive downloaded and extracted.")
         else:
-            print("INFO: Dataset archive found in the root directory. Skipping download.")
+            if not silent: print("INFO: Dataset archive found in the root directory. Skipping download.")
 
     def __getitem__(self, idx: int) -> DataDict:
         queried = super().__getitem__(idx)
@@ -192,18 +237,24 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         train: bool = True, valid: bool = False, subset_type: SubsetType = SubsetType.NORMAL,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
     ):
+        # Ensure the dataset is downloaded and split correctly
+        super().download(path.join(root, self.dataset_name), force=force_download)
+        new_root = path.join(root, self.dataset_name, subset_type.value)
+        self.subset_split(root=new_root, origin=self.root, force=force_download)
+
         # Let the original constructor operate correctly.
         self.dataset_name = SHIFTDataset.dataset_name
+        from shift_dev.dataloader import shift_dataset
+        shift_dataset._SHIFTScalabelLabels = create_instant_labelclass(annotation_root_suffix="_SUBSET", subset_name=subset_type.value)
         super().__init__(
             root=root, force_download=force_download,
             train=train, valid=valid,
             transform=transform, target_transform=target_transform
         )
         del self.dataset_name
+        shift_dataset._SHIFTScalabelLabels = _SHIFTScalabelLabels  # Restore the original class
 
-        # Set the root directory based on the subset type.
-        new_root = path.join(root, self.dataset_name, subset_type.value)
-        self.subset_split(root=new_root, origin=self.root, force=force_download)
+        # Set the root directory based on the subset type
         self.root = new_root
 
     @classmethod
