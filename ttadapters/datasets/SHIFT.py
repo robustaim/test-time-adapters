@@ -3,7 +3,7 @@ SHIFT Dataset DevKit
 python download.py --view "[front]" --group "[img, det_2d]" --split "all" --framerate "[images]" --shift "discrete" ./data/SHIFT
 """
 from shift_dev import SHIFTDataset as _SHIFTDataset
-from shift_dev.dataloader.shift_dataset import _SHIFTScalabelLabels, DataBackend, HDF5Backend, _get_extension
+from shift_dev.dataloader.shift_dataset import _SHIFTScalabelLabels, Scalabel, DataBackend, HDF5Backend, _get_extension
 from shift_dev.types import Keys, DataDict
 from shift_dev.utils.backend import ZipBackend
 
@@ -58,7 +58,7 @@ def create_instant_labelclass(annotation_root_suffix: str = "_SUBSET", subset_na
                 data_path = path.join(
                     data_root, "discrete", framerate, split, view, f"{data_file}{ext}"
                 )
-            super().__init__(data_path, annotation_path, data_backend=backend, **kwargs)
+            super(_SHIFTScalabelLabels, self).__init__(data_path, annotation_path, data_backend=backend, **kwargs)
     return SHIFTScalabelLabelsForSubset
 
 
@@ -238,14 +238,16 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
     ):
         # Let the original constructor operate correctly
-        self.dataset_name = SHIFTDataset.dataset_name
+        new_root = path.join(root, self.dataset_name, subset_type.value)
+        self.dataset_name = SHIFTDataset.dataset_name  # override the dataset name to use the original one
+        self.root = path.join(root, self.dataset_name, self.shift_type.value)
 
         # Ensure the dataset is downloaded and split correctly
-        super().download(path.join(root, self.dataset_name), force=force_download)
-        new_root = path.join(root, self.dataset_name, subset_type.value)
+        super().download(self.root, force=force_download)
         self.subset_split(root=new_root, origin=self.root, force=force_download)
 
         # Create an instant _SHIFTScalabelLabels class to create a new one for the subset
+        # WARNING: This does not work with multi-threading.
         from shift_dev.dataloader import shift_dataset
         shift_dataset._SHIFTScalabelLabels = create_instant_labelclass(annotation_root_suffix="_SUBSET", subset_name=subset_type.value)
         super().__init__(
