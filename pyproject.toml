@@ -9,6 +9,7 @@ dependencies = [
     "torchvision",
     "accelerate",
     "transformers>=4.52.3",
+    "ultralytics>=8.3.169",
     "numpy>=2.3.1",
     "supervision>=0.25.1",
     "shift-dev",
