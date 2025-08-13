@@ -52,6 +52,7 @@ from .base import BaseDataset
 class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     download_method = datasets.utils.download_and_extract_archive
     download_url = "https://drive.google.com/file/d/1b75MBq7MbDQUc682IoECIekoRim_Ydk1/view?usp=sharing"
+    alternate_url = "https://drive.google.com/file/d/1LnWzvO6ymr5MA1ITYjni3-FOjoyZx6uS/view?usp=sharing"
     dataset_name = "GOT10k"
     file_name = "full_data.zip"
     extract_method = datasets.utils.extract_archive
@@ -74,14 +75,14 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     @classmethod
     def download(cls, root: str, force: bool = False):
         print(f"INFO: Downloading '{cls.dataset_name}' from google drive to {root}...")
-        if force or not path.isfile(path.join(root, cls.file_name)):
+        downloaded = path.isfile(path.join(root, cls.file_name))
+        extracted = not any(not path.isdir(path.join(root, target)) for target in ("train", "val", "test"))
+        if force or not (downloaded or extracted):
             cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
             print("INFO: Dataset archive downloaded and extracted.")
         else:
             print("INFO: Dataset archive found in the root directory. Skipping download.")
-            if not path.isdir(path.join(root, "train")) \
-                    or not path.isdir(path.join(root, "val")) or not path.isdir(path.join(root, "test")) \
-                    :
+            if not extracted:
                 cls.extract_method(from_path=path.join(root, cls.file_name), to_path=root)
 
     @property
