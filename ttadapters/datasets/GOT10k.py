@@ -102,7 +102,11 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
         downloaded = path.isfile(path.join(root, cls.file_name))
         extracted = not any(not path.isdir(path.join(root, target)) for target in ("train", "val", "test"))
         if force or not (downloaded or extracted):
-            cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
+            try:
+                cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
+            except RuntimeError:
+                print("INFO: Trying to download from the alternate link...")
+                cls.download_method(cls.alternate_url, download_root=root, extract_root=root, filename=cls.file_name)
             print("INFO: Dataset archive downloaded and extracted.")
         else:
             print("INFO: Dataset archive found in the root directory. Skipping download.")
