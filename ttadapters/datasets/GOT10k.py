@@ -72,6 +72,23 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
             self.root = path.join(self.root, "test")
 
         super().__init__(root=self.root, transform=transform, target_transform=target_transform)
+        self._load_data()
+
+    def _load_data(self):
+        sequences = defaultdict(list)
+        for idx, (img_path, _) in enumerate(self.samples):
+            seq_name = path.dirname(img_path)
+            sequences[seq_name].append((idx, img_path))
+
+        for seq_name in sequences:
+            sequences[seq_name].sort(key=lambda x: x[1])
+
+        targets = []
+        for seq_name, frames in sequences.items():
+            gt_path = path.join(seq_name, 'groundtruth.txt')
+            if path.exists(gt_path):
+                targets.extend(np.loadtxt(gt_path, delimiter=','))
+        self.targets = targets
 
     @classmethod
     def download(cls, root: str, force: bool = False):
@@ -92,53 +109,18 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
 
 
 class PairedGOT10kDataset(Dataset):
-    def __init__(self, base_dataset: GOT10kDataset, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
+    def __init__(self, base_dataset: GOT10kDataset):
         super().__init__()
         self.base_dataset = base_dataset
-        self.transform = transform
-        self.target_transform = target_transform
         self.pairs = self._create_pairs()
         self.use_teacher_forcing = False
 
     def _create_pairs(self):
-        sequences = defaultdict(list)
-        for idx, (img_path, _) in enumerate(self.base_dataset.samples):
-            seq_name = path.dirname(img_path)
-            sequences[seq_name].append((idx, img_path))
-
-        for seq_name in sequences:
-            sequences[seq_name].sort(key=lambda x: x[1])
-
         pairs = []
         for seq_name, frames in sequences.items():
-            gt_path = path.join(seq_name, 'groundtruth.txt')
             if path.exists(gt_path):
-                groundtruth = np.loadtxt(gt_path, delimiter=',')
-
-                # Get original image dimensions for normalization
-                img_path = frames[0][1]  # Use first frame to get dimensions
-                with Image.open(img_path) as img:
-                    orig_w, orig_h = img.size
-
                 # Normalize groundtruth coordinates
                 for i in range(len(frames) - 1):
-                    # Original format: [x_min, y_min, width, height]
-                    # Convert to normalized coordinates
-                    # Result format: [x_center, y_center, width, height]
-                    gt_curr = groundtruth[i + 1].copy()
-                    gt_prev = groundtruth[i].copy()
-
-                    # Normalize coordinates
-                    gt_prev[0] = (gt_prev[0] + gt_prev[2]/2) / orig_w  # x_center
-                    gt_prev[1] = (gt_prev[1] + gt_prev[3]/2) / orig_h  # y_center
-                    gt_prev[2] /= orig_w  # width
-                    gt_prev[3] /= orig_h  # height
-
-                    gt_curr[0] = (gt_curr[0] + gt_curr[2]/2) / orig_w  # x_center
-                    gt_curr[1] = (gt_curr[1] + gt_curr[3]/2) / orig_h  # y_center
-                    gt_curr[2] /= orig_w  # width
-                    gt_curr[3] /= orig_h  # height
-
                     pairs.append({
                         'prev_idx': frames[i][0],
                         'curr_idx': frames[i + 1][0],
@@ -178,7 +160,7 @@ class PairedGOT10kDataset(Dataset):
         # Get unique sequence paths efficiently using dict.fromkeys()
         sequences = list(dict.fromkeys(path.dirname(img_path) for img_path, _ in base_dataset.samples))
 
-        # Set random seed and shuffle sequences
+        # Set random seed and sequences
         random.seed(seed)
         random.shuffle(sequences)
         split_idx = int(len(sequences) * train_ratio)
