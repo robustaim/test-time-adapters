@@ -44,6 +44,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import datasets
 
+from gdown.exceptions import FileURLRetrievalError
+
 import numpy as np
 import pandas as pd
 
@@ -104,7 +106,7 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
         if force or not (downloaded or extracted):
             try:
                 cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
-            except RuntimeError:
+            except FileURLRetrievalError:
                 print("INFO: Trying to download from the alternate link...")
                 cls.download_method(cls.alternate_url, download_root=root, extract_root=root, filename=cls.file_name)
             print("INFO: Dataset archive downloaded and extracted.")
