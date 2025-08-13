@@ -38,9 +38,10 @@ from collections import defaultdict
 from os import path
 import random
 
+import torch
 from torch.utils.data import Dataset
 from torchvision import datasets
-import torch
+from torchvision.ops import box_convert
 
 import numpy as np
 import pandas as pd
@@ -91,9 +92,11 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
 
 
 class PairedGOT10kDataset(Dataset):
-    def __init__(self, base_dataset: GOT10kDataset):
+    def __init__(self, base_dataset: GOT10kDataset, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
         super().__init__()
         self.base_dataset = base_dataset
+        self.transform = transform
+        self.target_transform = target_transform
         self.pairs = self._create_pairs()
         self.use_teacher_forcing = False
 
@@ -164,7 +167,14 @@ class PairedGOT10kDataset(Dataset):
         return prev_img, curr_img, prev_gt, curr_gt
 
     @classmethod
-    def create_train_val_split(cls, base_dataset: GOT10kDataset, train_ratio=0.9, seed=42):
+    def create_train_val_split(
+        cls,
+        base_dataset: GOT10kDataset,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        train_ratio=0.9,
+        seed=42
+    ):
         # Get unique sequence paths efficiently using dict.fromkeys()
         sequences = list(dict.fromkeys(path.dirname(img_path) for img_path, _ in base_dataset.samples))
 
