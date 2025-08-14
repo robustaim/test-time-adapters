@@ -157,8 +157,8 @@ class SHIFTDataset(_SHIFTDataset):
     def download(cls, root: str, force: bool = False, silent: bool = False):
         if not silent: print(f"INFO: Downloading '{cls.dataset_name}' from file server to {root}...")
         frame_dir = cls.framerate.value if cls.framerate != cls.FrameRate.ALL else "images"
-        if "continuous\\" in root:
-            root = root.split("continuous\\")
+        if "continuous\\" in root or "continuous/" in root:
+            root = root.split("continuous\\") if "\\" in root else root.split("continuous/")
             root = path.join(root[0], "continuous", frame_dir, root[1])
             train_dir = path.join(root, "train")
         else:
