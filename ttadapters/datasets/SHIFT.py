@@ -159,7 +159,7 @@ class SHIFTDataset(_SHIFTDataset):
         frame_dir = cls.framerate.value if cls.framerate != cls.FrameRate.ALL else "images"
         if "continuous\\" in root:
             root = root.split("continuous\\")
-            root = path.join(root[0], "continuous", root[1], frame_dir)
+            root = path.join(root[0], "continuous", frame_dir, root[1])
             train_dir = path.join(root, "train")
         else:
             train_dir = path.join(root, frame_dir, "train")
