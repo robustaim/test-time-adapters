@@ -267,7 +267,7 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is started...")
             for sett in ['train', 'val']:
                 print("INFO: Splitting", sett)
-                data = load(open(path.join(origin, cls.shift_type.value, "images", sett, "front", "det_2d.json")))
+                data = load(open(path.join(origin, "images", sett, "front", "det_2d.json")))
 
                 # Detailed separation
                 for weather in ['clear', 'cloudy', 'overcast', 'foggy', 'rainy']:
@@ -280,18 +280,17 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
                         _id = f"{weather}_{time}"
                         save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
                         makedirs(save_path)
-                        dump(locals()[_id], open(path.join(save_path, "det_2d.json"), "w"))
+                        dump(locals()[time], open(path.join(save_path, "det_2d.json"), "w"))
 
                 # Simple separation
                 normal = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == 'clear' and d['attributes']['timeofday_coarse'] == 'daytime'])
                 corrupted = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] != 'clear' or d['attributes']['timeofday_coarse'] != 'daytime'])
                 print(f"INFO: simple weather datasets - Normal: {len(normal['frames'])}, Corrupted: {len(corrupted['frames'])}")
 
-                for time in ['normal', 'corrupted']:
-                    _id = time
-                    save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
+                for weather in ['normal', 'corrupted']:
+                    save_path = path.join(root, weather, cls.shift_type.value, "images", sett, "front")
                     makedirs(save_path)
-                    dump(locals()[_id], open(path.join(save_path, "det_2d.json"), "w"))
+                    dump(locals()[weather], open(path.join(save_path, "det_2d.json"), "w"))
 
         else:
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is already done. Skipping...")
