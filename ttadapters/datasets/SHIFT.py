@@ -292,11 +292,11 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
                     dump(locals()[weather], open(path.join(save_path, "det_2d.json"), "w"))
 
                 # Detailed separation
-                for weather in ["clear", "cloudy", "foggy", "rainy", "overcast"]:
+                for weather in ["clear", "rainy", "cloudy", "foggy", "overcast"]:
                     daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "daytime"])
                     night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "night"])
                     dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "dawn/dusk"])
-                    print(f"INFO:<{weather}> weather datasets - Daytime: {len(daytime['frames'])}, Night: {len(night['frames'])}, Dawn: {len(dawn['frames'])}")
+                    print(f"INFO: <{weather}> weather datasets - Daytime: {len(daytime['frames'])}, Night: {len(night['frames'])}, Dawn: {len(dawn['frames'])}")
 
                     for time in ["daytime", "night", "dawn"]:
                         _id = f"{weather}_{time}"
