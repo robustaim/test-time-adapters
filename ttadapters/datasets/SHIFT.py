@@ -157,12 +157,18 @@ class SHIFTDataset(_SHIFTDataset):
     def download(cls, root: str, force: bool = False, silent: bool = False):
         if not silent: print(f"INFO: Downloading '{cls.dataset_name}' from file server to {root}...")
         frame_dir = cls.framerate.value if cls.framerate != cls.FrameRate.ALL else "images"
-        if "continuous\\" in root or "continuous/" in root:
+        if "continuous\\" in root or "continuous/" in root:  # continuous
             root = root.split("continuous\\") if "\\" in root else root.split("continuous/")
+            data_root = root[0]
             root = path.join(root[0], "continuous", frame_dir, root[1])
             train_dir = path.join(root, "train")
-        else:
-            train_dir = path.join(root, frame_dir, "train")
+        else:  # discrete
+            if "discrete\\" in root or "discrete/" in root:
+                train_dir = path.join(root, frame_dir, "train")
+                data_root = path.dirname(root)
+            else:
+                train_dir = path.join(root, "discrete", frame_dir, "train")
+                data_root = root
         if force:  # If force is True, remove the existing dataset directory.
             shutil.rmtree(root, ignore_errors=True)
         check_dirs = [path.isdir(path.join(train_dir, view.value)) for view in cls.views_to_load]
@@ -171,8 +177,8 @@ class SHIFTDataset(_SHIFTDataset):
             frame_param = f"[{cls.framerate.value}]" if cls.framerate != cls.FrameRate.ALL else "all"
             view_param = ", ".join(f'"{view.value}"' for view in cls.views_to_load)
             view_param = "all" if "all" in view_param else f"[{view_param}]"
-            type_param = cls.shift_type.value
-            if system(f"{executable} -m shift_dev.download --view \"{view_param}\" --group \"all\" --split \"all\" --framerate \"{frame_param}\" --shift \"{type_param}\" {root}") != 0:
+            type_param = cls.shift_type.value()
+            if system(f"{executable} -m shift_dev.download --view \"{view_param}\" --group \"all\" --split \"all\" --framerate \"{frame_param}\" --shift \"{type_param}\" {data_root}") != 0:
                 raise RuntimeError("Failed to download the SHIFT dataset. Please check your internet connection and try again.")
             if not silent: print("INFO: Dataset archive downloaded and extracted.")
         else:
@@ -240,10 +246,9 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         # Let the original constructor operate correctly
         new_root = path.join(root, self.dataset_name, subset_type.value)
         self.dataset_name = SHIFTDataset.dataset_name  # override the dataset name to use the original one
-        self.root = path.join(root, self.dataset_name, self.shift_type.value)
 
         # Ensure the dataset is downloaded and split correctly
-        super().download(self.root, force=force_download)
+        super().download(path.join(root, self.dataset_name, self.shift_type.value), force=force_download)
         self.subset_split(root=new_root, origin=self.root, force=force_download)
 
         # Create an instant _SHIFTScalabelLabels class to create a new one for the subset
@@ -257,7 +262,7 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         )
 
         # Set the root directory based on the subset type
-        del self.dataset_name
+        del self.dataset_name  # recover the dataset name
         shift_dataset._SHIFTScalabelLabels = _SHIFTScalabelLabels  # Restore the original class
         self.root = new_root
 
@@ -267,27 +272,27 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is started...")
             for sett in ['train', 'val']:
                 print("INFO: Splitting", sett)
-                data = load(open(path.join(origin, "images", sett, "front", "det_2d.json")))
+                data = load(open(path.join(origin, cls.shift_type.value, "images", sett, "front", "det_2d.json")))
 
                 # Detailed separation
-                for weather in ['clear', 'cloudy', 'overcast', 'foggy', 'rainy']:
-                    daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == 'daytime'])
-                    night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == 'night'])
-                    dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == 'dawn/dusk'])
+                for weather in ["clear", "cloudy", "overcast", "foggy", "rainy"]:
+                    daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "daytime"])
+                    night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "night"])
+                    dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "dawn/dusk"])
                     print(f"INFO: {weather} weather datasets - Daytime: {len(daytime['frames'])}, Night: {len(night['frames'])}, Dawn: {len(dawn['frames'])}")
 
-                    for time in ['daytime', 'night', 'dawn']:
+                    for time in ["daytime", "night", "dawn"]:
                         _id = f"{weather}_{time}"
                         save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
                         makedirs(save_path)
                         dump(locals()[time], open(path.join(save_path, "det_2d.json"), "w"))
 
                 # Simple separation
-                normal = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == 'clear' and d['attributes']['timeofday_coarse'] == 'daytime'])
-                corrupted = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] != 'clear' or d['attributes']['timeofday_coarse'] != 'daytime'])
+                normal = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == "clear" and d['attributes']['timeofday_coarse'] == "daytime"])
+                corrupted = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] != "clear" or d['attributes']['timeofday_coarse'] != "daytime"])
                 print(f"INFO: simple weather datasets - Normal: {len(normal['frames'])}, Corrupted: {len(corrupted['frames'])}")
 
-                for weather in ['normal', 'corrupted']:
+                for weather in ["normal", "corrupted"]:
                     save_path = path.join(root, weather, cls.shift_type.value, "images", sett, "front")
                     makedirs(save_path)
                     dump(locals()[weather], open(path.join(save_path, "det_2d.json"), "w"))
