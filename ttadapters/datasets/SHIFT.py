@@ -269,11 +269,17 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
 
     @classmethod
     def subset_split(cls, root: str, origin: str, force: bool = False):
+        if cls.shift_type != SHIFTDataset.Type.DISCRETE:
+            raise ValueError("Subset split is only available for the discrete version of the SHIFT dataset.")
+
+        if path.basename(path.normpath(origin)) != cls.shift_type.value:
+            origin = path.join(origin, cls.shift_type.value)
+
         if force or not path.isdir(root):
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is started...")
             for sett in ['train', 'val']:
                 print("INFO: Splitting", sett)
-                data = load(open(path.join(origin, cls.shift_type.value, "images", sett, "front", "det_2d.json")))
+                data = load(open(path.join(origin, "images", sett, "front", "det_2d.json")))
 
                 # Detailed separation
                 for weather in ["clear", "cloudy", "overcast", "foggy", "rainy"]:
