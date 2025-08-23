@@ -281,29 +281,28 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
                 print("INFO: Splitting", sett)
                 data = load(open(path.join(origin, "images", sett, "front", "det_2d.json")))
 
-                # Detailed separation
-                for weather in ["clear", "cloudy", "overcast", "foggy", "rainy"]:
-                    daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "daytime"])
-                    night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "night"])
-                    dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "dawn/dusk"])
-                    print(f"INFO: {weather} weather datasets - Daytime: {len(daytime['frames'])}, Night: {len(night['frames'])}, Dawn: {len(dawn['frames'])}")
-
-                    for time in ["daytime", "night", "dawn"]:
-                        _id = f"{weather}_{time}"
-                        save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
-                        makedirs(save_path)
-                        dump(locals()[time], open(path.join(save_path, "det_2d.json"), "w"))
-
                 # Simple separation
                 normal = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == "clear" and d['attributes']['timeofday_coarse'] == "daytime"])
                 corrupted = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] != "clear" or d['attributes']['timeofday_coarse'] != "daytime"])
-                print(f"INFO: simple weather datasets - Normal: {len(normal['frames'])}, Corrupted: {len(corrupted['frames'])}")
+                print(f"INFO: <simple> weather datasets - Normal: {len(normal['frames'])}, Corrupted: {len(corrupted['frames'])}")
 
                 for weather in ["normal", "corrupted"]:
                     save_path = path.join(root, weather, cls.shift_type.value, "images", sett, "front")
                     makedirs(save_path)
                     dump(locals()[weather], open(path.join(save_path, "det_2d.json"), "w"))
 
+                # Detailed separation
+                for weather in ["clear", "cloudy", "foggy", "rainy", "overcast"]:
+                    daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "daytime"])
+                    night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "night"])
+                    dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == weather and d['attributes']['timeofday_coarse'] == "dawn/dusk"])
+                    print(f"INFO:<{weather}> weather datasets - Daytime: {len(daytime['frames'])}, Night: {len(night['frames'])}, Dawn: {len(dawn['frames'])}")
+
+                    for time in ["daytime", "night", "dawn"]:
+                        _id = f"{weather}_{time}"
+                        save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
+                        makedirs(save_path)
+                        dump(locals()[time], open(path.join(save_path, "det_2d.json"), "w"))
         else:
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is already done. Skipping...")
 
