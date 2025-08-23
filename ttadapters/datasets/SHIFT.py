@@ -211,7 +211,7 @@ class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
     shift_type = SHIFTDataset.Type.DISCRETE
 
 
-class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
+class SHIFTDiscreteSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
     dataset_name = "SHIFT_SUBSET"
 
     class SubsetType(Enum):
@@ -244,13 +244,13 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
     ):
         # Let the original constructor operate correctly
-        new_root = path.join(root, self.dataset_name, subset_type.value)
+        new_root = path.join(root, self.dataset_name)
         self.dataset_name = SHIFTDataset.dataset_name  # override the dataset name to use the original one
         self.root = path.join(root, self.dataset_name, self.shift_type.value)
 
         # Ensure the dataset is downloaded and split correctly
         super().download(self.root, force=force_download)
-        self.subset_split(root=new_root, origin=self.root, force=force_download)
+        self.subset_split(data_root=new_root, origin=self.root, force=force_download)
 
         # Create an instant _SHIFTScalabelLabels class to create a new one for the subset
         # WARNING: This does not work with multi-threading.
@@ -265,17 +265,17 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         # Set the root directory based on the subset type
         del self.dataset_name  # recover the dataset name
         shift_dataset._SHIFTScalabelLabels = _SHIFTScalabelLabels  # Restore the original class
-        self.root = new_root
+        self.root = path.join(new_root, subset_type.value)
 
     @classmethod
-    def subset_split(cls, root: str, origin: str, force: bool = False):
+    def subset_split(cls, data_root: str, origin: str, force: bool = False):
         if cls.shift_type != SHIFTDataset.Type.DISCRETE:
             raise ValueError("Subset split is only available for the discrete version of the SHIFT dataset.")
 
         if path.basename(path.normpath(origin)) != cls.shift_type.value:
             origin = path.join(origin, cls.shift_type.value)
 
-        if force or not path.isdir(root):
+        if force or not path.isdir(data_root):
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is started...")
             for sett in ['train', 'val']:
                 print("INFO: Splitting", sett)
@@ -287,7 +287,7 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
                 print(f"INFO: <simple> weather datasets - Normal: {len(normal['frames'])}, Corrupted: {len(corrupted['frames'])}")
 
                 for weather in ["normal", "corrupted"]:
-                    save_path = path.join(root, weather, cls.shift_type.value, "images", sett, "front")
+                    save_path = path.join(data_root, weather, cls.shift_type.value, "images", sett, "front")
                     makedirs(save_path)
                     dump(locals()[weather], open(path.join(save_path, "det_2d.json"), "w"))
 
@@ -300,14 +300,14 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
 
                     for time in ["daytime", "night", "dawn"]:
                         _id = f"{weather}_{time}"
-                        save_path = path.join(root, _id, cls.shift_type.value, "images", sett, "front")
+                        save_path = path.join(data_root, _id, cls.shift_type.value, "images", sett, "front")
                         makedirs(save_path)
                         dump(locals()[time], open(path.join(save_path, "det_2d.json"), "w"))
         else:
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is already done. Skipping...")
 
 
-class SHIFTClearDatasetForObjectDetection(SHIFTDataSubsetForObjectDetection):
+class SHIFTClearDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False,
@@ -320,7 +320,7 @@ class SHIFTClearDatasetForObjectDetection(SHIFTDataSubsetForObjectDetection):
         )
 
 
-class SHIFTCorruptedDatasetForObjectDetection(SHIFTDataSubsetForObjectDetection):
+class SHIFTCorruptedDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
     def __init__(
             self, root: str, force_download: bool = False,
             train: bool = True, valid: bool = False,
@@ -370,23 +370,3 @@ class SHIFTContinuous100DatasetForObjectDetection(SHIFTDataset):
     views_to_load = [SHIFTDataset.View.FRONT]
     framerate = SHIFTDataset.FrameRate.IMAGES
     shift_type = SHIFTDataset.Type.CONTINUOUS_100X
-
-
-class SHIFTDiscreteSubsetForObjectDetection(SHIFTDataset):
-    keys_to_load = [
-        Keys.images,
-        Keys.intrinsics,
-        Keys.boxes2d,
-        Keys.boxes2d_classes,
-        Keys.boxes2d_track_ids,
-    ]
-    views_to_load = [SHIFTDataset.View.FRONT]
-    framerate = SHIFTDataset.FrameRate.IMAGES
-    shift_type = SHIFTDataset.Type.DISCRETE
-
-    def __init__(
-            self, root: str, force_download: bool = False,
-            train: bool = True, valid: bool = False,
-            transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
-    ):
-        super().__init__(root, force_download, train, valid, transform, target_transform)

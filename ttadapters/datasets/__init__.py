@@ -1,6 +1,6 @@
 from .GOT10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
 from .SHIFT import (
-    SHIFTDiscreteDatasetForObjectDetection, SHIFTDataSubsetForObjectDetection, SHIFTClearDatasetForObjectDetection, SHIFTCorruptedDatasetForObjectDetection,
+    SHIFTDiscreteDatasetForObjectDetection, SHIFTDiscreteSubsetForObjectDetection, SHIFTClearDatasetForObjectDetection, SHIFTCorruptedDatasetForObjectDetection,
     SHIFTContinuousDatasetForObjectDetection, SHIFTContinuous10DatasetForObjectDetection, SHIFTContinuous100DatasetForObjectDetection
 )
 
