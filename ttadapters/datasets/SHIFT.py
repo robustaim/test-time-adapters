@@ -163,10 +163,10 @@ class SHIFTDataset(_SHIFTDataset):
             root = path.join(root[0], "continuous", frame_dir, root[1])
             train_dir = path.join(root, "train")
         else:  # discrete
-            if "discrete\\" in root or "discrete/" in root:
+            if path.basename(path.normpath(root)) == "discrete":
                 train_dir = path.join(root, frame_dir, "train")
                 data_root = path.dirname(root)
-            else:
+            else:  # not specified => assume that the root path is the dataset directory
                 train_dir = path.join(root, "discrete", frame_dir, "train")
                 data_root = root
         if force:  # If force is True, remove the existing dataset directory.
@@ -177,7 +177,7 @@ class SHIFTDataset(_SHIFTDataset):
             frame_param = f"[{cls.framerate.value}]" if cls.framerate != cls.FrameRate.ALL else "all"
             view_param = ", ".join(f'"{view.value}"' for view in cls.views_to_load)
             view_param = "all" if "all" in view_param else f"[{view_param}]"
-            type_param = cls.shift_type.value()
+            type_param = cls.shift_type.value
             if system(f"{executable} -m shift_dev.download --view \"{view_param}\" --group \"all\" --split \"all\" --framerate \"{frame_param}\" --shift \"{type_param}\" {data_root}") != 0:
                 raise RuntimeError("Failed to download the SHIFT dataset. Please check your internet connection and try again.")
             if not silent: print("INFO: Dataset archive downloaded and extracted.")
@@ -246,9 +246,10 @@ class SHIFTDataSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
         # Let the original constructor operate correctly
         new_root = path.join(root, self.dataset_name, subset_type.value)
         self.dataset_name = SHIFTDataset.dataset_name  # override the dataset name to use the original one
+        self.root = path.join(root, self.dataset_name, self.shift_type.value)
 
         # Ensure the dataset is downloaded and split correctly
-        super().download(path.join(root, self.dataset_name, self.shift_type.value), force=force_download)
+        super().download(self.root, force=force_download)
         self.subset_split(root=new_root, origin=self.root, force=force_download)
 
         # Create an instant _SHIFTScalabelLabels class to create a new one for the subset
