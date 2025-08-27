@@ -191,6 +191,8 @@ wandb/
 *.pth
 *.safetensors
 *.ckpt
+*.zip
+*.json
 
 # Dataset archives & huge annotations (SHIFT 등)
 data/**/img.zip
