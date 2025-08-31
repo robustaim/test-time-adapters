@@ -95,7 +95,7 @@ def collate_fn(batch, preprocessor=None):
             ) for item in batch]
         )
 
-def task_to_subset_types(sef, task: str):
+def task_to_subset_types(task: str):
     T = SHIFTDiscreteSubsetForObjectDetection.SubsetType
 
     # weather
@@ -266,7 +266,7 @@ def improve_test(device, batch_i, eval_every,
 
         improve = current_map50 >= best_map50
 
-        return current_map50, best_map50, improve
+    return current_map50, best_map50, improve
 
         
 
@@ -310,10 +310,10 @@ class SaveOutput:
         out = torch.var(out, dim=0)
         return out
     
-def extract_activation_alignment(model, device, data_root, reference_preprocessor):
+def extract_activation_alignment(model, device, data_root, reference_preprocessor, batch_size=32):
     train_dataloader = DataLoader(
         DatasetAdapterForTransformers(SHIFTClearDatasetForObjectDetection(root=data_root, train=True)), 
-        batch_size=32, collate_fn=partial(collate_fn, preprocessor=reference_preprocessor))
+        batch_size=batch_size, collate_fn=partial(collate_fn, preprocessor=reference_preprocessor))
     # model unfreeze
     for k, v in model.named_parameters():
         v.requires_grad = True

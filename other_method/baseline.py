@@ -34,6 +34,8 @@ class Baseline:
                  reference_model_id: str="PekingU/rtdetr_r50vd",
                  image_size: int=640, 
                  class_num: int=6, 
+                 valid_batch: int=16,
+                 clean_bn_extract_batch: int=32,
                  model_states: Path="/home/elicer/ptta/RT-DETR_R50vd_SHIFT_CLEAR.safetensors",
                  momentum: float=0.1,
                  mom_pre: float=0.07,
@@ -54,6 +56,8 @@ class Baseline:
             reference_model_id (str, optional): Pre-trained model reference ID.
             image_size (int, optional): Input image size.
             class_num (int, optional): Number of classes for detection.
+            valid_batch (int, optional): Number of valid dataset batch
+            clean_bn_extract_batch (int, optional): Number of BN extract batch for ActMAD
             model_states (Path, optional): Path to the model weights.
             momentum (float, optional): Momentum value for updates.
             mom_pre (float, optional): Initial momentum before adaptation.
@@ -76,6 +80,9 @@ class Baseline:
 
         self.image_size = image_size
         self.class_num = class_num
+        self.valid_batch = valid_batch
+        self.clean_bn_extract_batch = clean_bn_extract_batch
+
         self.model_states = model_states
 
         self.momentum = momentum
@@ -107,6 +114,8 @@ class Baseline:
         if self.model_arch=="rt_detr":
             reference_model_id = self.reference_model_id
             reference_config = RTDetrConfig.from_pretrained(reference_model_id, torch_dtype=torch.float32, return_dict=True)
+            reference_config.num_labels = self.class_num
+
             reference_config.image_size = self.image_size
             model = RTDetrForObjectDetection(config=reference_config)
             model_states = load_file(self.model_states)
@@ -189,7 +198,7 @@ class Baseline:
                     extras["clean_var_list_final"],
                     extras["chosen_bn_layers"]
                 ) = utils.extract_activation_alignment(
-                    model, device, self.data_root, reference_preprocessor
+                    model, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
                     )        
             elif self.method == "dua":
                 extras["tr_transform_adapt"] = transforms.Compose([
@@ -237,7 +246,7 @@ class Baseline:
             each_task_map_list = utils.aggregate_runs(all_results)
             utils.print_results(each_task_map_list)
 
-    def make_dataloader(self, task, reference_preprocessor, valid_batch: int=16):
+    def make_dataloader(self, task, reference_preprocessor):
         # tta train
         tta_train_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
             root=self.data_root, valid=False, task=task
@@ -256,13 +265,13 @@ class Baseline:
 
         tta_raw_data = DataLoader(
             utils.LabelDataset(tta_valid_dataset), 
-            batch_size=valid_batch, 
+            batch_size=self.valid_batch, 
             collate_fn=utils.naive_collate_fn
         )
         
         tta_valid_dataloader = DataLoader(
             utils.DatasetAdapterForTransformers(tta_valid_dataset),
-            batch_size=valid_batch, 
+            batch_size=self.valid_batch, 
             collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
         )
 
@@ -360,22 +369,22 @@ class Baseline:
 
             _ = model(img)
             model.eval()
+            if batch_i % self.eval_every == 0:
+                current_map50, best_map50, improve = utils.improve_test(self.device, batch_i, self.eval_every,
+                                            model, task, best_map50, tta_raw_data, tta_valid_dataloader, 
+                                            reference_preprocessor, classes_list)
+                if improve:
+                    print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
+                    best_map50 = current_map50
+                    best_state = copy.deepcopy(model.state_dict())
+                    no_imp_streak = 0
 
-            current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
-                                         model, task, tta_raw_data, tta_valid_dataloader, 
-                                         reference_preprocessor, classes_list)
-            if improve:
-                print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                best_map50 = current_map50
-                best_state = copy.deepcopy(model.state_dict())
-                no_imp_streak = 0
-
-            else:
-                no_imp_streak += 1
-                print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                if no_imp_streak >= self.patience:
-                    print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                    break
+                else:
+                    no_imp_streak += 1
+                    print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
+                    if no_imp_streak >= self.patience:
+                        print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
+                        break
 
         model.load_state_dict(best_state)
         with torch.inference_mode():
