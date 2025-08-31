@@ -1,22 +1,27 @@
+import os
+import io
+import logging
+from datetime import datetime
+from collections import defaultdict
+from functools import partial
+from typing import Optional, Callable
 
 import torch
-from torch import nn, optim
+from torch import nn
 from torch.utils.data import DataLoader
-import os, logging
-from datetime import datetime
+import torchvision.transforms.functional as TF
+
 from tqdm.auto import tqdm
-from tqdm.contrib.logging import logging_redirect_tqdm 
-from collections import defaultdict
-import io, contextlib
 from tqdm.contrib.logging import logging_redirect_tqdm
-from ttadapters.datasets import SHIFTClearDatasetForObjectDetection, SHIFTCorruptedDatasetForObjectDetection, SHIFTDiscreteSubsetForObjectDetection
-from ttadapters.datasets import BaseDataset
-from typing import Optional, Callable
+
 from supervision.metrics.mean_average_precision import MeanAveragePrecision
 from supervision.detection.core import Detections
-from functools import partial
-import copy
-import torchvision.transforms.functional as TF
+
+from ttadapters.datasets import (
+    SHIFTClearDatasetForObjectDetection,
+    SHIFTDiscreteSubsetForObjectDetection,
+    BaseDataset,
+)
 
 class SHIFTCorruptedTaskDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
     def __init__(
@@ -207,19 +212,21 @@ def print_results(result):
     for k, v in result["per_class_mean@0.95"].items():
         print(f"{k}: {v:.3f}")
 
-def setup_logger(save_dir, name="dua", level=logging.INFO, mirror_to_stdout=True):
-    os.makedirs(save_dir, exist_ok=True)
-    log_path = os.path.join(save_dir, f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log")
-
+def setup_logger(save_dir=None, name="direct_method", level=logging.INFO, mirror_to_stdout=True):
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.handlers.clear()
 
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
-    # 파일 핸들러(전체 기록)
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
+
+    log_path = None
+    # 파일 핸들러: save_dir가 주어졌을 때만 생성
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        log_path = os.path.join(save_dir, f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log")
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
 
     # 화면 핸들러(미러링)
     if mirror_to_stdout:
@@ -381,7 +388,6 @@ def rotate_batch_with_labels(batch, labels):
             img = tensor_rot_270(img)
         images.append(img.unsqueeze(0))
     return torch.cat(images)
-
 
 def rotate_batch(batch, label):
     if label == 'rand':
