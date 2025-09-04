@@ -1,5 +1,7 @@
 import os
 import io
+import math
+import copy
 import logging
 from datetime import datetime
 from collections import defaultdict
@@ -8,6 +10,8 @@ from typing import Optional, Callable
 
 import torch
 from torch import nn
+from torchvision.ops import box_convert
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 import torchvision.transforms.functional as TF
 
@@ -146,7 +150,7 @@ def test(model, device, task, tta_raw_data, tta_valid_dataloader, reference_prep
 
         targets.extend(annotations)
         predictions.extend(detections)
-    
+
     mean_average_precision = MeanAveragePrecision().update(
     predictions=predictions,
     targets=targets,
@@ -155,7 +159,7 @@ def test(model, device, task, tta_raw_data, tta_valid_dataloader, reference_prep
         f"{classes_list[idx]}_mAP@0.95": mean_average_precision.ap_per_class[idx].mean()
         for idx in mean_average_precision.matched_classes
     }
-
+    
     print(f"mAP@0.95_{task}: {mean_average_precision.map50_95:.3f}")
     print(f"mAP50_{task}: {mean_average_precision.map50:.3f}")
     print(f"mAP75_{task}: {mean_average_precision.map75:.3f}")
@@ -260,13 +264,13 @@ def improve_test(device, batch_i, eval_every,
                  model, task, best_map50,
                  tta_raw_data, tta_valid_dataloader, 
                  reference_preprocessor, classes_list):
-    if batch_i % eval_every == 0:
-        current_result = test(model, device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
-        current_map50 = current_result.get("mAP50", current_result.get("mAP@0.50", -1.0))
+    
+    current_result = test(model, device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
+    current_map50 = current_result.get("mAP50", current_result.get("mAP@0.50", -1.0))
 
-        improve = current_map50 >= best_map50
+    improve = current_map50 >= best_map50
 
-    return current_map50, best_map50, improve
+    return current_map50, improve
 
         
 
@@ -426,3 +430,82 @@ def get_adaption_inputs_default(img, tr_transform_adapt, device, n=8):
     inputs_ssh, _ = rotate_batch(inputs, 'rand')
     inputs_ssh = inputs_ssh.to(device, non_blocking=True)
     return inputs_ssh
+
+# Mean Teacher-specific function
+def create_model(model, ema=False):
+    model_copy = copy.deepcopy(model)
+
+    if ema:
+        for param in model_copy.parameters():
+            param.detach_()
+    return model_copy
+
+
+
+def make_scheduler(optimizer, 
+                   *, 
+                   warmup_steps: int,
+                   initial_lr: float,
+                   decay_total_steps: int | None,
+                   total_steps: float,
+                   base_lr: float = 1e-4,
+                   ):
+    """
+    Create a LambdaLR scheduler that mimics adjust_learning_rate
+    """
+
+    if decay_total_steps is not None:
+        assert decay_total_steps >= total_steps, \
+            "Expected decay_total_steps >= total_steps"
+        
+    def linear_rampup(step: int, ramp_steps: int) -> float:
+        """Linear rampup"""
+        if ramp_steps <= 0:   # End warm-up
+            return 1.0
+        if step >= ramp_steps:
+            return 1.0
+        if step <= 0:
+            return 0.0
+        return step / float(ramp_steps)
+
+
+    def cosine_rampdown(step: int, total_decay_steps: int) -> float:
+        step = max(0, min(step, total_decay_steps))
+        return 0.5 * (math.cos(math.pi * step / float(total_decay_steps)) + 1.0)
+
+    def lr_lambda(global_step: int) -> float:
+        # Linear warm-up
+        ramp = linear_rampup(global_step, warmup_steps)
+        lr_val = ramp * (base_lr - initial_lr) + initial_lr
+
+        if decay_total_steps is not None:
+            decay_scale = cosine_rampdown(global_step, decay_total_steps)
+            lr_val *= decay_scale
+
+        return lr_val / base_lr
+
+    return LambdaLR(optimizer, lr_lambda)
+
+def make_label(pseudo_label : list, size):
+    height, width = size
+    def normalize_boxes(boxes, height, width):
+        # 1. xyxy → cxcywh 
+        boxes_cxcywh_norm = box_convert(boxes, 'xyxy', 'cxcywh')
+
+        # 2. normalize (convert to actual pixel coordinates)
+        boxes_cxcywh_norm[:, [0, 2]] /= width
+        boxes_cxcywh_norm[:, [1, 3]] /= height
+        return boxes_cxcywh_norm
+    labels=[]
+    for i in pseudo_label:        
+        label = {"class_labels" : i["labels"],
+                  "boxes" : normalize_boxes(i["boxes"], height, width)}
+        labels.append(label)
+    return labels
+
+def update_ema_variables(model, ema_model, alpha, global_step):
+    # Use the true average until the exponential average is more correct
+    alpha = min(1 - 1 / (global_step + 1), alpha)
+    for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+        ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
+    

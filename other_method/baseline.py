@@ -7,7 +7,11 @@ from functools import partial
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
+import torch.backends.cudnn as cudnn
 from torchvision import transforms
+from torchvision.transforms import RandAugment
+
+from supervision.detection.core import Detections
 
 from transformers import (
     RTDetrForObjectDetection,
@@ -37,10 +41,14 @@ class Baseline:
                  valid_batch: int=16,
                  clean_bn_extract_batch: int=32,
                  model_states: Path="/home/elicer/ptta/RT-DETR_R50vd_SHIFT_CLEAR.safetensors",
+                 lr: float=1e-4,
                  momentum: float=0.1,
                  mom_pre: float=0.07,
                  decay_factor: float=0.97,
                  min_momentum_constant: float=0.01,
+                 use_scheduler: bool=False,
+                 warmup_steps: int=50,
+                 decay_total_steps: int=20,
                  patience: int=10,
                  eval_every: int=10,
                  enable_log_file: bool=False):
@@ -85,10 +93,14 @@ class Baseline:
 
         self.model_states = model_states
 
+        self.lr = lr
         self.momentum = momentum
         self.mom_pre = mom_pre
         self.decay_factor= decay_factor
         self.min_momentum_constant=min_momentum_constant
+        self.use_scheduler=use_scheduler
+        self.warmup_steps=warmup_steps # for mean-teacher method
+        self.decay_total_steps=decay_total_steps # for mean-teacher method
 
         self.patience = patience
         self.eval_every = eval_every
@@ -162,7 +174,7 @@ class Baseline:
             "actmad": self.actmad,
             "norm": self.norm,
             "dua": self.dua,
-            # "mean_teacher": self.mean_teacher,
+            "mean_teacher": self.mean_teacher,
             # "wwh": self.wwh
         }
         return methods[self.method]
@@ -199,7 +211,10 @@ class Baseline:
                     extras["chosen_bn_layers"]
                 ) = utils.extract_activation_alignment(
                     model, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
-                    )        
+                    )      
+
+                extras["optimizer_actmad"]  = optim.SGD(model.parameters(), lr=1e-5, momentum=0.3, weight_decay=1e-4, nesterov=True)
+            
             elif self.method == "dua":
                 extras["tr_transform_adapt"] = transforms.Compose([
                 transforms.ToPILImage(),
@@ -207,6 +222,31 @@ class Baseline:
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
             ])
+                
+            elif self.method == "mean_teacher":
+                extras["student_model"] = utils.create_model(model, ema=False)
+                extras["teacher_model"] = utils.create_model(model, ema=True)
+
+                for p in extras["student_model"].parameters():
+                    p.requires_grad_(True)
+                for p in extras["teacher_model"].parameters():
+                    p.requires_grad_(False)
+
+                extras["optimizer_mt"] = optim.SGD(
+                extras["student_model"].parameters(),
+                lr=self.lr, momentum=self.momentum
+                )
+                    
+                extras["weak_augmentation"] = transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                ])
+                extras["strong_augmentation"] = transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)),
+                    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+                    transforms.RandomGrayscale(p=0.2),
+                    transforms.GaussianBlur(5, sigma=(0.1, 2.0)),
+                ])
                 
             # Save clean state of the model
             carry_state = copy.deepcopy(model.state_dict())
@@ -288,10 +328,10 @@ class Baseline:
     def actmad(self, *, model, save_dir, task, best_state, best_map50, no_imp_streak,
                tta_train_dataloader, tta_raw_data, tta_valid_dataloader,
                reference_preprocessor, classes_list,
-               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, **_):
+               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, **_):
         
         n_chosen_layers = len(chosen_bn_layers)
-        optimizer = optim.SGD(model.parameters(), lr=1e-5, momentum=0.3, weight_decay=1e-4, nesterov=True)
+        
         l1_loss = nn.L1Loss(reduction='mean')
 
         for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
@@ -300,7 +340,7 @@ class Baseline:
                 if isinstance(m, nn.LayerNorm):
                     m.eval()
 
-            optimizer.zero_grad()
+            optimizer_actmad.zero_grad()
             save_outputs_tta = [utils.SaveOutput() for _ in range(n_chosen_layers)]
 
             hook_list_tta = [chosen_bn_layers[x].register_forward_hook(save_outputs_tta[x])
@@ -308,6 +348,7 @@ class Baseline:
             
             img = input['pixel_values'].to(self.device, non_blocking=True)
             _ = model(img)
+
             batch_mean_tta = [save_outputs_tta[x].get_out_mean() for x in range(n_chosen_layers)]
             batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
 
@@ -321,7 +362,7 @@ class Baseline:
             loss = loss_mean + loss_var
 
             loss.backward()
-            optimizer.step()
+            optimizer_actmad.step()
 
             for z in range(n_chosen_layers):
                 save_outputs_tta[z].clear()
@@ -398,9 +439,9 @@ class Baseline:
 
         return carry_state, final_result
 
-    def dua(self, model, save_dir, tr_transform_adapt, task, best_state, best_map50, no_imp_streak,
-            tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
-            reference_preprocessor, classes_list, **_):
+    def dua(self, model, save_dir, task, best_state, best_map50, no_imp_streak, 
+             tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
+             reference_preprocessor, classes_list, tr_transform_adapt, **_):
         mom_pre = self.mom_pre
         for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
             model.eval()
@@ -416,22 +457,22 @@ class Baseline:
 
             _ = model(img)
             model.eval()
+            if batch_i % self.eval_every == 0:
+                current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
+                                            model, task, tta_raw_data, tta_valid_dataloader, 
+                                            reference_preprocessor, classes_list)
+                if improve:
+                    print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
+                    best_map50 = current_map50
+                    best_state = copy.deepcopy(model.state_dict())
+                    no_imp_streak = 0
 
-            current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
-                                         model, task, tta_raw_data, tta_valid_dataloader, 
-                                         reference_preprocessor, classes_list)
-            if improve:
-                print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                best_map50 = current_map50
-                best_state = copy.deepcopy(model.state_dict())
-                no_imp_streak = 0
-
-            else:
-                no_imp_streak += 1
-                print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                if no_imp_streak >= self.patience:
-                    print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                    break
+                else:
+                    no_imp_streak += 1
+                    print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
+                    if no_imp_streak >= self.patience:
+                        print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
+                        break
 
         model.load_state_dict(best_state)
         with torch.inference_mode():
@@ -444,9 +485,99 @@ class Baseline:
         carry_state = copy.deepcopy(model.state_dict())
 
         return carry_state, final_result
-    # def mean_teacher(self, model, save_dir, clean_mean_list_final, clean_var_list_final, chosen_bn_layers, task, best_state, tta_train_dataloader, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list):
+    def mean_teacher(self, model, save_dir, task, best_state, best_map50, no_imp_streak,
+            tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
+            reference_preprocessor, classes_list, student_model, teacher_model,
+            optimizer_mt, weak_augmentation, strong_augmentation, **_):
+        
+        student_model = student_model
+        teacher_model = teacher_model
 
-    # def wwh(self, model, save_dir, clean_mean_list_final, clean_var_list_final, chosen_bn_layers, task, best_state, tta_train_dataloader, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list):
+        teacher_model.eval()
+
+        optimizer = optimizer_mt
+        
+        cudnn.benchmark = True
+        global_step = 0
+
+        if self.use_scheduler:
+            scheduler= utils.make_scheduler(
+                optimizer=optimizer_mt,
+                warmup_steps=self.warmup_steps,
+                initial_lr=(self.lr/100),
+                decay_total_steps=self.decay_total_steps,
+                total_steps=len(tta_train_dataloader),
+                base_lr=self.lr
+            )
+        
+        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+            # 추후 image에 augment넣는 작업 추가 - fixmatch style 이용
+            imgs = input['pixel_values'].to(self.device, non_blocking=True)
+
+            student_input = torch.stack([strong_augmentation(img) for img in imgs], dim=0) # strong aug
+            teacher_input = torch.stack([weak_augmentation(img)  for img in imgs], dim=0) # weak aug
+
+            student_model.train()
+            teacher_model.eval()
+
+            # make pseudo label
+            with torch.no_grad():
+                teacher_outputs = teacher_model(teacher_input)
+
+            sizes = torch.tensor([[800, 1280]], device=self.device)
+
+            teacher_results = reference_preprocessor.post_process_object_detection(
+                teacher_outputs, target_sizes=sizes, threshold=0.3
+            )
+
+            pseudo_label = utils.make_label(teacher_results, (800, 1280))
+            
+            # student model train
+            optimizer.zero_grad(set_to_none=True)
+            student_outputs = student_model(pixel_values=student_input, labels=pseudo_label)
+            # student_outputs에서 loss 꺼내기.
+            loss = student_outputs.loss
+
+            loss.backward()
+            optimizer.step()
+
+            if self.use_scheduler:
+                scheduler.step()
+
+            utils.update_ema_variables(student_model, teacher_model, alpha=0.999, global_step=global_step)
+            global_step += 1
+
+            current_map50, improve = utils.improve_test(self.device, batch_i, self.eval_every,
+                                                teacher_model, task, best_map50, tta_raw_data, tta_valid_dataloader, 
+                                                reference_preprocessor, classes_list)
+            if improve:
+                print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
+                best_map50 = current_map50
+                best_state = copy.deepcopy(teacher_model.state_dict())
+                no_imp_streak = 0
+
+            else:
+                no_imp_streak += 1
+                print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
+                if no_imp_streak >= self.patience:
+                    print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
+                    break
+
+        teacher_model.load_state_dict(best_state)
+        with torch.inference_mode():
+            final_result = utils.test(teacher_model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
+        
+        save_path = os.path.join(save_dir, f"mean_teacher_model_{task}.pth")
+        torch.save(model.state_dict(), save_path)
+        print(f"Saved adapted Mean-Teacher model after task [{task}] → {save_path}")
+        
+        carry_state = copy.deepcopy(model.state_dict())
+
+        return carry_state, final_result
+
+    def wwh(self, model, save_dir, task, best_state, best_map50, no_imp_streak,
+            tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
+            reference_preprocessor, classes_list, **_):
 
 
 
