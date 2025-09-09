@@ -18,6 +18,7 @@ from transformers import (
     RTDetrImageProcessorFast,
     RTDetrConfig,
 )
+from transformers.models.rt_detr.modeling_rt_detr import RTDetrFrozenBatchNorm2d
 
 from transformers.image_utils import AnnotationFormat
 
@@ -175,7 +176,7 @@ class Baseline:
             "norm": self.norm,
             "dua": self.dua,
             "mean_teacher": self.mean_teacher,
-            # "wwh": self.wwh
+            "whw": self.whw
         }
         return methods[self.method]
     
@@ -210,7 +211,7 @@ class Baseline:
                     extras["clean_var_list_final"],
                     extras["chosen_bn_layers"]
                 ) = utils.extract_activation_alignment(
-                    model, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
+                    model, self.method, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
                     )      
 
                 extras["optimizer_actmad"]  = optim.SGD(model.parameters(), lr=1e-5, momentum=0.3, weight_decay=1e-4, nesterov=True)
@@ -247,6 +248,16 @@ class Baseline:
                     transforms.RandomGrayscale(p=0.2),
                     transforms.GaussianBlur(5, sigma=(0.1, 2.0)),
                 ])
+
+            elif self.method == "whw":
+                extras["model"], extras["optimizer_whw"] = utils.add_adapters(model, device=self.device, reduction_ratio=32, target_stages=[0, 1, 2, 3])
+                (
+                    extras["clean_mean_list_final"],
+                    extras["clean_var_list_final"],
+                    extras["chosen_bn_layers"]
+                ) = utils.extract_activation_alignment(
+                    model, self.method, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
+                    )
                 
             # Save clean state of the model
             carry_state = copy.deepcopy(model.state_dict())
@@ -403,7 +414,7 @@ class Baseline:
         for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
             model.eval()
             for module in model.modules():
-                if isinstance(module, torch.nn.BatchNorm2d):
+                if isinstance(module, RTDetrFrozenBatchNorm2d):
                     module.momentum = self.momentum
                     module.train()
             img = input['pixel_values'].to(self.device, non_blocking=True)
@@ -447,7 +458,7 @@ class Baseline:
             model.eval()
             mom_new = (mom_pre * self.decay_factor)
             for m in model.modules():
-                if isinstance(m, nn.BatchNorm2d):
+                if isinstance(m, RTDetrFrozenBatchNorm2d):
                     m.train()
                     m.momentum = mom_new + self.min_momentum_constant
             mom_pre = mom_new
@@ -575,9 +586,45 @@ class Baseline:
 
         return carry_state, final_result
 
-    def wwh(self, model, save_dir, task, best_state, best_map50, no_imp_streak,
+    def whw(self, save_dir, task, best_state, best_map50, no_imp_streak,
             tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
-            reference_preprocessor, classes_list, **_):
+            reference_preprocessor, classes_list, optimizer_whw, model, clean_mean_list_final, clean_var_list_final, **_):
+        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+            imgs = input['pixel_values'].to(self.device, non_blocking=True)
+            model.eval()
+            utils.freeze_backbone_except_adapters(model) # adapter를 제외한 다른 parameter들 freeze
+            cur_used = True
+            # div_thr = 2 * sum(model.s_div.values()) * 
+
+            # for weight regularization
+            init_weights = []
+            for p_idx, _p in enumerate(optimizer_whw.param_groups):
+                p = _p['params'][0]
+                init_weights.append(p.clone().detach())
+            
+            outputs, losses = model(imgs)
+            total_loss = sum([losses[k] for k in losses])
+            if total_loss > 0 and cur_used:
+                total_loss.backward()
+                optimizer_whw.step()
+            else:
+                pass
+            optimizer_whw.zero_grad()
+
+            with torch.no_grad():
+                # 여기서 val_dataset으로 가끔씩 평가하는 부분 나옴.
+                
+            
+
+
+        
+
+        # TODO
+        # ContinualTTA_ObjectDetection/detectron2/modeling/configure_adaptation_model.py에서
+        # model에 adapter 붙이는 부분 구현
+        # 나머지 학습 코드 구현
+        # 다른 method WHW에서 실험한것처럼 코드 고치기.
+        
 
 
 

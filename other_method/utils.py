@@ -9,11 +9,14 @@ from functools import partial
 from typing import Optional, Callable
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision.ops import box_convert
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 import torchvision.transforms.functional as TF
+
+from transformers.models.rt_detr.modeling_rt_detr import RTDetrFrozenBatchNorm2d
 
 from tqdm.auto import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -314,7 +317,7 @@ class SaveOutput:
         out = torch.var(out, dim=0)
         return out
     
-def extract_activation_alignment(model, device, data_root, reference_preprocessor, batch_size=32):
+def extract_activation_alignment(model, method, device, data_root, reference_preprocessor, batch_size=32):
     train_dataloader = DataLoader(
         DatasetAdapterForTransformers(SHIFTClearDatasetForObjectDetection(root=data_root, train=True)), 
         batch_size=batch_size, collate_fn=partial(collate_fn, preprocessor=reference_preprocessor))
@@ -323,9 +326,15 @@ def extract_activation_alignment(model, device, data_root, reference_preprocesso
         v.requires_grad = True
 
     chosen_bn_layers = []
-    for m in model.modules():
-        if isinstance(m, nn.LayerNorm):
-            chosen_bn_layers.append(m)
+    if method == "actmad": 
+        for m in model.modules():
+            if isinstance(m, nn.LayerNorm):
+                chosen_bn_layers.append(m)
+
+    else :
+        for m in model.modules():
+            if isinstance(m, RTDetrFrozenBatchNorm2d):
+                chosen_bn_layers.append(m)
     # chosen_bn_layers
     """
     Since high-level representations are more sensitive to domain shift,
@@ -509,3 +518,327 @@ def update_ema_variables(model, ema_model, alpha, global_step):
     for ema_param, param in zip(ema_model.parameters(), model.parameters()):
         ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
     
+# whw
+
+def conv(in_planes, out_planes, kernel=3, stride=1, padding=1, bias=False):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=kernel, stride=stride, padding=padding, bias=bias)
+
+def conv1x1_fonc(in_planes, out_planes=None, stride=1, bias=False):
+    if out_planes is None:
+        return nn.Conv2d(in_planes, in_planes, kernel_size=1, stride=stride, padding=0, bias=bias)
+    else:
+        return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=bias)
+
+class conv1x1(nn.Module):
+    def __init__(self, planes, out_planes=None, stride=1, mode="parallel", bias=False):
+        super(conv1x1, self).__init__()
+        self.mode = mode
+        self.conv = conv1x1_fonc(planes, out_planes, stride, bias=bias)
+
+    def forward(self, x):
+        y = self.conv(x)
+        return y
+
+class conv_task(nn.Module):
+    def __init__(self, in_planes, planes, adapter=None, kernel=3, stride=1, padding=0, nb_tasks=20, is_proj=1, norm=None, th=0.9, r=32):
+        super(conv_task, self).__init__()
+        self.is_proj = is_proj
+        self.conv = conv1x1_fonc(in_planes, planes, stride) if kernel == 1 else conv(in_planes, planes, kernel=kernel, stride=stride, padding=padding)
+        self.mode = adapter
+
+        if self.mode == 'parallel' and is_proj:
+            if kernel == 1:
+                self.down_proj = conv1x1(in_planes, planes // r, stride, mode=self.mode, bias=True)
+                self.non_linear_func = nn.ReLU()
+                self.up_proj = conv1x1(planes // r, planes, stride, mode=self.mode, bias=True)
+                self.adapter_norm = nn.BatchNorm2d(planes)
+                nn.init.kaiming_uniform_(self.down_proj.conv.weight, a=math.sqrt(5))
+                nn.init.zeros_(self.up_proj.conv.weight)
+                nn.init.zeros_(self.down_proj.conv.bias)
+                nn.init.zeros_(self.up_proj.conv.bias)
+            else:
+                self.down_proj = conv(in_planes, planes // r, kernel=kernel, stride=stride, padding=padding, bias=True)
+                self.non_linear_func = nn.ReLU()
+                self.up_proj = conv(planes // r, planes, kernel=(1, 1), stride=(1, 1), padding=0, bias=True)
+                self.adapter_norm = nn.BatchNorm2d(planes)
+                nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
+                nn.init.zeros_(self.up_proj.weight)
+                nn.init.zeros_(self.down_proj.bias)
+                nn.init.zeros_(self.up_proj.bias)
+
+            self.norm = RTDetrFrozenBatchNorm2d(planes) if norm is None else norm
+            self.mean_feats = torch.zeros((1, in_planes))        # out_planes or in_planes
+            self.num_feats = torch.zeros(nb_tasks)
+            self.threshold = th
+
+        # FrozenBatchNorm2d.convert_frozen_batchnorm(self)
+
+    def forward(self, x):
+        y = self.norm(self.conv(x))
+        if self.mode == 'parallel' and self.is_proj:
+            #adapt_x = self.adapter_norm(self.up_proj(self.non_linear_func(self.down_proj(x))))
+            adapt_x = self.up_proj(self.non_linear_func(self.down_proj(x)))
+            if self.scalar == 'cosine_sim':
+                _x = x.mean(dim=[0, 2, 3]).detach()
+                cos_sim = F.cosine_similarity(self.mean_feats.to(_x.device), _x.unsqueeze(0), dim=1)
+                y = y + adapt_x * cos_sim
+                self.mean_feats = 0.9 * self.mean_feats.to(_x.device) + 0.1 * _x[None, :]
+            else:
+                y = y + adapt_x * self.scalar.to(y.device)
+
+        #y = self.norm(y)
+
+        return y
+
+def add_adapters_to_backbone(rtdetr_model, r=32, scalar=None, target_stages=[0, 1, 2, 3]):
+    """
+    Add parallel adapters to RT-DETR backbone (in-place modification)
+    
+    Args:
+        rtdetr_model: Pre-trained RT-DETR model
+        r: int, reduction ratio for adapter bottleneck (default: 32)
+        scalar: str or None, scaling method ('learnable_scalar' or None)
+        target_stages: list, which stages to add adapters to (default: [1, 2, 3])
+    
+    Returns:
+        rtdetr_model: Same model with adapters added to backbone
+    """
+    
+    # Access backbone encoder stages
+    backbone_encoder = rtdetr_model.model.backbone.model.encoder
+    stages = backbone_encoder.stages
+    
+    adapter_count = 0
+    
+    for stage_idx in target_stages:
+        if stage_idx < len(stages):
+            stage = stages[stage_idx]
+            
+            # Iterate through blocks in the stage 
+            for idx, block in enumerate(stage.layers):
+                # Check stride condition like in the original code
+                if idx >= 0 and hasattr(block, 'layer') and isinstance(block.layer, nn.Sequential):
+                    # Find the first conv layer in the bottleneck block that meets stride condition
+                    for conv_idx, conv_layer in enumerate(block.layer):
+                        if (hasattr(conv_layer, 'convolution') and 
+                            conv_layer.convolution.stride[0] == 1):
+                            
+                            # Create adapter-enabled conv layer (same pattern as original)
+                            new_conv = conv_task(
+                                in_planes=conv_layer.convolution.in_channels,
+                                planes=conv_layer.convolution.out_channels,
+                                adapter='parallel',
+                                kernel=conv_layer.convolution.kernel_size[0],
+                                stride=conv_layer.convolution.stride[0],
+                                padding=conv_layer.convolution.padding[0],
+                                norm=conv_layer.normalization,
+                                r=r,
+                            )
+                            
+                            # Load original weights (same pattern as original)
+                            load_weight = {k: conv_layer.convolution.state_dict()[k] 
+                                         for k in conv_layer.convolution.state_dict() 
+                                         if k in new_conv.conv.state_dict()}
+                            new_conv.conv.load_state_dict(load_weight)
+                            
+                            # Replace the layer in block.layer (same as original: block.conv1 = new_conv1)
+                            block.layer[conv_idx] = new_conv
+                            adapter_count += 1
+                            print(f"Added adapter to stage {stage_idx}, block {idx}, layer {conv_idx}")
+                            break  # Only modify first eligible conv layer per block
+    
+    print(f"Added {adapter_count} adapters to backbone")
+    return rtdetr_model
+
+def freeze_backbone_except_adapters(model):
+    """Freeze all backbone parameters except adapter parameters"""
+    for name, param in model.named_parameters():
+        if any(adapter_key in name for adapter_key in ['down_proj', 'up_proj', 'adapter']):
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+    
+    return model
+
+def get_adapter_parameters(model):
+    """Get only adapter parameters for optimization"""
+    return [param for name, param in model.named_parameters() 
+            if param.requires_grad and any(adapter_key in name for adapter_key in ['down_proj', 'up_proj', 'adapter'])]
+
+# Main function
+def add_adapters(rtdetr_model, device, reduction_ratio=32, target_stages=[0, 1, 2, 3]):
+    """
+    Add adapters to RT-DETR model and prepare for training
+    
+    Args:
+        rtdetr_model: Pre-trained RT-DETR model
+        reduction_ratio: int, adapter bottleneck reduction (default: 32)
+        learnable_scale: bool, whether to use learnable scaling (default: True)
+        target_stages: list, which stages to add adapters (default: [1, 2, 3])
+    
+    Returns:
+        rtdetr_model: Model with adapters added and backbone frozen
+    """
+    
+    # Add adapters to backbone
+    rtdetr_model = add_adapters_to_backbone(rtdetr_model, r=reduction_ratio, target_stages=target_stages)
+
+    rtdetr_model.eval()
+    rtdetr_model.requires_grad_(False)
+
+    # rtdetr_model = freeze_backbone_except_adapters(rtdetr_model)
+
+    param = get_adapter_parameters(rtdetr_model)
+
+    optimizer = torch.optim.SGD(param, lr=1e-4, momentum=0.05)
+
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in rtdetr_model.parameters())
+    trainable_params = sum(p.numel() for p in rtdetr_model.parameters() if p.requires_grad)
+    
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Trainable ratio: {trainable_params/total_params:.4f}")
+    
+    return rtdetr_model.to(device), optimizer
+
+def outputs():
+    return results, adapt_loss, 
+
+def rtdetr_fg_gate_and_feats(outputs, num_classes=6, tau=0.5):
+    # 1) 필수 출력
+    logits = outputs["logits"]              # [B, N, C or C+1]
+    query_feats = outputs["last_hidden_state"]  # [B, N, D]
+
+    # 2) 배경 채널 유무 판단
+    has_bg = (logits.shape[-1] == num_classes + 1)
+
+    if has_bg: # 배경 존재 시
+        probs = logits.softmax(-1)                          # [B, N, C+1]
+        fg_scores, fg_preds = probs[..., :num_classes].max(-1)  # [B, N], [B, N]
+        bg_scores = probs[..., -1]                          # [B, N]
+    else:
+        probs = logits.sigmoid()                            # [B, N, C]
+        fg_scores, fg_preds = probs.max(-1)                 # [B, N], [B, N]
+        bg_scores = 1.0 - fg_scores                         # 의사 배경 점수
+
+    # 3) 임계값 게이팅(기존 코드의 0.5와 동일)
+    valid = fg_scores >= tau
+    sentinel = torch.full_like(fg_preds, num_classes)       # 무효 표식 = C
+    fg_preds = torch.where(valid, fg_preds, sentinel)       # [B, N]
+    fg_scores = torch.where(valid, fg_scores, bg_scores)    # [B, N]
+
+    # 4) 기존 루프와 동일하게 쓰기 위해 평탄화
+    flat_preds = fg_preds.reshape(-1)                       # [B*N]
+    flat_feats = query_feats.reshape(-1, query_feats.size(-1))  # [B*N, D]
+
+    return flat_preds, flat_feats, fg_scores.reshape(-1)
+
+def collect_feats(model, batch_size, device, data_root, reference_preprocessor):
+    train_dataloader = DataLoader(
+        DatasetAdapterForTransformers(SHIFTClearDatasetForObjectDetection(root=data_root, train=True)), 
+        batch_size=batch_size, collate_fn=partial(collate_fn, preprocessor=reference_preprocessor))
+    resnet_vd = model.model.backbone.model
+    gl_features = {}
+    with torch.no_grad():
+        for batch_i, input in enumerate(tqdm(train_dataloader)):
+            img = input['pixel_values'].to(device, non_blocking=True)
+            # img = img.half() if half else img.float()  # uint8 to fp16/32
+            model.eval()
+
+            features = resnet_vd(img)
+
+            # list/tuple이면 키 붙여서 dict로 변환
+            if isinstance(features, (list, tuple)):
+                features = {f"p{i}": t for i, t in enumerate(features)}
+            elif not isinstance(features, dict):
+                # 단일 텐서만 나오면 p0로 감싸기
+                features = {"p0": features}
+                
+            for k in features.keys():
+                cur_feats = features[k].mean(dim=[2, 3]).detach()
+                if k not in gl_features.keys():
+                    gl_features[k] = cur_feats
+                else:
+                    gl_features[k] = torch.cat([gl_features[k], cur_feats], dim=0)
+
+
+
+def compute_fg_align_loss_with_rtdetr(
+    num_classes,
+    s_stats, t_stats,      # 소스/타깃 통계 dict: s_stats["fg"][k] = (mu_s, Sigma_s)
+    template_cov,          # template_cov["fg"][k] (수치 안정화용)
+    ema_n, ema_gamma,      # 클래스별 누적 카운터, EMA 계수
+    device,
+    tau=0.5,
+    freq_weight=False,
+    score_weight=None,     # 선택: 클래스별 점수 가중 (ex. flat_scores)
+    clip_th=1e5
+):
+    logits = outputs["logits"]              # [B, N, C or C+1]
+    query_feats = outputs["last_hidden_state"]  # [B, N, D]
+
+    # 2) 배경 채널 유무 판단
+    has_bg = (logits.shape[-1] == num_classes + 1)
+
+    if has_bg: # 배경 존재 시
+        probs = logits.softmax(-1)                          # [B, N, C+1]
+        fg_scores, fg_preds = probs[..., :num_classes].max(-1)  # [B, N], [B, N]
+        bg_scores = probs[..., -1]                          # [B, N]
+    else:
+        probs = logits.sigmoid()                            # [B, N, C]
+        fg_scores, fg_preds = probs.max(-1)                 # [B, N], [B, N]
+        bg_scores = 1.0 - fg_scores                         # 의사 배경 점수
+
+    # 3) 임계값 게이팅(기존 코드의 0.5와 동일)
+    valid = fg_scores >= tau
+    sentinel = torch.full_like(fg_preds, num_classes)       # 무효 표식 = C
+    fg_preds = torch.where(valid, fg_preds, sentinel)       # [B, N]
+    fg_scores = torch.where(valid, fg_scores, bg_scores)    # [B, N]
+
+    # 4) 기존 루프와 동일하게 쓰기 위해 평탄화
+    flat_preds = fg_preds.reshape(-1)                       # [B*N]
+    flat_feats = query_feats.reshape(-1, query_feats.size(-1))  # [B*N, D]
+
+    loss_fg_align = torch.tensor(0.0, device=device)
+    loss_n = 0
+
+    valid_classes = flat_preds[flat_preds != num_classes].unique()
+    for _k in valid_classes:
+        k = int(_k.item())
+        idx = (flat_preds == k)
+        cur_feats = flat_feats[idx].to(device)               # [r_k, D]
+        if cur_feats.numel() == 0:
+            continue
+
+        # ---- 타깃 평균 EMA 업데이트 (분산은 소스 것으로 고정) ----
+        ema_n[k] += cur_feats.shape[0]
+        mu_t_prev = t_stats["fg"][k][0].to(device)           # 이전 타깃 평균
+        diff = cur_feats - mu_t_prev[None, :]                # x - mu_t(prev)
+        delta = (1.0 / ema_gamma) * diff.sum(dim=0)
+        mu_t = mu_t_prev + delta                             # 새 타깃 평균
+
+        # ---- 대칭 KL 정렬 (분산: 소스 + 템플릿) ----
+        mu_s, Sigma_s = s_stats["fg"][k][0].to(device), s_stats["fg"][k][1].to(device)
+        Sigma = Sigma_s + template_cov["fg"][k].to(device)   # PD 보정/안정화
+        s_dist = MVN(mu_s, Sigma)
+        t_dist = MVN(mu_t, Sigma)
+        cur_loss = 0.5 * (KL(s_dist, t_dist) + KL(t_dist, s_dist))
+
+        # ---- (옵션) 클래스 불균형/점수 가중 ----
+        if freq_weight:
+            w = torch.log(max(ema_n.values()) / ema_n[k])    # dict면 적절히 수정
+            cur_loss = cur_loss * min(w + 0.01, 10.0) ** 2
+        if score_weight is not None:
+            # 예: 해당 클래스의 평균 점수로 가중
+            w_score = score_weight[idx].mean().to(device)
+            cur_loss = cur_loss * w_score
+
+        # ---- 안정화/누적 & 통계 업데이트 ----
+        if torch.isfinite(cur_loss) and cur_loss < clip_th:
+            loss_fg_align = loss_fg_align + cur_loss
+            t_stats["fg"][k] = (mu_t.detach(), None)         # 평균만 유지(분산 고정)
+            loss_n += 1
+
+    return loss_fg_align, loss_n
