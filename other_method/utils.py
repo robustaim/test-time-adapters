@@ -735,34 +735,13 @@ def rtdetr_fg_gate_and_feats(outputs, num_classes=6, tau=0.5):
 
     return flat_preds, flat_feats, fg_scores.reshape(-1)
 
-def collect_feats(model, batch_size, device, data_root, reference_preprocessor):
-    train_dataloader = DataLoader(
-        DatasetAdapterForTransformers(SHIFTClearDatasetForObjectDetection(root=data_root, train=True)), 
-        batch_size=batch_size, collate_fn=partial(collate_fn, preprocessor=reference_preprocessor))
-    resnet_vd = model.model.backbone.model
-    gl_features = {}
-    with torch.no_grad():
-        for batch_i, input in enumerate(tqdm(train_dataloader)):
-            img = input['pixel_values'].to(device, non_blocking=True)
-            # img = img.half() if half else img.float()  # uint8 to fp16/32
-            model.eval()
-
-            features = resnet_vd(img)
-
-            # list/tuple이면 키 붙여서 dict로 변환
-            if isinstance(features, (list, tuple)):
-                features = {f"p{i}": t for i, t in enumerate(features)}
-            elif not isinstance(features, dict):
-                # 단일 텐서만 나오면 p0로 감싸기
-                features = {"p0": features}
-                
-            for k in features.keys():
-                cur_feats = features[k].mean(dim=[2, 3]).detach()
-                if k not in gl_features.keys():
-                    gl_features[k] = cur_feats
-                else:
-                    gl_features[k] = torch.cat([gl_features[k], cur_feats], dim=0)
-
+def make_t_stats(s_stats):
+    t_stats = {}
+    for k in s_stats["gl"]:
+        mean, cov = s_stats["gl"][k]
+        # self.template_cov["gl"][k] = torch.eye(mean.shape[0]) * cov.max().item() / 30
+        t_stats["gl"][k] = (mean, cov)
+    return t_stats
 
 
 def compute_fg_align_loss_with_rtdetr(

@@ -107,6 +107,9 @@ class Baseline:
         self.eval_every = eval_every
 
         self.enable_log_file = enable_log_file
+
+        self.s_stats = torch.load("/workspace/ptta/other_method/WHW/rtdetr_feature_stats.pt")
+        self.t_stats = {}
     
 
     def pretrained_model(self):
@@ -176,7 +179,7 @@ class Baseline:
             "norm": self.norm,
             "dua": self.dua,
             "mean_teacher": self.mean_teacher,
-            "whw": self.whw
+            # "whw": self.whw
         }
         return methods[self.method]
     
@@ -586,33 +589,33 @@ class Baseline:
 
         return carry_state, final_result
 
-    def whw(self, save_dir, task, best_state, best_map50, no_imp_streak,
-            tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
-            reference_preprocessor, classes_list, optimizer_whw, model, clean_mean_list_final, clean_var_list_final, **_):
-        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
-            imgs = input['pixel_values'].to(self.device, non_blocking=True)
-            model.eval()
-            utils.freeze_backbone_except_adapters(model) # adapter를 제외한 다른 parameter들 freeze
-            cur_used = True
-            # div_thr = 2 * sum(model.s_div.values()) * 
+    # def whw(self, save_dir, task, best_state, best_map50, no_imp_streak,
+    #         tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
+    #         reference_preprocessor, classes_list, optimizer_whw, model, clean_mean_list_final, clean_var_list_final, **_):
+    #     for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+    #         imgs = input['pixel_values'].to(self.device, non_blocking=True)
+    #         model.eval()
+    #         utils.freeze_backbone_except_adapters(model) # adapter를 제외한 다른 parameter들 freeze
+    #         cur_used = True
+    #         # div_thr = 2 * sum(model.s_div.values()) * 
 
-            # for weight regularization
-            init_weights = []
-            for p_idx, _p in enumerate(optimizer_whw.param_groups):
-                p = _p['params'][0]
-                init_weights.append(p.clone().detach())
+    #         # for weight regularization
+    #         init_weights = []
+    #         for p_idx, _p in enumerate(optimizer_whw.param_groups):
+    #             p = _p['params'][0]
+    #             init_weights.append(p.clone().detach())
             
-            outputs, losses = model(imgs)
-            total_loss = sum([losses[k] for k in losses])
-            if total_loss > 0 and cur_used:
-                total_loss.backward()
-                optimizer_whw.step()
-            else:
-                pass
-            optimizer_whw.zero_grad()
+    #         outputs, losses = model(imgs)
+    #         total_loss = sum([losses[k] for k in losses])
+    #         if total_loss > 0 and cur_used:
+    #             total_loss.backward()
+    #             optimizer_whw.step()
+    #         else:
+    #             pass
+    #         optimizer_whw.zero_grad()
 
-            with torch.no_grad():
-                # 여기서 val_dataset으로 가끔씩 평가하는 부분 나옴.
+    #         with torch.no_grad():
+    #             # 여기서 val_dataset으로 가끔씩 평가하는 부분 나옴.
                 
             
 
@@ -624,11 +627,3 @@ class Baseline:
         # model에 adapter 붙이는 부분 구현
         # 나머지 학습 코드 구현
         # 다른 method WHW에서 실험한것처럼 코드 고치기.
-        
-
-
-
-
-
-
-            
