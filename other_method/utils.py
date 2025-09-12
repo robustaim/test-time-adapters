@@ -314,7 +314,7 @@ class SaveOutput:
 
     def get_out_var(self):
         out = torch.vstack(self.outputs)
-        out = torch.var(out, dim=0)
+        out = torch.var(out, dim=0, correction=0)
         return out
     
 def extract_activation_alignment(model, method, device, data_root, reference_preprocessor, batch_size=32):
@@ -328,13 +328,9 @@ def extract_activation_alignment(model, method, device, data_root, reference_pre
     chosen_bn_layers = []
     if method == "actmad": 
         for m in model.modules():
-            if isinstance(m, nn.LayerNorm):
+            if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
                 chosen_bn_layers.append(m)
 
-    else :
-        for m in model.modules():
-            if isinstance(m, RTDetrFrozenBatchNorm2d):
-                chosen_bn_layers.append(m)
     # chosen_bn_layers
     """
     Since high-level representations are more sensitive to domain shift,
@@ -821,3 +817,77 @@ def compute_fg_align_loss_with_rtdetr(
             loss_n += 1
 
     return loss_fg_align, loss_n
+
+from transformers.models.rt_detr.modeling_rt_detr import RTDetrObjectDetectionOutput
+
+class Evaluator:
+    def __init__(self, class_list, task, reference_preprocessor):
+        self.image_size = [800, 1280]
+        self.class_list = class_list
+        self.task = task
+        self.reference_preprocessor = reference_preprocessor
+
+        self.tgt_list = []
+        self.pred_dicts = []
+        
+        self.targets = []
+        self.predictions = []
+        
+
+    @torch.no_grad()
+    def add(self, outputs, labels):
+        for label in labels:
+            if isinstance(label, (list, tuple)):
+                cpu_label = [l.cpu() if torch.is_tensor(l) else l for l in label]
+            else:
+                cpu_label = label.cpu() if torch.is_tensor(label) else label
+            self.tgt_list.append(cpu_label)
+
+        if hasattr(outputs, 'logits'):
+            # GPU 텐서를 CPU로 이동하여 저장
+            cpu_outputs = type(outputs)(
+                logits=outputs.logits.cpu(),
+                pred_boxes=outputs.pred_boxes.cpu()
+            )
+            self.pred_dicts.append(cpu_outputs)
+    
+    def compute(self):
+        size = [ self.image_size.copy() for _ in range(len(self.tgt_list)) ]
+
+        logits_all = torch.cat([o.logits for o in self.pred_dicts], dim=0)
+        boxes_all = torch.cat([o.pred_boxes for o in self.pred_dicts], dim=0)
+
+        output = RTDetrObjectDetectionOutput(logits=logits_all, pred_boxes=boxes_all)
+
+        results = self.reference_preprocessor.post_process_object_detection(
+            output, target_sizes=size, threshold=0.0
+        )
+
+        detections = [Detections.from_transformers(results[i]) for i in range(len(results))]
+        annotations = [Detections(
+            xyxy=self.tgt_list[i][0].cpu().numpy(),
+            class_id= self.tgt_list[i][1].cpu().numpy(),
+        ) for i in range(len(self.tgt_list))]
+
+        self.targets.extend(annotations)
+        self.predictions.extend(detections)
+
+        mean_average_precision = MeanAveragePrecision().update(
+            predictions=self.predictions,
+            targets=self.targets,
+        ).compute()
+        per_class_map = {
+            f"{self.class_list[idx]}_mAP@0.95": mean_average_precision.ap_per_class[idx].mean()
+            for idx in mean_average_precision.matched_classes
+        }
+
+        print(f"mAP@0.95_{self.task}: {mean_average_precision.map50_95:.3f}")
+        print(f"mAP50_{self.task}: {mean_average_precision.map50:.3f}")
+        print(f"mAP75_{self.task}: {mean_average_precision.map75:.3f}")
+        for key, value in per_class_map.items():
+            print(f"{key}_{self.task}: {value:.3f}")
+
+
+        
+
+    

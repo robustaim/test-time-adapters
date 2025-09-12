@@ -217,7 +217,7 @@ class Baseline:
                     model, self.method, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
                     )      
 
-                extras["optimizer_actmad"]  = optim.SGD(model.parameters(), lr=1e-5, momentum=0.3, weight_decay=1e-4, nesterov=True)
+                extras["optimizer_actmad"]  = optim.SGD(model.parameters(), lr=self.lr, momentum=0.05, nesterov=True)
             
             elif self.method == "dua":
                 extras["tr_transform_adapt"] = transforms.Compose([
@@ -280,7 +280,7 @@ class Baseline:
 
                 # Run selected TTA method
                 method_fn = self.get_method()
-                carry_state, final_result = method_fn(
+                carry_state= method_fn(
                     model=model,
                     save_dir=self.save_dir,
                     best_map50=best_map50,
@@ -294,11 +294,10 @@ class Baseline:
                     classes_list=classes_list,
                     **extras,
                 )
-                all_results.append(final_result)
 
             # Aggregate and report results across tasks
-            each_task_map_list = utils.aggregate_runs(all_results)
-            utils.print_results(each_task_map_list)
+            # each_task_map_list = utils.aggregate_runs(all_results)
+            # utils.print_results(each_task_map_list)
 
     def make_dataloader(self, task, reference_preprocessor):
         # tta train
@@ -320,12 +319,14 @@ class Baseline:
         tta_raw_data = DataLoader(
             utils.LabelDataset(tta_valid_dataset), 
             batch_size=self.valid_batch, 
+            shuffle=False,
             collate_fn=utils.naive_collate_fn
         )
         
         tta_valid_dataloader = DataLoader(
             utils.DatasetAdapterForTransformers(tta_valid_dataset),
             batch_size=self.valid_batch, 
+            shuffle=False,
             collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
         )
 
@@ -347,11 +348,13 @@ class Baseline:
         n_chosen_layers = len(chosen_bn_layers)
         
         l1_loss = nn.L1Loss(reduction='mean')
+        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        
 
-        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.train()
             for m in model.modules():
-                if isinstance(m, nn.LayerNorm):
+                if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
                     m.eval()
 
             optimizer_actmad.zero_grad()
@@ -361,7 +364,7 @@ class Baseline:
                             for x in range(n_chosen_layers)]
             
             img = input['pixel_values'].to(self.device, non_blocking=True)
-            _ = model(img)
+            outputs = model(img)
 
             batch_mean_tta = [save_outputs_tta[x].get_out_mean() for x in range(n_chosen_layers)]
             batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
@@ -382,26 +385,30 @@ class Baseline:
                 save_outputs_tta[z].clear()
                 hook_list_tta[z].remove()
             
-            model.eval()
-            current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
-                                         model, task, tta_raw_data, tta_valid_dataloader, 
-                                         reference_preprocessor, classes_list)
-            if improve:
-                print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                best_map50 = current_map50
-                best_state = copy.deepcopy(model.state_dict())
-                no_imp_streak = 0
+            evaluator.add(outputs, labels)
+        
+        evaluator.compute()
+            
+            # model.eval()
+            # current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
+            #                              model, task, tta_raw_data, tta_valid_dataloader, 
+            #                              reference_preprocessor, classes_list)
+            # if improve:
+            #     print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
+            #     best_map50 = current_map50
+            #     best_state = copy.deepcopy(model.state_dict())
+            #     no_imp_streak = 0
 
-            else:
-                no_imp_streak += 1
-                print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                if no_imp_streak >= self.patience:
-                    print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                    break
+            # else:
+            #     no_imp_streak += 1
+            #     print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
+            #     if no_imp_streak >= self.patience:
+            #         print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
+            #         break
 
         model.load_state_dict(best_state)
-        with torch.inference_mode():
-            final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
+        # with torch.inference_mode():
+        #     final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
         
         save_path = os.path.join(save_dir, f"ActMAD_model_{task}.pth")
         torch.save(model.state_dict(), save_path)
@@ -409,7 +416,7 @@ class Baseline:
         
         carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, final_result
+        return carry_state
 
     def norm(self, model, save_dir, task, best_state, best_map50, no_imp_streak, 
              tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
