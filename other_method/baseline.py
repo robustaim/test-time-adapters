@@ -280,14 +280,11 @@ class Baseline:
 
                 # Run selected TTA method
                 method_fn = self.get_method()
-                carry_state= method_fn(
+                carry_state, result = method_fn(
                     model=model,
                     save_dir=self.save_dir,
-                    best_map50=best_map50,
-                    no_imp_streak=no_imp_streak,
                     task=task,
                     best_state=best_state,
-                    tta_train_dataloader=tta_train_dataloader,
                     tta_raw_data=tta_raw_data,
                     tta_valid_dataloader=tta_valid_dataloader,
                     reference_preprocessor=reference_preprocessor,
@@ -295,9 +292,11 @@ class Baseline:
                     **extras,
                 )
 
+                all_results.append(result)
+
             # Aggregate and report results across tasks
-            # each_task_map_list = utils.aggregate_runs(all_results)
-            # utils.print_results(each_task_map_list)
+            each_task_map_list = utils.aggregate_runs(all_results)
+            utils.print_results(each_task_map_list)
 
     def make_dataloader(self, task, reference_preprocessor):
         # tta train
@@ -340,8 +339,7 @@ class Baseline:
         
         return carry_state, final_result
 
-    def actmad(self, *, model, save_dir, task, best_state, best_map50, no_imp_streak,
-               tta_train_dataloader, tta_raw_data, tta_valid_dataloader,
+    def actmad(self, *, model, save_dir, task, tta_raw_data, tta_valid_dataloader,
                reference_preprocessor, classes_list,
                clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, **_):
         
@@ -387,28 +385,7 @@ class Baseline:
             
             evaluator.add(outputs, labels)
         
-        evaluator.compute()
-            
-            # model.eval()
-            # current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
-            #                              model, task, tta_raw_data, tta_valid_dataloader, 
-            #                              reference_preprocessor, classes_list)
-            # if improve:
-            #     print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-            #     best_map50 = current_map50
-            #     best_state = copy.deepcopy(model.state_dict())
-            #     no_imp_streak = 0
-
-            # else:
-            #     no_imp_streak += 1
-            #     print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-            #     if no_imp_streak >= self.patience:
-            #         print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-            #         break
-
-        model.load_state_dict(best_state)
-        # with torch.inference_mode():
-        #     final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
+        result = evaluator.compute()
         
         save_path = os.path.join(save_dir, f"ActMAD_model_{task}.pth")
         torch.save(model.state_dict(), save_path)
@@ -416,41 +393,25 @@ class Baseline:
         
         carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state
+        return carry_state, result
 
     def norm(self, model, save_dir, task, best_state, best_map50, no_imp_streak, 
              tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
              reference_preprocessor, classes_list, **_):
-        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.eval()
             for module in model.modules():
-                if isinstance(module, RTDetrFrozenBatchNorm2d):
+                if isinstance(module, nn.BatchNorm2d):
                     module.momentum = self.momentum
                     module.train()
             img = input['pixel_values'].to(self.device, non_blocking=True)
 
-            _ = model(img)
+            outputs = model(img)
             model.eval()
-            if batch_i % self.eval_every == 0:
-                current_map50, best_map50, improve = utils.improve_test(self.device, batch_i, self.eval_every,
-                                            model, task, best_map50, tta_raw_data, tta_valid_dataloader, 
-                                            reference_preprocessor, classes_list)
-                if improve:
-                    print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                    best_map50 = current_map50
-                    best_state = copy.deepcopy(model.state_dict())
-                    no_imp_streak = 0
-
-                else:
-                    no_imp_streak += 1
-                    print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                    if no_imp_streak >= self.patience:
-                        print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                        break
-
-        model.load_state_dict(best_state)
-        with torch.inference_mode():
-            final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
+            evaluator.add(outputs, labels)
+        
+        result = evaluator.compute()
         
         save_path = os.path.join(save_dir, f"NORM_model_{task}.pth")
         torch.save(model.state_dict(), save_path)
@@ -458,17 +419,17 @@ class Baseline:
         
         carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, final_result
+        return carry_state, result
 
-    def dua(self, model, save_dir, task, best_state, best_map50, no_imp_streak, 
-             tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
+    def dua(self, model, save_dir, task, tta_raw_data, tta_valid_dataloader, 
              reference_preprocessor, classes_list, tr_transform_adapt, **_):
         mom_pre = self.mom_pre
-        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.eval()
             mom_new = (mom_pre * self.decay_factor)
             for m in model.modules():
-                if isinstance(m, RTDetrFrozenBatchNorm2d):
+                if isinstance(m, nn.BatchNorm2d):
                     m.train()
                     m.momentum = mom_new + self.min_momentum_constant
             mom_pre = mom_new
@@ -476,28 +437,12 @@ class Baseline:
             img = input['pixel_values'].squeeze(0).to(self.device, non_blocking=True)
             img = utils.get_adaption_inputs_default(img, tr_transform_adapt, self.device)
 
-            _ = model(img)
+            outputs = model(img)
             model.eval()
-            if batch_i % self.eval_every == 0:
-                current_map50, improve = utils.improve_test(self.device, batch_i, self.patience, self.eval_every, 
-                                            model, task, tta_raw_data, tta_valid_dataloader, 
-                                            reference_preprocessor, classes_list)
-                if improve:
-                    print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                    best_map50 = current_map50
-                    best_state = copy.deepcopy(model.state_dict())
-                    no_imp_streak = 0
+            evaluator.add(outputs, labels)
+        
+        result = evaluator.compute()
 
-                else:
-                    no_imp_streak += 1
-                    print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                    if no_imp_streak >= self.patience:
-                        print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                        break
-
-        model.load_state_dict(best_state)
-        with torch.inference_mode():
-            final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
         
         save_path = os.path.join(save_dir, f"DUA_model_{task}.pth")
         torch.save(model.state_dict(), save_path)
@@ -505,11 +450,11 @@ class Baseline:
         
         carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, final_result
-    def mean_teacher(self, model, save_dir, task, best_state, best_map50, no_imp_streak,
-            tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
-            reference_preprocessor, classes_list, student_model, teacher_model,
-            optimizer_mt, weak_augmentation, strong_augmentation, **_):
+        return carry_state, result
+    def mean_teacher(self, model, save_dir, task, best_state, 
+                    tta_raw_data, tta_valid_dataloader, 
+                    reference_preprocessor, classes_list, student_model, teacher_model,
+                    optimizer_mt, weak_augmentation, strong_augmentation, **_):
         
         student_model = student_model
         teacher_model = teacher_model
@@ -527,11 +472,12 @@ class Baseline:
                 warmup_steps=self.warmup_steps,
                 initial_lr=(self.lr/100),
                 decay_total_steps=self.decay_total_steps,
-                total_steps=len(tta_train_dataloader),
+                total_steps=len(tta_valid_dataloader),
                 base_lr=self.lr
             )
         
-        for batch_i, input in enumerate(tqdm(tta_train_dataloader)):
+        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             # 추후 image에 augment넣는 작업 추가 - fixmatch style 이용
             imgs = input['pixel_values'].to(self.device, non_blocking=True)
 
@@ -567,34 +513,19 @@ class Baseline:
 
             utils.update_ema_variables(student_model, teacher_model, alpha=0.999, global_step=global_step)
             global_step += 1
-
-            current_map50, improve = utils.improve_test(self.device, batch_i, self.eval_every,
-                                                teacher_model, task, best_map50, tta_raw_data, tta_valid_dataloader, 
-                                                reference_preprocessor, classes_list)
-            if improve:
-                print(f"[{task}] batch {batch_i}: mAP50 {best_map50:.4f} -> {current_map50:.4f} ✔")
-                best_map50 = current_map50
-                best_state = copy.deepcopy(teacher_model.state_dict())
-                no_imp_streak = 0
-
-            else:
-                no_imp_streak += 1
-                print(f"[{task}] batch {batch_i}: mAP50 {current_map50:.4f} (no-imp {no_imp_streak}/{self.patience})")
-                if no_imp_streak >= self.patience:
-                    print(f"[{task}] Early stop at batch {batch_i} (no improvement {self.patience} times).")
-                    break
+            evaluator.add(teacher_outputs, labels)
+        
+        result = evaluator.compute()
 
         teacher_model.load_state_dict(best_state)
-        with torch.inference_mode():
-            final_result = utils.test(teacher_model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
         
         save_path = os.path.join(save_dir, f"mean_teacher_model_{task}.pth")
-        torch.save(model.state_dict(), save_path)
+        torch.save(teacher_model.state_dict(), save_path)
         print(f"Saved adapted Mean-Teacher model after task [{task}] → {save_path}")
         
         carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, final_result
+        return carry_state, result
 
     # def whw(self, save_dir, task, best_state, best_map50, no_imp_streak,
     #         tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 

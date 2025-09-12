@@ -886,6 +886,12 @@ class Evaluator:
         print(f"mAP75_{self.task}: {mean_average_precision.map75:.3f}")
         for key, value in per_class_map.items():
             print(f"{key}_{self.task}: {value:.3f}")
+        
+        return {"mAP@0.95" : mean_average_precision.map50_95,
+            "mAP50" : mean_average_precision.map50,
+            "mAP75" : mean_average_precision.map75,
+            "per_class_mAP@0.95" : per_class_map
+            }
 
 
         
