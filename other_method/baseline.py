@@ -1,4 +1,5 @@
 import os
+import time
 import copy
 import contextlib
 from pathlib import Path
@@ -18,6 +19,7 @@ from transformers import (
     RTDetrImageProcessorFast,
     RTDetrConfig,
 )
+
 from transformers.models.rt_detr.modeling_rt_detr import RTDetrFrozenBatchNorm2d
 
 from transformers.image_utils import AnnotationFormat
@@ -264,19 +266,56 @@ class Baseline:
                 
             # Save clean state of the model
             carry_state = copy.deepcopy(model.state_dict())
-            
+
+            (tta_cloudy_raw_data, tta_cloudy_valid_dataloader, 
+            tta_overcast_raw_data, tta_overcast_valid_dataloader,
+            tta_foggy_raw_data, tta_foggy_valid_dataloader,
+            tta_rainy_raw_data, tta_rainy_valid_dataloader,
+            tta_dawn_raw_data, tta_dawn_valid_dataloader,
+            tta_night_raw_data, tta_night_valid_dataloader,
+            tta_clear_raw_data, tta_clear_valid_dataloader,
+            classes_list) = self.make_dataloader(reference_preprocessor)
+
             # Loop over each corruption task
+            counters = {"for": 0, "back": 0}
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
             for task in ["cloudy", "overcast", "foggy", "rainy", "dawn", "night", "clear"]:
                 logger.info(f"start {task}")
 
                 # restore model from carry_state (previous adapted state)
                 model.load_state_dict(carry_state)
                 best_state = copy.deepcopy(model.state_dict())
-                best_map50 = -1.0
-                no_imp_streak = 0
 
                 # Build dataloaders
-                tta_train_dataloader, tta_raw_data, tta_valid_dataloader, classes_list = self.make_dataloader(task, reference_preprocessor)
+                if task == "cloudy" :
+                    tta_raw_data = tta_cloudy_raw_data
+                    tta_valid_dataloader = tta_cloudy_valid_dataloader
+
+                elif task == "overcast":
+                    tta_raw_data = tta_overcast_raw_data
+                    tta_valid_dataloader = tta_overcast_valid_dataloader
+
+                elif task == "foggy":
+                    tta_raw_data = tta_foggy_raw_data
+                    tta_valid_dataloader = tta_foggy_valid_dataloader
+
+                elif task == "rainy":
+                    tta_raw_data = tta_rainy_raw_data
+                    tta_valid_dataloader = tta_rainy_valid_dataloader
+
+                elif task == "dawn":
+                    tta_raw_data = tta_dawn_raw_data
+                    tta_valid_dataloader = tta_dawn_valid_dataloader
+
+                elif task == "night":
+                    tta_raw_data = tta_night_raw_data
+                    tta_valid_dataloader = tta_night_valid_dataloader
+
+                elif task == "clear":
+                    tta_raw_data = tta_clear_raw_data
+                    tta_valid_dataloader = tta_clear_valid_dataloader
 
                 # Run selected TTA method
                 method_fn = self.get_method()
@@ -289,51 +328,176 @@ class Baseline:
                     tta_valid_dataloader=tta_valid_dataloader,
                     reference_preprocessor=reference_preprocessor,
                     classes_list=classes_list,
+                    counters=counters,
                     **extras,
                 )
 
                 all_results.append(result)
 
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - t0
+
             # Aggregate and report results across tasks
             each_task_map_list = utils.aggregate_runs(all_results)
             utils.print_results(each_task_map_list)
 
-    def make_dataloader(self, task, reference_preprocessor):
-        # tta train
-        tta_train_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
-            root=self.data_root, valid=False, task=task
+            # evaluation
+            fwd = int(counters.get("for", 0))
+            bwd = int(counters.get("back", 0))
+            fps = counters["for"] / elapsed
+            print("")
+            print(f"{self.method}-----------------------------------------------")
+            print(f" Forward (For.) : {fwd:,}")
+            print(f" Backward (Back.) : {bwd:,}")
+            print(f" FPS : {fps:.2f} img/s")
+
+
+    def make_dataloader(self, reference_preprocessor):
+        #tta cloudy
+        tta_cloudy_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="cloudy"
         )
 
-        tta_train_dataloader = DataLoader(
-            utils.DatasetAdapterForTransformers(tta_train_dataset),
-            batch_size=1, 
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
-        )
-        
-        #tta valid
-        tta_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
-            root=self.data_root, valid=True, task=task
-        )
-
-        tta_raw_data = DataLoader(
-            utils.LabelDataset(tta_valid_dataset), 
+        tta_cloudy_raw_data = DataLoader(
+            utils.LabelDataset(tta_cloudy_valid_dataset), 
             batch_size=self.valid_batch, 
             shuffle=False,
             collate_fn=utils.naive_collate_fn
         )
         
-        tta_valid_dataloader = DataLoader(
-            utils.DatasetAdapterForTransformers(tta_valid_dataset),
+        tta_cloudy_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_cloudy_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
             collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
         )
 
-        return tta_train_dataloader, tta_raw_data, tta_valid_dataloader, tta_train_dataset.classes
+        # overcast
+        tta_overcast_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="overcast"
+        )
+
+        tta_overcast_raw_data = DataLoader(
+            utils.LabelDataset(tta_overcast_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_overcast_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_overcast_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        # foggy
+        tta_foggy_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="foggy"
+        )
+
+        tta_foggy_raw_data = DataLoader(
+            utils.LabelDataset(tta_foggy_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_foggy_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_foggy_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        # rainy
+        tta_rainy_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="rainy"
+        )
+
+        tta_rainy_raw_data = DataLoader(
+            utils.LabelDataset(tta_rainy_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_rainy_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_rainy_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        # dawn
+        tta_dawn_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="dawn"
+        )
+
+        tta_dawn_raw_data = DataLoader(
+            utils.LabelDataset(tta_dawn_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_dawn_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_dawn_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        # night
+        tta_night_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="night"
+        )
+
+        tta_night_raw_data = DataLoader(
+            utils.LabelDataset(tta_night_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_night_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_night_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        # clear
+        tta_clear_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
+            root=self.data_root, valid=True, task="clear"
+        )
+
+        tta_clear_raw_data = DataLoader(
+            utils.LabelDataset(tta_clear_valid_dataset), 
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=utils.naive_collate_fn
+        )
+        
+        tta_clear_valid_dataloader = DataLoader(
+            utils.DatasetAdapterForTransformers(tta_clear_valid_dataset),
+            batch_size=self.valid_batch, 
+            shuffle=False,
+            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+        )
+
+        return (tta_cloudy_raw_data, tta_cloudy_valid_dataloader,
+                tta_overcast_raw_data, tta_overcast_valid_dataloader,
+                tta_foggy_raw_data, tta_foggy_valid_dataloader,
+                tta_rainy_raw_data, tta_rainy_valid_dataloader,
+                tta_dawn_raw_data, tta_dawn_valid_dataloader,
+                tta_night_raw_data, tta_night_valid_dataloader,
+                tta_clear_raw_data, tta_clear_valid_dataloader,
+                 tta_cloudy_valid_dataset.classes)
 
     def direct_method(self, *, model, task, 
                       tta_raw_data, tta_valid_dataloader,
-                      reference_preprocessor, classes_list, **_):
+                      reference_preprocessor, classes_list, for_num, back_num, **_):
         final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
         carry_state = copy.deepcopy(model.state_dict())
         
@@ -341,7 +505,8 @@ class Baseline:
 
     def actmad(self, *, model, save_dir, task, tta_raw_data, tta_valid_dataloader,
                reference_preprocessor, classes_list,
-               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, **_):
+               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, 
+               counters, **_):
         
         n_chosen_layers = len(chosen_bn_layers)
         
@@ -363,6 +528,7 @@ class Baseline:
             
             img = input['pixel_values'].to(self.device, non_blocking=True)
             outputs = model(img)
+            counters["for"]+= img.size(0)
 
             batch_mean_tta = [save_outputs_tta[x].get_out_mean() for x in range(n_chosen_layers)]
             batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
@@ -378,6 +544,7 @@ class Baseline:
 
             loss.backward()
             optimizer_actmad.step()
+            counters["back"]+= img.size(0)
 
             for z in range(n_chosen_layers):
                 save_outputs_tta[z].clear()
@@ -395,9 +562,10 @@ class Baseline:
 
         return carry_state, result
 
-    def norm(self, model, save_dir, task, best_state, best_map50, no_imp_streak, 
-             tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
-             reference_preprocessor, classes_list, **_):
+    def norm(self, model, save_dir, task,
+             tta_raw_data, tta_valid_dataloader, 
+             reference_preprocessor, classes_list, 
+             counters, **_):
         evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.eval()
@@ -408,6 +576,8 @@ class Baseline:
             img = input['pixel_values'].to(self.device, non_blocking=True)
 
             outputs = model(img)
+            counters["for"]+= img.size(0)
+
             model.eval()
             evaluator.add(outputs, labels)
         
@@ -422,7 +592,8 @@ class Baseline:
         return carry_state, result
 
     def dua(self, model, save_dir, task, tta_raw_data, tta_valid_dataloader, 
-             reference_preprocessor, classes_list, tr_transform_adapt, **_):
+             reference_preprocessor, classes_list, tr_transform_adapt, 
+             counters, **_):
         mom_pre = self.mom_pre
         evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
@@ -438,6 +609,8 @@ class Baseline:
             img = utils.get_adaption_inputs_default(img, tr_transform_adapt, self.device)
 
             outputs = model(img)
+            counters["for"]+= img.size(0)
+
             model.eval()
             evaluator.add(outputs, labels)
         
@@ -454,7 +627,8 @@ class Baseline:
     def mean_teacher(self, model, save_dir, task, best_state, 
                     tta_raw_data, tta_valid_dataloader, 
                     reference_preprocessor, classes_list, student_model, teacher_model,
-                    optimizer_mt, weak_augmentation, strong_augmentation, **_):
+                    optimizer_mt, weak_augmentation, strong_augmentation, 
+                    counters, **_):
         
         student_model = student_model
         teacher_model = teacher_model
@@ -490,6 +664,7 @@ class Baseline:
             # make pseudo label
             with torch.no_grad():
                 teacher_outputs = teacher_model(teacher_input)
+                counters["for"]+= imgs.size(0)
 
             sizes = torch.tensor([[800, 1280]], device=self.device)
 
@@ -502,11 +677,14 @@ class Baseline:
             # student model train
             optimizer.zero_grad(set_to_none=True)
             student_outputs = student_model(pixel_values=student_input, labels=pseudo_label)
+            counters["for"]+= imgs.size(0)
+
             # student_outputs에서 loss 꺼내기.
             loss = student_outputs.loss
 
             loss.backward()
             optimizer.step()
+            counters["back"]+= imgs.size(0)
 
             if self.use_scheduler:
                 scheduler.step()
