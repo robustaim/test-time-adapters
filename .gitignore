@@ -200,3 +200,5 @@ data/**/det_2d.json
 
 # Local virtual envs
 .venv/
+
+**/ContinualTTA_ObjectDetection/
