@@ -284,10 +284,6 @@ class Baseline:
             for task in ["cloudy", "overcast", "foggy", "rainy", "dawn", "night", "clear"]:
                 logger.info(f"start {task}")
 
-                # restore model from carry_state (previous adapted state)
-                model.load_state_dict(carry_state)
-                best_state = copy.deepcopy(model.state_dict())
-
                 # Build dataloaders
                 if task == "cloudy" :
                     tta_raw_data = tta_cloudy_raw_data
@@ -319,11 +315,9 @@ class Baseline:
 
                 # Run selected TTA method
                 method_fn = self.get_method()
-                carry_state, result = method_fn(
+                result = method_fn(
                     model=model,
-                    save_dir=self.save_dir,
                     task=task,
-                    best_state=best_state,
                     tta_raw_data=tta_raw_data,
                     tta_valid_dataloader=tta_valid_dataloader,
                     reference_preprocessor=reference_preprocessor,
@@ -498,12 +492,20 @@ class Baseline:
     def direct_method(self, *, model, task, 
                       tta_raw_data, tta_valid_dataloader,
                       reference_preprocessor, classes_list, for_num, back_num, **_):
-        final_result = utils.test(model, self.device, task, tta_raw_data, tta_valid_dataloader, reference_preprocessor, classes_list)
-        carry_state = copy.deepcopy(model.state_dict())
+        model.eval()
+        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
         
-        return carry_state, final_result
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
+            evaluator.add(outputs, labels)
+            img = input['pixel_values'].to(self.device, non_blocking=True)
 
-    def actmad(self, *, model, save_dir, task, tta_raw_data, tta_valid_dataloader,
+            outputs = model(img)
+        
+        result = evaluator.compute()
+            
+        return result
+
+    def actmad(self, *, model, task, tta_raw_data, tta_valid_dataloader,
                reference_preprocessor, classes_list,
                clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, 
                counters, **_):
@@ -528,7 +530,7 @@ class Baseline:
             
             img = input['pixel_values'].to(self.device, non_blocking=True)
             outputs = model(img)
-            counters["for"]+= img.size(0)
+            counters["for"]+= 1
 
             batch_mean_tta = [save_outputs_tta[x].get_out_mean() for x in range(n_chosen_layers)]
             batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
@@ -544,7 +546,7 @@ class Baseline:
 
             loss.backward()
             optimizer_actmad.step()
-            counters["back"]+= img.size(0)
+            counters["back"]+= 1
 
             for z in range(n_chosen_layers):
                 save_outputs_tta[z].clear()
@@ -553,16 +555,10 @@ class Baseline:
             evaluator.add(outputs, labels)
         
         result = evaluator.compute()
-        
-        save_path = os.path.join(save_dir, f"ActMAD_model_{task}.pth")
-        torch.save(model.state_dict(), save_path)
-        print(f"Saved adapted ActMAD model after task [{task}] → {save_path}")
-        
-        carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, result
+        return result
 
-    def norm(self, model, save_dir, task,
+    def norm(self, model, task,
              tta_raw_data, tta_valid_dataloader, 
              reference_preprocessor, classes_list, 
              counters, **_):
@@ -576,20 +572,14 @@ class Baseline:
             img = input['pixel_values'].to(self.device, non_blocking=True)
 
             outputs = model(img)
-            counters["for"]+= img.size(0)
+            counters["for"]+= 1
 
             model.eval()
             evaluator.add(outputs, labels)
         
         result = evaluator.compute()
-        
-        save_path = os.path.join(save_dir, f"NORM_model_{task}.pth")
-        torch.save(model.state_dict(), save_path)
-        print(f"Saved adapted NORM model after task [{task}] → {save_path}")
-        
-        carry_state = copy.deepcopy(model.state_dict())
 
-        return carry_state, result
+        return result
 
     def dua(self, model, save_dir, task, tta_raw_data, tta_valid_dataloader, 
              reference_preprocessor, classes_list, tr_transform_adapt, 
@@ -609,23 +599,16 @@ class Baseline:
             img = utils.get_adaption_inputs_default(img, tr_transform_adapt, self.device)
 
             outputs = model(img)
-            counters["for"]+= img.size(0)
+            counters["for"]+= 1
 
             model.eval()
             evaluator.add(outputs, labels)
         
         result = evaluator.compute()
 
-        
-        save_path = os.path.join(save_dir, f"DUA_model_{task}.pth")
-        torch.save(model.state_dict(), save_path)
-        print(f"Saved adapted DUA model after task [{task}] → {save_path}")
-        
-        carry_state = copy.deepcopy(model.state_dict())
-
-        return carry_state, result
-    def mean_teacher(self, model, save_dir, task, best_state, 
-                    tta_raw_data, tta_valid_dataloader, 
+        return result
+    
+    def mean_teacher(self, task, tta_raw_data, tta_valid_dataloader, 
                     reference_preprocessor, classes_list, student_model, teacher_model,
                     optimizer_mt, weak_augmentation, strong_augmentation, 
                     counters, **_):
@@ -664,7 +647,7 @@ class Baseline:
             # make pseudo label
             with torch.no_grad():
                 teacher_outputs = teacher_model(teacher_input)
-                counters["for"]+= imgs.size(0)
+                counters["for"]+= 1
 
             sizes = torch.tensor([[800, 1280]], device=self.device)
 
@@ -677,14 +660,14 @@ class Baseline:
             # student model train
             optimizer.zero_grad(set_to_none=True)
             student_outputs = student_model(pixel_values=student_input, labels=pseudo_label)
-            counters["for"]+= imgs.size(0)
+            counters["for"]+= 1
 
             # student_outputs에서 loss 꺼내기.
             loss = student_outputs.loss
 
             loss.backward()
             optimizer.step()
-            counters["back"]+= imgs.size(0)
+            counters["back"]+= 1
 
             if self.use_scheduler:
                 scheduler.step()
@@ -695,15 +678,7 @@ class Baseline:
         
         result = evaluator.compute()
 
-        teacher_model.load_state_dict(best_state)
-        
-        save_path = os.path.join(save_dir, f"mean_teacher_model_{task}.pth")
-        torch.save(teacher_model.state_dict(), save_path)
-        print(f"Saved adapted Mean-Teacher model after task [{task}] → {save_path}")
-        
-        carry_state = copy.deepcopy(model.state_dict())
-
-        return carry_state, result
+        return result
 
     # def whw(self, save_dir, task, best_state, best_map50, no_imp_streak,
     #         tta_train_dataloader, tta_raw_data, tta_valid_dataloader, 
