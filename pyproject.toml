@@ -5,19 +5,53 @@ description = "Pluggable Test-time Adapter Implementations"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "torch",
-    "torchvision",
     "accelerate",
     "transformers>=4.52.3",
+    "ultralytics>=8.3.169",
+    "detectron2",
+
     "numpy>=2.3.1",
     "supervision>=0.25.1",
+    "torchinfo>=1.8.0",
     "shift-dev",
 
     "notebook>=7.4.4",
     "jupyterlab>=4.4.4",
     "ipywidgets>=8.1.7",
-    "tqdm>=4.67.1"
+    "tqdm>=4.67.1",
+    "wandb>=0.21.0",
+    "gdown>=5.2.0"
+]
+[project.optional-dependencies]
+torch = [
+    "torch",
+    "torchvision"
+]
+torch-cu118 = [
+    "torch ; platform_system == 'Windows'",
+    "torchvision ; platform_system == 'Windows'"
+]
+torch-cu128 = [
+    "torch ; platform_system == 'Windows'",
+    "torchvision ; platform_system == 'Windows'"
 ]
 
 [tool.uv.sources]
+torch-cu118 = [
+    { index = "torch-cu118", marker = "platform_system == 'Windows'" }
+]
+torch-cu128 = [
+    { index = "torch-cu128", marker = "platform_system == 'Windows'" }
+]
 shift-dev = { git = "https://github.com/robustaim/shift-dev" }
+detectron2 = { git = "https://github.com/robustaim/detectron2" }
+
+[[tool.uv.index]]
+name = "torch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "torch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

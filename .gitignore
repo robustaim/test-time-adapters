@@ -184,21 +184,3 @@ data/
 results/
 results-*/
 wandb/
-
-# === Large artifacts (prevent >100MB push failures) ===
-# Models / checkpoints
-*.pt
-*.pth
-*.safetensors
-*.ckpt
-*.zip
-*.json
-
-# Dataset archives & huge annotations (SHIFT 등)
-data/**/img.zip
-data/**/det_2d.json
-
-# Local virtual envs
-.venv/
-
-**/ContinualTTA_ObjectDetection/

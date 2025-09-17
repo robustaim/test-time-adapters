@@ -33,18 +33,21 @@ Each sequence folder contains 4 annotation files and 1 meta file. A brief descri
 * meta_info.ini -- Meta information about the sequence, including object and motion classes, video URL and more.
 * Values 0~8 in file cover.label correspond to ranges of object visible ratios: 0%, (0%, 15%], (15%~30%], (30%, 45%], (45%, 60%], (60%, 75%], (75%, 90%], (90%, 100%) and 100% respectively.
 """
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 from collections import defaultdict
+from dataclasses import dataclass
+from copy import copy
 from os import path
 import random
 
+import torch
 from torch.utils.data import Dataset
 from torchvision import datasets
-import torch
+
+from gdown.exceptions import FileURLRetrievalError
 
 import numpy as np
 import pandas as pd
-from PIL import Image
 
 from .base import BaseDataset
 
@@ -52,6 +55,7 @@ from .base import BaseDataset
 class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     download_method = datasets.utils.download_and_extract_archive
     download_url = "https://drive.google.com/file/d/1b75MBq7MbDQUc682IoECIekoRim_Ydk1/view?usp=sharing"
+    alternate_url = "https://drive.google.com/file/d/1LnWzvO6ymr5MA1ITYjni3-FOjoyZx6uS/view?usp=sharing"
     dataset_name = "GOT10k"
     file_name = "full_data.zip"
     extract_method = datasets.utils.extract_archive
@@ -63,6 +67,7 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     ):
         self.root = path.join(root, self.dataset_name)
         self.download(self.root, force=force_download)
+        self.train, self.valid = train, valid
 
         if train:
             self.root = path.join(self.root, "val") if valid else path.join(self.root, "train")
@@ -70,18 +75,44 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
             self.root = path.join(self.root, "test")
 
         super().__init__(root=self.root, transform=transform, target_transform=target_transform)
+        self._load_data()
+
+    def _load_data(self):
+        sequences = defaultdict(list)
+        for idx, (img_path, _) in enumerate(self.samples):
+            seq_name = path.dirname(img_path)
+            sequences[seq_name].append((idx, img_path))
+
+        for seq_name in sequences:
+            sequences[seq_name].sort(key=lambda x: x[1])
+
+        targets = []
+        for seq_name, frames in sequences.items():
+            gt_path = path.join(seq_name, 'groundtruth.txt')
+            if path.exists(gt_path):
+                targets.extend(np.loadtxt(gt_path, delimiter=','))
+        if self.train:
+            self.samples = [(s[0], t) for s, t in zip(self.samples, targets)]
+        else:
+            start = (self.samples[0], targets)
+            follows = [(s[0], [0, 0, 0, 0]) for s in self.samples[1:]]
+            self.samples = [start] + follows
 
     @classmethod
     def download(cls, root: str, force: bool = False):
         print(f"INFO: Downloading '{cls.dataset_name}' from google drive to {root}...")
-        if force or not path.isfile(path.join(root, cls.file_name)):
-            cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
+        downloaded = path.isfile(path.join(root, cls.file_name))
+        extracted = not any(not path.isdir(path.join(root, target)) for target in ("train", "val", "test"))
+        if force or not (downloaded or extracted):
+            try:
+                cls.download_method(cls.download_url, download_root=root, extract_root=root, filename=cls.file_name)
+            except FileURLRetrievalError:
+                print("INFO: Trying to download from the alternate link...")
+                cls.download_method(cls.alternate_url, download_root=root, extract_root=root, filename=cls.file_name)
             print("INFO: Dataset archive downloaded and extracted.")
         else:
             print("INFO: Dataset archive found in the root directory. Skipping download.")
-            if not path.isdir(path.join(root, "train")) \
-                    or not path.isdir(path.join(root, "val")) or not path.isdir(path.join(root, "test")) \
-                    :
+            if not extracted:
                 cls.extract_method(from_path=path.join(root, cls.file_name), to_path=root)
 
     @property
@@ -89,119 +120,61 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
         return pd.DataFrame(dict(path=[d[0] for d in self.samples], label=[self.classes[lb] for lb in self.targets]))
 
 
+@dataclass
+class PairedGOT10kSample:
+    prev_idx: int
+    curr_idx: int
+
+
 class PairedGOT10kDataset(Dataset):
-    def __init__(self, base_dataset: GOT10kDataset):
+    def __init__(self, base_dataset: GOT10kDataset, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
         super().__init__()
+        self.transform = transform
+        self.target_transform = target_transform
+        self.pairs = self._create_pairs(base_dataset)
         self.base_dataset = base_dataset
-        self.pairs = self._create_pairs()
         self.use_teacher_forcing = False
 
-    def _create_pairs(self):
-        sequences = defaultdict(list)
-        for idx, (img_path, _) in enumerate(self.base_dataset.samples):
-            seq_name = path.dirname(img_path)
-            sequences[seq_name].append((idx, img_path))
+    def _create_pairs(self, base) -> list[PairedGOT10kSample]:
+        seq_id = -1
+        pairs_by_seq: list[PairedGOT10kSample] = []
 
-        for seq_name in sequences:
-            sequences[seq_name].sort(key=lambda x: x[1])
+        for i, _id in enumerate(base.targets):
+            if _id != seq_id:
+                seq_id = _id  # do not include the first frame of the sequence
+            else:
+                pairs_by_seq.append(PairedGOT10kSample(prev_idx=i-1, curr_idx=i))
 
-        pairs = []
-        for seq_name, frames in sequences.items():
-            gt_path = path.join(seq_name, 'groundtruth.txt')
-            if path.exists(gt_path):
-                groundtruth = np.loadtxt(gt_path, delimiter=',')
-
-                # Get original image dimensions for normalization
-                img_path = frames[0][1]  # Use first frame to get dimensions
-                with Image.open(img_path) as img:
-                    orig_w, orig_h = img.size
-
-                # Normalize groundtruth coordinates
-                for i in range(len(frames) - 1):
-                    # Original format: [x_min, y_min, width, height]
-                    # Convert to normalized coordinates
-                    # Result format: [x_center, y_center, width, height]
-                    gt_curr = groundtruth[i + 1].copy()
-                    gt_prev = groundtruth[i].copy()
-
-                    # Normalize coordinates
-                    gt_prev[0] = (gt_prev[0] + gt_prev[2]/2) / orig_w  # x_center
-                    gt_prev[1] = (gt_prev[1] + gt_prev[3]/2) / orig_h  # y_center
-                    gt_prev[2] /= orig_w  # width
-                    gt_prev[3] /= orig_h  # height
-
-                    gt_curr[0] = (gt_curr[0] + gt_curr[2]/2) / orig_w  # x_center
-                    gt_curr[1] = (gt_curr[1] + gt_curr[3]/2) / orig_h  # y_center
-                    gt_curr[2] /= orig_w  # width
-                    gt_curr[3] /= orig_h  # height
-
-                    pairs.append({
-                        'prev_idx': frames[i][0],
-                        'curr_idx': frames[i + 1][0],
-                        'prev_gt': gt_prev,
-                        'curr_gt': gt_curr
-                    })
-
-        return pairs
+        return pairs_by_seq
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, idx):
         pair = self.pairs[idx]
+        curr_img = self.transform(self.base_dataset[pair.curr_idx][0])
+        prev_gt = self.target_transform(self.base_dataset[pair.prev_idx][1])
+        curr_gt = self.target_transform(self.base_dataset[pair.curr_idx][1])
 
-        prev_img = None
-        if not self.use_teacher_forcing:
-            prev_img, _ = self.base_dataset[pair['prev_idx']]
-        curr_img, _ = self.base_dataset[pair['curr_idx']]
+        if self.use_teacher_forcing:
+            return curr_img, prev_gt, curr_gt
+        else:
+            prev_img = self.transform(self.base_dataset[pair.prev_idx][0])
+            return prev_img, curr_img, prev_gt, curr_gt
 
-        prev_gt = torch.FloatTensor(pair['prev_gt'])
-        curr_gt = torch.FloatTensor(pair['curr_gt'])
-
-        if prev_img is None:
-            return curr_img, curr_gt, curr_gt
-        return prev_img, curr_img, prev_gt, curr_gt
-
-    @classmethod
-    def create_train_val_split(cls, base_dataset: GOT10kDataset, train_ratio=0.9, seed=42):
-        # Get unique sequence paths efficiently using dict.fromkeys()
-        sequences = list(dict.fromkeys(path.dirname(img_path) for img_path, _ in base_dataset.samples))
-
-        # Set random seed and shuffle sequences
+    def extract_valid(self, train_ratio=0.9, seed=42) -> 'PairedGOT10kDataset':
+        # Set random seed and sequences
+        sequences = list(range(len(self)))
         random.seed(seed)
         random.shuffle(sequences)
-        split_idx = int(len(sequences) * train_ratio)
+        split_idx = int(len(self) * train_ratio)
+        indices = set(sequences[:split_idx]), set(sequences[split_idx:])
 
-        # Create sequence sets for faster lookups
-        train_sequences = set(sequences[:split_idx])
-        val_sequences = set(sequences[split_idx:])
-
-        # Create train and val datasets
-        data_root = path.dirname(path.dirname(base_dataset.root))
-        train_dataset = GOT10kDataset(root=data_root, force_download=False, train=True, transform=base_dataset.transform)
-        val_dataset = GOT10kDataset(root=data_root, force_download=False, train=True, transform=base_dataset.transform)
-
-        # Split samples and targets in one pass
-        train_samples = []
-        train_targets = []
-        val_samples = []
-        val_targets = []
-
-        for i, (sample, target) in enumerate(zip(base_dataset.samples, base_dataset.targets)):
-            seq_dir = path.dirname(sample[0])
-            if seq_dir in train_sequences:
-                train_samples.append(sample)
-                train_targets.append(target)
-            else:
-                val_samples.append(sample)
-                val_targets.append(target)
-
-        train_dataset.samples = train_samples
-        train_dataset.targets = train_targets
-        val_dataset.samples = val_samples
-        val_dataset.targets = val_targets
-
-        return cls(train_dataset), cls(val_dataset)
+        pairs, self.pairs = self.pairs, []
+        valid_set = copy(self)
+        self.pairs = [pairs[i] for i in indices[0]]
+        valid_set.pairs = [pairs[i] for i in indices[1]]
+        return valid_set
 
 
 GOT10kDatasetForObjectTracking = GOT10kDataset

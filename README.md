@@ -25,7 +25,9 @@ Pluggable Test-time Adapter Implementations
 ## Usage
 ### Installation (Use this repository as a package for your own project)
 ```bash
-pip install git+https://github.com/robustaim/test-time-adapters.git
+uv add git+https://github.com/robustaim/test-time-adapters.git
+uv sync
+uv add torch torchvision  # install torch manually
 ```
 
 ### Reproduction of Results
@@ -33,7 +35,8 @@ pip install git+https://github.com/robustaim/test-time-adapters.git
 ```bash
 git clone https://github.com/robustaim/test-time-adapters.git ptta
 cd ptta
-uv sync
+uv sync --extra torch-cu128  # only windows
+uv sync --extra torch  # only linux
 ```
 
 #### Run Batch Experiments

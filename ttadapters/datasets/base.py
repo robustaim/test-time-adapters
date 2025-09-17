@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 from torch.utils.data import Dataset
+from dataclasses import dataclass
+from typing import Union
 
 
 class BaseDataset(Dataset):
@@ -9,9 +10,9 @@ class BaseDataset(Dataset):
 
 @dataclass
 class DatasetHolder:
-    train: BaseDataset = None
-    valid: BaseDataset = None
-    test: BaseDataset = None
+    train: Union[BaseDataset, Dataset] = None
+    valid: Union[BaseDataset, Dataset] = None
+    test: Union[BaseDataset, Dataset] = None
 
     def __post_init__(self):
         print(f"INFO: Dataset loaded successfully. Number of samples - ", end='')
