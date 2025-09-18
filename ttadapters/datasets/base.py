@@ -40,7 +40,7 @@ class DataLoaderHolder:
     valid_len: Optional[int] = 0
     test: Optional[DataLoader] = None
     test_count: Optional[int] = 0
-    text_len: Optional[int] = 0
+    test_len: Optional[int] = 0
 
     def __post_init__(self):
         print(f"INFO: Loader length - ", end='')
