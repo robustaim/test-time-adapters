@@ -114,6 +114,7 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
     ):
         self.root = path.join(root, self.dataset_name)
         self.download(path.join(self.root, self.shift_type.value), force=force_download)
+        self.view_key = "all"
         views = [v.value for v in self.views_to_load]
 
         if train:
@@ -137,7 +138,9 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
             print(f"Batch {i}:\n")
             print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
             print("-" * 80)
-            for k, data in batch[views[0]].items():
+            if self.view_key == "all":  # root class
+                batch = batch[views[0]]  # iter only one view
+            for k, data in batch.items():
                 if isinstance(data, torch.Tensor):
                     print(f"{k:20} {str(data.shape):35} {data.min():10.2f} {data.max():10.2f}")
                 else:
