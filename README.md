@@ -23,11 +23,27 @@ Pluggable Test-time Adapter Implementations
 
 
 ## Usage
+> [!NOTE]
+> Detectron2 requires to be built in your device since meta does not provide pre-built wheel for recent PyTorch versions.
+> Sometimes, you may encounter an error related to CUDA version mismatch cause uv/pip will choose the system-default CUDA toolkit version.
+> In such cases, you can try the following steps to set the correct CUDA toolkit version in linux:
+```bash
+# Check current CUDA symlink
+ls -la /usr/local/cuda
+
+# Set target CUDA version
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=/usr/local/cuda-12.8/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
+
+# Rebuild
+uv sync --extra torch
+```
+
 ### Installation (Use this repository as a package for your own project)
 ```bash
-uv add git+https://github.com/robustaim/test-time-adapters.git
-uv sync
 uv add torch torchvision  # install torch manually
+uv add git+https://github.com/robustaim/test-time-adapters.git
 ```
 
 ### Reproduction of Results
