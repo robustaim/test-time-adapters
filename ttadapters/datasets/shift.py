@@ -132,10 +132,10 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
             verbose=True
         )
 
-        # Print the tensor shape of the first batch.
+        # Print the tensor shape of the first batch (example batch size 4).
         original_getitem = self.__class__.__getitem__
         self.__class__.__getitem__ = _SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
-        for i, batch in enumerate(DataLoader(self, shuffle=False)):
+        for i, batch in enumerate(DataLoader(self, batch_size=4, shuffle=False)):
             print(f"Batch {i}:\n")
             print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
             print("-" * 80)
