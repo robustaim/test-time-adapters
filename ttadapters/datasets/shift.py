@@ -354,9 +354,9 @@ class SHIFTClearDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection)
 
 class SHIFTCorruptedDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
     def __init__(
-            self, root: str, force_download: bool = False,
-            train: bool = True, valid: bool = False,
-            transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
+        self, root: str, force_download: bool = False,
+        train: bool = True, valid: bool = False,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         super().__init__(
             root=root, force_download=force_download,

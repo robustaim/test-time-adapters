@@ -1,15 +1,27 @@
 import os
 from typing import Optional, Union
 
-from transformers import RTDetrConfig, RTDetrForObjectDetection, RTDetrImageProcessorFast
+from transformers import RTDetrConfig, RTDetrForObjectDetection
 
+from ...datasets import MaskedImageList
 from ..base import BaseModel
+
+
+def collate_fn(batch):
+    images = [item[0] for item in batch]
+    targets = [item[1] for item in batch]
+    return dict(
+        pixel_values=MaskedImageList.from_tensors(images, size_divisibility=32),
+        labels=[dict(
+            class_labels=item['boxes2d_classes'].long(),
+            boxes=item["boxes2d"].float()
+        ) for item in targets]
+    )
 
 
 class RTDetr50ForObjectDetection(RTDetrForObjectDetection, BaseModel):
     model_id = "PekingU/rtdetr_r50vd"
     model_name = "RT-DETR-R50"
-    image_processor = RTDetrImageProcessorFast.from_pretrained(model_id)
 
     def __init__(self, config: RTDetrConfig | None = None, num_labels: int = 80):  # 80 is the default for COCO
         if config is None:

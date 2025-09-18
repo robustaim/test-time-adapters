@@ -4,12 +4,31 @@ from detectron2.modeling import build_model
 from detectron2.config import get_cfg
 from detectron2 import model_zoo
 
+from torchvision.tv_tensors import Image, BoundingBoxes
+from detectron2.structures import Boxes, Instances
+
 from torch import hub, nn
 
 import warnings
 
 from ..base import BaseModel
 from ...datasets import BaseDataset
+
+
+def collate_fn(batch: list[Image, BoundingBoxes]):
+    batched_inputs = []
+    for image, metadata in batch:
+        original_height, original_width = image.shape[-2:]
+        instances = Instances(image_size=(original_height, original_width))
+        instances.gt_boxes = Boxes(metadata["boxes2d"])  # xyxy
+        instances.gt_classes = metadata["boxes2d_classes"]
+        batched_inputs.append({
+            "image": image,
+            "instances": instances,
+            "height": original_height,
+            "width": original_width
+        })
+    return batched_inputs
 
 
 class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):

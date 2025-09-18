@@ -1,1 +1,1 @@
-from .de import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection
+from .de import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection, collate_fn
