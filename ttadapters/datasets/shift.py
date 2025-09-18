@@ -7,6 +7,7 @@ from shift_dev.dataloader.shift_dataset import _SHIFTScalabelLabels, Scalabel, D
 from shift_dev.types import Keys, DataDict
 from shift_dev.utils.backend import ZipBackend
 
+from torchvision import tv_tensors
 from torch.utils.data import DataLoader
 import torch
 
@@ -16,6 +17,8 @@ from json import load, dump
 from sys import executable
 from enum import Enum
 import shutil
+
+from .base import BaseDataset
 
 
 def create_instant_labelclass(annotation_root_suffix: str = "_SUBSET", subset_name: str = "normal"):
@@ -62,7 +65,7 @@ def create_instant_labelclass(annotation_root_suffix: str = "_SUBSET", subset_na
     return SHIFTScalabelLabelsForSubset
 
 
-class SHIFTDataset(_SHIFTDataset):
+class SHIFTDataset(_SHIFTDataset, BaseDataset):
     dataset_name = "SHIFT"
     classes = ["pedestrian", "car", "truck", "bus", "motorcycle", "bicycle"]
 
@@ -107,13 +110,10 @@ class SHIFTDataset(_SHIFTDataset):
 
     def __init__(
         self, root: str, force_download: bool = False,
-        train: bool = True, valid: bool = False,
-        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+        train: bool = True, valid: bool = False
     ):
         self.root = path.join(root, self.dataset_name)
         self.download(path.join(self.root, self.shift_type.value), force=force_download)
-        self.transform = transform
-        self.target_transform = target_transform
         views = [v.value for v in self.views_to_load]
 
         if train:
@@ -184,19 +184,6 @@ class SHIFTDataset(_SHIFTDataset):
         else:
             if not silent: print("INFO: Dataset archive found in the root directory. Skipping download.")
 
-    def __getitem__(self, idx: int) -> DataDict:
-        queried = super().__getitem__(idx)
-        for key in queried:
-            data = queried[key]
-            images = data.pop('images', None)
-            if self.transform is not None and images is not None:
-                images = self.transform(images)
-            if self.target_transform is not None:
-                data = self.target_transform(data)
-            if images is not None:
-                data['images'] = images
-        return queried
-
 
 class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
     keys_to_load = [
@@ -206,9 +193,42 @@ class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
         Keys.boxes2d_classes,
         Keys.boxes2d_track_ids,
     ]
-    views_to_load = [SHIFTDataset.View.FRONT]
+    views_to_load = (SHIFTDataset.View.FRONT,)
     framerate = SHIFTDataset.FrameRate.IMAGES
     shift_type = SHIFTDataset.Type.DISCRETE
+
+    def __init__(
+        self, root: str, force_download: bool = False, train: bool = True, valid: bool = False,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
+    ):
+        super().__init__(root=root, force_download=force_download, train=train, valid=valid)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.transforms = transforms
+        self.view_key = "front"
+
+    def __getitem__(self, idx: int) -> DataDict:
+        data = super().__getitem__(idx)[self.view_key].copy()
+        image, boxes2d = data.pop('images', None), data.pop('boxes2d', None)
+        if image is None or boxes2d is None:
+            raise ValueError(f"Images or Bounding boxes not found in the dataset with camera view: {self.view_key}")
+
+        image_tv = tv_tensors.Image(image)
+        boxes2d_tv = tv_tensors.BoundingBoxes(
+            boxes2d,
+            format="XYXY",  # SHIFT uses Pascal VOC format (x1, y1, x2, y2)
+            canvas_size=image_tv.shape[-2:]  # H, W
+        )
+        data['boxes'] = boxes2d_tv
+
+        if self.transform is not None:
+            image_tv = self.transform(image_tv)
+        if self.target_transform is not None:
+            data = self.target_transform(data)
+        if self.transforms is not None:
+            image_tv, data = self.transforms(image_tv, data)
+
+        return image_tv, data
 
 
 class SHIFTDiscreteSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetection):
@@ -241,7 +261,7 @@ class SHIFTDiscreteSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetecti
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False, subset_type: SubsetType = SubsetType.NORMAL,
-        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         # Let the original constructor operate correctly
         new_root = path.join(root, self.dataset_name)
@@ -259,7 +279,7 @@ class SHIFTDiscreteSubsetForObjectDetection(SHIFTDiscreteDatasetForObjectDetecti
         super().__init__(
             root=root, force_download=force_download,
             train=train, valid=valid,
-            transform=transform, target_transform=target_transform
+            transform=transform, target_transform=target_transform, transforms=transforms
         )
 
         # Set the root directory based on the subset type
@@ -311,7 +331,7 @@ class SHIFTClearDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection)
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False,
-        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         super().__init__(
             root=root, force_download=force_download,
@@ -324,7 +344,7 @@ class SHIFTCorruptedDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetect
     def __init__(
             self, root: str, force_download: bool = False,
             train: bool = True, valid: bool = False,
-            transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+            transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         super().__init__(
             root=root, force_download=force_download,

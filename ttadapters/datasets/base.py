@@ -4,6 +4,8 @@ from typing import Union
 
 
 class BaseDataset(Dataset):
+    dataset_name = "BaseDataset"
+
     def __len__(self):
         raise NotImplementedError("This method should be overridden by subclasses.")
 

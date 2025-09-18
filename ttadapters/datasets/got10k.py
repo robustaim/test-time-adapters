@@ -33,15 +33,13 @@ Each sequence folder contains 4 annotation files and 1 meta file. A brief descri
 * meta_info.ini -- Meta information about the sequence, including object and motion classes, video URL and more.
 * Values 0~8 in file cover.label correspond to ranges of object visible ratios: 0%, (0%, 15%], (15%~30%], (30%, 45%], (45%, 60%], (60%, 75%], (75%, 90%], (90%, 100%) and 100% respectively.
 """
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 from collections import defaultdict
 from dataclasses import dataclass
 from copy import copy
 from os import path
 import random
 
-import torch
-from torch.utils.data import Dataset
 from torchvision import datasets
 
 from gdown.exceptions import FileURLRetrievalError
@@ -63,7 +61,9 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False,
-        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        transforms: Optional[Callable] = None
     ):
         self.root = path.join(root, self.dataset_name)
         self.download(self.root, force=force_download)
@@ -74,7 +74,10 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
         else:
             self.root = path.join(self.root, "test")
 
-        super().__init__(root=self.root, transform=transform, target_transform=target_transform)
+        super().__init__(root=self.root)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.transforms = transforms
         self._load_data()
 
     def _load_data(self):
@@ -119,6 +122,18 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     def df(self) -> pd.DataFrame:
         return pd.DataFrame(dict(path=[d[0] for d in self.samples], label=[self.classes[lb] for lb in self.targets]))
 
+    def __getitem__(self, index: int):
+        path, target = self.samples[index]
+        sample = self.loader(path)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        if self.transforms is not None:
+            sample, target = self.transforms(sample, target)
+
+        return sample, target
+
 
 @dataclass
 class PairedGOT10kSample:
@@ -126,7 +141,7 @@ class PairedGOT10kSample:
     curr_idx: int
 
 
-class PairedGOT10kDataset(Dataset):
+class PairedGOT10kDataset(BaseDataset):
     def __init__(self, base_dataset: GOT10kDataset, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
         super().__init__()
         self.transform = transform
@@ -152,14 +167,16 @@ class PairedGOT10kDataset(Dataset):
 
     def __getitem__(self, idx):
         pair = self.pairs[idx]
-        curr_img = self.transform(self.base_dataset[pair.curr_idx][0])
-        prev_gt = self.target_transform(self.base_dataset[pair.prev_idx][1])
-        curr_gt = self.target_transform(self.base_dataset[pair.curr_idx][1])
+        curr = self.base_dataset[pair.curr_idx]
+        prev = self.base_dataset[pair.prev_idx]
+        curr_img = self.transform(curr[0])
+        prev_gt = self.target_transform(prev[1])
+        curr_gt = self.target_transform(curr[1])
 
         if self.use_teacher_forcing:
             return curr_img, prev_gt, curr_gt
         else:
-            prev_img = self.transform(self.base_dataset[pair.prev_idx][0])
+            prev_img = self.transform(prev[0])
             return prev_img, curr_img, prev_gt, curr_gt
 
     def extract_valid(self, train_ratio=0.9, seed=42) -> 'PairedGOT10kDataset':

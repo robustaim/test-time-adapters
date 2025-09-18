@@ -1,7 +1,42 @@
-from .GOT10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
-from .SHIFT import (
-    SHIFTDiscreteDatasetForObjectDetection, SHIFTDiscreteSubsetForObjectDetection, SHIFTClearDatasetForObjectDetection, SHIFTCorruptedDatasetForObjectDetection,
-    SHIFTContinuousDatasetForObjectDetection, SHIFTContinuous10DatasetForObjectDetection, SHIFTContinuous100DatasetForObjectDetection
+from .got10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
+from .shift import (
+    SHIFTDataset,
+    SHIFTDiscreteDatasetForObjectDetection, SHIFTDiscreteSubsetForObjectDetection,
+    SHIFTClearDatasetForObjectDetection, SHIFTCorruptedDatasetForObjectDetection,
+    SHIFTContinuousDatasetForObjectDetection, SHIFTContinuous10DatasetForObjectDetection,
+    SHIFTContinuous100DatasetForObjectDetection
 )
 
 from .base import BaseDataset, DatasetHolder, DataLoaderHolder
+from .transform import ResizeShortestEdge, MaskedImageList, ConvertRGBtoBGR
+
+from torchvision.transforms import v2 as T
+
+
+default_image_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+default_train_transforms = T.Compose([
+    ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333),  # Detectron2 Faster R-CNN default training transform
+    T.RandomHorizontalFlip(p=0.5)  # Random horizontal flip with 50% probability
+])
+
+default_valid_transforms = T.Compose([
+    ResizeShortestEdge(800, max_size=1333)  # Detectron2 Faster R-CNN default validation transform
+])
+
+
+detectron_image_transform = T.Normalize(
+    mean=[0.406, 0.456, 0.485],  # BGR
+    std=[0.229, 0.224, 0.225]
+)
+
+detectron_train_transforms = T.Compose([
+    ConvertRGBtoBGR(),
+    ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333),
+    T.RandomHorizontalFlip(p=0.5)
+])
+
+detectron_valid_transforms = T.Compose([
+    ConvertRGBtoBGR(),
+    ResizeShortestEdge(800, max_size=1333)
+])
