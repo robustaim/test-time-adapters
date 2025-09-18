@@ -231,7 +231,7 @@ class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
             format="XYXY",  # SHIFT uses Pascal VOC format (x1, y1, x2, y2)
             canvas_size=image_tv.shape[-2:]  # H, W
         )
-        data['boxes'] = boxes2d_tv
+        data['boxes2d'] = boxes2d_tv
 
         if self.transform is not None:
             image_tv = self.transform(image_tv)

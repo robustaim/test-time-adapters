@@ -9,7 +9,10 @@ import random
 class ConvertRGBtoBGR:
     def __call__(self, img):
         if isinstance(img, torch.Tensor):
-            return img[[2, 1, 0], ...]  # RGB -> BGR for tensor
+            result = img[[2, 1, 0], ...]  # RGB -> BGR for tensor
+            if isinstance(img, tv_tensors.Image):
+                result = tv_tensors.Image(result)
+            return result
         else:  # PIL Image
             import numpy as np
             from PIL import Image
@@ -28,13 +31,15 @@ class ResizeShortestEdge:
     def __init__(
         self,
         sizes: Union[int, List[int]],
-        max_size: int = 1333
+        max_size: int = 1333,
+        box_key: str = 'boxes'
     ):
         if isinstance(sizes, int):
             self.sizes = [sizes]
         else:
             self.sizes = list(sizes)
         self.max_size = max_size
+        self.box_key = box_key
 
     def __call__(self, image, target=None):
         """ Resize image and scale bounding boxes.
@@ -63,29 +68,29 @@ class ResizeShortestEdge:
         resized_image = F.resize(image, size=[new_h, new_w], antialias=True)
 
         # Process BBox
-        if target is not None and 'boxes' in target:
+        if target is not None and self.box_key in target:
             # Calculate scale factors
             scale_x = new_w / w
             scale_y = new_h / h
 
             # Scale BBox
-            if isinstance(target['boxes'], tv_tensors.BoundingBoxes):
+            if isinstance(target[self.box_key], tv_tensors.BoundingBoxes):
                 # Handle tv_tensors.BoundingBoxes
-                boxes = target['boxes'].clone()
+                boxes = target[self.box_key].clone()
                 boxes[:, [0, 2]] *= scale_x  # x1, x2
                 boxes[:, [1, 3]] *= scale_y  # y1, y2
 
                 # Create new BoundingBoxes
-                target['boxes'] = tv_tensors.BoundingBoxes(
+                target[self.box_key] = tv_tensors.BoundingBoxes(
                     boxes,
-                    format=target['boxes'].format,
+                    format=target[self.box_key].format,
                     canvas_size=(new_h, new_w)
                 )
-            elif isinstance(target['boxes'], torch.Tensor):
+            elif isinstance(target[self.box_key], torch.Tensor):
                 # Handle regular tensor
-                target['boxes'] = target['boxes'].clone()
-                target['boxes'][:, [0, 2]] *= scale_x  # x1, x2
-                target['boxes'][:, [1, 3]] *= scale_y  # y1, y2
+                target[self.box_key] = target[self.box_key].clone()
+                target[self.box_key][:, [0, 2]] *= scale_x  # x1, x2
+                target[self.box_key][:, [1, 3]] *= scale_y  # y1, y2
 
         if target is not None:
             return resized_image, target

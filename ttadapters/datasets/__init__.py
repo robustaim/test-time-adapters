@@ -24,10 +24,10 @@ detectron_image_transform = T.Compose([
 ])
 
 default_train_transforms = T.Compose([
-    ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333),  # Detectron2 Faster R-CNN default training transform
+    ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333, box_key='boxes2d'),  # Detectron2 Faster R-CNN default training transform
     T.RandomHorizontalFlip(p=0.5)  # Random horizontal flip with 50% probability
 ])
 
 default_valid_transforms = T.Compose([
-    ResizeShortestEdge(800, max_size=1333)  # Detectron2 Faster R-CNN default validation transform
+    ResizeShortestEdge(800, max_size=1333, box_key='boxes2d')  # Detectron2 Faster R-CNN default validation transform
 ])
