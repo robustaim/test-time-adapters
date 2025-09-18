@@ -32,5 +32,8 @@ class DatasetHolder:
 @dataclass
 class DataLoaderHolder:
     train: object = None
+    train_len: int = 0
     valid: object = None
+    valid_len: int = 0
     test: object = None
+    text_len: int = 0
