@@ -16,11 +16,7 @@ from torchvision.transforms import v2 as T
 default_image_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
 detectron_image_transform = T.Compose([
-    ConvertRGBtoBGR(),
-    T.Normalize(
-        mean=[0.406, 0.456, 0.485],  # BGR
-        std=[0.229, 0.224, 0.225]
-    )
+    ConvertRGBtoBGR()
 ])
 
 default_train_transforms = T.Compose([
