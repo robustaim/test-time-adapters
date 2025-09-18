@@ -204,11 +204,11 @@ class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
         self, root: str, force_download: bool = False, train: bool = True, valid: bool = False,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
-        self.view_key = "front"
+        super().__init__(root=root, force_download=force_download, train=train, valid=valid)
         self.transform = transform
         self.target_transform = target_transform
         self.transforms = transforms
-        super().__init__(root=root, force_download=force_download, train=train, valid=valid)
+        self.view_key = "front"
 
     def __getitem__(self, idx: int) -> DataDict:
         data = super().__getitem__(idx)[self.view_key].copy()
