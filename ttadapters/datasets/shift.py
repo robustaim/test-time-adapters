@@ -133,7 +133,9 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
         )
 
         # Print the tensor shape of the first batch.
-        for i, batch in enumerate(DataLoader(super(SHIFTDataset, self), shuffle=False)):
+        original_getitem = self.__class__.__getitem__
+        self.__class__.__getitem__ = _SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
+        for i, batch in enumerate(DataLoader(self, shuffle=False)):
             print(f"Batch {i}:\n")
             print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
             print("-" * 80)
@@ -144,6 +146,7 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
                     print(f"{k:20} {data}")
             break
         print()
+        self.__class__.__getitem__ = original_getitem  # restore __getitem__
 
         # Print the sample indices within a video.
         # The video indices groups frames based on their video sequences. They are useful for training on videos.
