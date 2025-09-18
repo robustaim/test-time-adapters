@@ -36,20 +36,13 @@ class ResizeShortestEdge:
             self.sizes = list(sizes)
         self.max_size = max_size
 
-    def __call__(self, sample):
+    def __call__(self, image, target=None):
         """ Resize image and scale bounding boxes.
 
         Args:
-            sample: (image, target) tuple or image only
-                image: tv_tensors.Image or torch.Tensor (C, H, W)
-                target: dict with 'boxes' key (optional)
+            image: tv_tensors.Image or torch.Tensor (C, H, W)
+            target: dict with 'boxes' key (optional)
         """
-        # Input processing
-        if isinstance(sample, tuple):
-            image, target = sample
-        else:
-            image, target = sample, None
-
         # Original size
         _, h, w = image.shape
 
