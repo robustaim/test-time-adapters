@@ -132,10 +132,10 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
             verbose=True
         )
 
-        # Print the tensor shape of the first batch (example batch size 4).
+        # Print the tensor shape of the first batch.
         original_getitem = self.__class__.__getitem__
-        self.__class__.__getitem__ = _SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
-        for i, batch in enumerate(DataLoader(self, batch_size=4, shuffle=False)):
+        self.__class__.__getitem__ = SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
+        for i, batch in enumerate(DataLoader(self, shuffle=False)):
             print(f"Batch {i}:\n")
             print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
             print("-" * 80)
@@ -187,6 +187,15 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
         else:
             if not silent: print("INFO: Dataset archive found in the root directory. Skipping download.")
 
+    def __getitem__(self, idx: int) -> DataDict:
+        queried = super().__getitem__(idx)
+        for key in queried:
+            data = queried[key]
+            images = data.pop('images', None)
+            if images is not None:
+                data['images'] = images.squeeze(0)
+        return queried
+
 
 class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
     keys_to_load = [
@@ -211,12 +220,12 @@ class SHIFTDiscreteDatasetForObjectDetection(SHIFTDataset):
         self.view_key = "front"
 
     def __getitem__(self, idx: int) -> DataDict:
-        data = super().__getitem__(idx)[self.view_key].copy()
+        data = super(SHIFTDataset, self).__getitem__(idx)[self.view_key].copy()
         image, boxes2d = data.pop('images', None), data.pop('boxes2d', None)
         if image is None or boxes2d is None:
             raise ValueError(f"Images or Bounding boxes not found in the dataset with camera view: {self.view_key}")
 
-        image_tv = tv_tensors.Image(image)
+        image_tv = tv_tensors.Image(image.squeeze(0))
         boxes2d_tv = tv_tensors.BoundingBoxes(
             boxes2d,
             format="XYXY",  # SHIFT uses Pascal VOC format (x1, y1, x2, y2)
