@@ -114,7 +114,8 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
     ):
         self.root = path.join(root, self.dataset_name)
         self.download(path.join(self.root, self.shift_type.value), force=force_download)
-        self.view_key = "all"
+        if not hasattr(self, "view_key"):
+            self.view_key = "all"
         views = [v.value for v in self.views_to_load]
 
         if train:
