@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 
-import utils
+from . import utils
 
 class Baseline:
     def __init__(self, 
@@ -42,13 +42,13 @@ class Baseline:
                  image_size: int=640, 
                  class_num: int=6, 
                  valid_batch: int=16,
-                 clean_bn_extract_batch: int=32,
+                 clean_bn_extract_batch: int=64,
                  model_states: Path="/home/elicer/ptta/RT-DETR_R50vd_SHIFT_CLEAR.safetensors",
-                 lr: float=1e-4,
+                 lr: float=5e-5,
                  momentum: float=0.1,
-                 mom_pre: float=0.07,
-                 decay_factor: float=0.97,
-                 min_momentum_constant: float=0.01,
+                 mom_pre: float=0.01,
+                 decay_factor: float=0.94,
+                 min_momentum_constant: float=0.0001,
                  use_scheduler: bool=False,
                  warmup_steps: int=50,
                  decay_total_steps: int=20,
@@ -110,8 +110,10 @@ class Baseline:
 
         self.enable_log_file = enable_log_file
 
-        self.s_stats = torch.load("/workspace/ptta/other_method/WHW/rtdetr_feature_stats.pt")
+        # self.s_stats = torch.load("/workspace/ptta/other_method/WHW/rtdetr_feature_stats.pt")
         self.t_stats = {}
+
+        self.reference_preprocessor = self.image_processor()
     
 
     def pretrained_model(self):
@@ -141,10 +143,20 @@ class Baseline:
 
             for param in model.parameters():
                 param.requires_grad = False
-        else :
-            raise NotImplementedError(f"Unsupported model_arch: {self.model_arch}")
             
-        return model.to(self.device)
+            model.to(self.device)
+
+            return model
+        
+        elif self.model_arch=="faster_rcnn":
+            model = FastRCNN(model_arch="/workspace/ptta/other_method/fast_rcnn/configs/Base/SHIFT_faster_rcnn_R50_FPN_1x.yaml",
+                            num_classes=self.class_num,
+                            device=self.device,
+                            weight_path="/workspace/ptta/faster_rcnn_r50_shift.pth"
+                            )
+            model.eval()
+            
+            return model
 
     def image_processor(self, resize: int=800, do_resize: bool=False):
         """
@@ -169,10 +181,18 @@ class Baseline:
             reference_preprocessor.format = AnnotationFormat.COCO_DETECTION  # COCO Format / Detection BBOX Format
             reference_preprocessor.size = {"height": resize, "width": resize}
             reference_preprocessor.do_resize = do_resize
-        else:
-            raise NotImplementedError(f"Unsupported model_arch: {self.model_arch}")
 
-        return reference_preprocessor
+            return reference_preprocessor
+
+        elif self.model_arch=="faster_rcnn":
+            reference_preprocessor = RTDetrImageProcessorFast()
+            reference_preprocessor.do_rescale = False
+            reference_preprocessor.do_normalize = False
+            reference_preprocessor.format = AnnotationFormat.COCO_DETECTION  # COCO Format / Detection BBOX Format
+            reference_preprocessor.size = {"height": resize, "width": resize}
+            reference_preprocessor.do_resize = do_resize
+
+            return reference_preprocessor
     
     def get_method(self):
         methods = {
@@ -189,8 +209,7 @@ class Baseline:
         # Load pretrained model and image processor
         model = self.pretrained_model()
         device = self.device
-        reference_preprocessor = self.image_processor()
-
+        
         # Setup logger (file + console or console-only)
         log_save_dir = self.save_dir if self.enable_log_file else None
         logger, log_path = utils.setup_logger(log_save_dir, name=self.method, mirror_to_stdout=True)
@@ -211,15 +230,60 @@ class Baseline:
 
             # Extra configs for specific methods
             if self.method == "actmad":
-                (
-                    extras["clean_mean_list_final"],
-                    extras["clean_var_list_final"],
-                    extras["chosen_bn_layers"]
-                ) = utils.extract_activation_alignment(
-                    model, self.method, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
-                    )      
+                # ActMAD statistics 파일 경로를 other_method 폴더에 설정
+                stats_save_path = Path("/workspace/ptta/other_method") / f"actmad_clean_statistics_{self.model_arch}.pt"
 
-                extras["optimizer_actmad"]  = optim.SGD(model.parameters(), lr=self.lr, momentum=0.05, nesterov=True)
+                # chosen_bn_layers는 항상 새로 생성 (decoder 제외, encoder/fpn만 사용)
+                all_norm_layers = []
+                decoder_layers = []
+
+                for name, m in model.named_modules():
+                    if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
+                        # decoder 부분의 LayerNorm 제외
+                        if 'decoder' in name.lower():
+                            decoder_layers.append((name, m))
+                        else:
+                            all_norm_layers.append(m)
+
+                print(f"ActMAD: Found {len(all_norm_layers)} encoder/fpn normalization layers")
+                print(f"ActMAD: Excluded {len(decoder_layers)} decoder normalization layers")
+
+                # 후반부 50% 레이어만 사용 (고수준 특성에 집중)
+                cutoff = len(all_norm_layers) // 2
+                chosen_bn_layers = all_norm_layers[cutoff:]
+                print(f"ActMAD: Using {len(chosen_bn_layers)}/{len(all_norm_layers)} normalization layers")
+                extras["chosen_bn_layers"] = chosen_bn_layers
+
+                # 저장된 statistics가 있는지 확인
+                if stats_save_path.exists():
+                    print(f"Loading saved ActMAD statistics from {stats_save_path}")
+                    saved_stats = torch.load(stats_save_path)
+                    extras["clean_mean_list_final"] = saved_stats["clean_mean_list_final"]
+                    extras["clean_var_list_final"] = saved_stats["clean_var_list_final"]
+                else:
+                    print("Extracting ActMAD statistics from clean data...")
+                    (
+                        extras["clean_mean_list_final"],
+                        extras["clean_var_list_final"],
+                        _  # chosen_bn_layers는 이미 위에서 생성했으므로 무시
+                    ) = utils.extract_activation_alignment(
+                        model, self.method, device, self.data_root, self.reference_preprocessor, batch_size=self.clean_bn_extract_batch
+                        )
+
+                    # Statistics만 저장 (chosen_bn_layers는 저장하지 않음)
+                    print(f"Saving ActMAD statistics to {stats_save_path}")
+                    torch.save({
+                        "clean_mean_list_final": extras["clean_mean_list_final"],
+                        "clean_var_list_final": extras["clean_var_list_final"]
+                    }, stats_save_path)
+
+                extras["optimizer_actmad"]  = optim.SGD(
+                    model.parameters(),
+                    lr=self.lr,
+                    momentum=0.95,
+                    weight_decay=5e-4, 
+                    nesterov=True  
+                )
             
             elif self.method == "dua":
                 extras["tr_transform_adapt"] = transforms.Compose([
@@ -261,11 +325,9 @@ class Baseline:
                     extras["clean_var_list_final"],
                     extras["chosen_bn_layers"]
                 ) = utils.extract_activation_alignment(
-                    model, self.method, device, self.data_root, reference_preprocessor, batch_size=self.clean_bn_extract_batch
+                    model, self.method, device, self.data_root, self.reference_preprocessor, batch_size=self.clean_bn_extract_batch
                     )
                 
-            # Save clean state of the model
-            carry_state = copy.deepcopy(model.state_dict())
 
             (tta_cloudy_raw_data, tta_cloudy_valid_dataloader, 
             tta_overcast_raw_data, tta_overcast_valid_dataloader,
@@ -274,7 +336,7 @@ class Baseline:
             tta_dawn_raw_data, tta_dawn_valid_dataloader,
             tta_night_raw_data, tta_night_valid_dataloader,
             tta_clear_raw_data, tta_clear_valid_dataloader,
-            classes_list) = self.make_dataloader(reference_preprocessor)
+            classes_list) = self.make_dataloader()
 
             # Loop over each corruption task
             counters = {"for": 0, "back": 0}
@@ -320,7 +382,7 @@ class Baseline:
                     task=task,
                     tta_raw_data=tta_raw_data,
                     tta_valid_dataloader=tta_valid_dataloader,
-                    reference_preprocessor=reference_preprocessor,
+                    reference_preprocessor=self.reference_preprocessor,
                     classes_list=classes_list,
                     counters=counters,
                     **extras,
@@ -346,7 +408,7 @@ class Baseline:
             print(f" FPS : {fps:.2f} img/s")
 
 
-    def make_dataloader(self, reference_preprocessor):
+    def make_dataloader(self):
         #tta cloudy
         tta_cloudy_valid_dataset = utils.SHIFTCorruptedTaskDatasetForObjectDetection(
             root=self.data_root, valid=True, task="cloudy"
@@ -363,7 +425,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_cloudy_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # overcast
@@ -382,7 +444,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_overcast_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # foggy
@@ -401,7 +463,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_foggy_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # rainy
@@ -420,7 +482,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_rainy_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # dawn
@@ -439,7 +501,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_dawn_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # night
@@ -458,7 +520,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_night_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         # clear
@@ -477,7 +539,7 @@ class Baseline:
             utils.DatasetAdapterForTransformers(tta_clear_valid_dataset),
             batch_size=self.valid_batch, 
             shuffle=False,
-            collate_fn=partial(utils.collate_fn, preprocessor=reference_preprocessor)
+            collate_fn=partial(utils.collate_fn, preprocessor=self.reference_preprocessor)
         )
 
         return (tta_cloudy_raw_data, tta_cloudy_valid_dataloader,
@@ -490,16 +552,23 @@ class Baseline:
                  tta_cloudy_valid_dataset.classes)
 
     def direct_method(self, *, model, task, 
-                      tta_raw_data, tta_valid_dataloader,
-                      reference_preprocessor, classes_list, for_num, back_num, **_):
+                      tta_raw_data, tta_valid_dataloader, reference_preprocessor,
+                      classes_list, counters, **_):
         model.eval()
-        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
-        
-        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
-            evaluator.add(outputs, labels)
-            img = input['pixel_values'].to(self.device, non_blocking=True)
+        if self.model_arch == "rt_detr":
+            evaluator = utils.RTDETR_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        elif self.model_arch == "faster_rcnn":
+            evaluator = utils.FastRCNN_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
 
-            outputs = model(img)
+        for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
+            img = input['pixel_values'].to(self.device, non_blocking=True)
+            with torch.no_grad():   
+                if self.model_arch=="rt_detr":
+                    outputs = model(img)
+                elif self.model_arch=="faster_rcnn":
+                    outputs = model(img, labels)
+
+            evaluator.add(outputs, labels)
         
         result = evaluator.compute()
             
@@ -507,15 +576,22 @@ class Baseline:
 
     def actmad(self, *, model, task, tta_raw_data, tta_valid_dataloader,
                reference_preprocessor, classes_list,
-               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad, 
+               clean_mean_list_final, clean_var_list_final, chosen_bn_layers, optimizer_actmad,
                counters, **_):
-        
-        n_chosen_layers = len(chosen_bn_layers)
-        
-        l1_loss = nn.L1Loss(reduction='mean')
-        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
-        
 
+        # Unfreeze model parameters for ActMAD
+        for param in model.parameters():
+            param.requires_grad = True
+
+        n_chosen_layers = len(chosen_bn_layers)
+
+        l1_loss = nn.L1Loss(reduction='mean')
+
+        if self.model_arch == "rt_detr":
+            evaluator = utils.RTDETR_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        elif self.model_arch == "faster_rcnn":
+            evaluator = utils.FastRCNN_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.train()
             for m in model.modules():
@@ -542,9 +618,13 @@ class Baseline:
                 loss_mean += l1_loss(batch_mean_tta[i].to(self.device), clean_mean_list_final[i].to(self.device))
                 loss_var += l1_loss(batch_var_tta[i].to(self.device), clean_var_list_final[i].to(self.device))
                 
-            loss = loss_mean + loss_var
+            loss =  loss_mean +  loss_var
 
             loss.backward()
+
+            # Gradient clipping for numerical stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+
             optimizer_actmad.step()
             counters["back"]+= 1
 
@@ -562,7 +642,12 @@ class Baseline:
              tta_raw_data, tta_valid_dataloader, 
              reference_preprocessor, classes_list, 
              counters, **_):
-        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        
+        if self.model_arch == "rt_detr":
+            evaluator = utils.RTDETR_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        elif self.model_arch == "faster_rcnn":
+            evaluator = utils.FastRCNN_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.eval()
             for module in model.modules():
@@ -581,29 +666,79 @@ class Baseline:
 
         return result
 
-    def dua(self, model, save_dir, task, tta_raw_data, tta_valid_dataloader, 
-             reference_preprocessor, classes_list, tr_transform_adapt, 
+    def dua(self, *, model, task, tta_raw_data, tta_valid_dataloader,
+             reference_preprocessor, classes_list, tr_transform_adapt,
              counters, **_):
+
+        # Initialize DUA parameters
         mom_pre = self.mom_pre
-        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+
+        # Collect only nn.BatchNorm2d layers for DUA (exclude RTDetrFrozenBatchNorm2d)
+        bn_layers = []
+        for m in model.modules():
+            if isinstance(m, nn.BatchNorm2d) and not isinstance(m, RTDetrFrozenBatchNorm2d):
+                bn_layers.append(m)
+
+        if self.model_arch == "rt_detr":
+            evaluator = utils.RTDETR_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        elif self.model_arch == "faster_rcnn":
+            evaluator = utils.FastRCNN_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             model.eval()
-            mom_new = (mom_pre * self.decay_factor)
-            for m in model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.train()
-                    m.momentum = mom_new + self.min_momentum_constant
-            mom_pre = mom_new
 
-            img = input['pixel_values'].squeeze(0).to(self.device, non_blocking=True)
-            img = utils.get_adaption_inputs_default(img, tr_transform_adapt, self.device)
+            # Update momentum for this batch (ContinualTTA style)
+            momentum = mom_pre + self.min_momentum_constant
 
-            outputs = model(img)
+            # Register forward hooks to capture activations and update running stats for BatchNorm2d only
+            hooks = []
+
+            def get_dua_hook(momentum_val):
+                def hook(module, input, output):
+                    # Calculate batch statistics
+                    x = input[0]
+                    batch_mean = x.mean(dim=[0,2,3])
+                    batch_var = x.var(dim=[0,2,3], unbiased=True)
+
+                    # Update running statistics (ContinualTTA DUA style)
+                    module.running_mean = (1 - momentum_val) * module.running_mean + momentum_val * batch_mean
+                    module.running_var = (1 - momentum_val) * module.running_var + momentum_val * batch_var
+                return hook
+
+            # Register hooks only for nn.BatchNorm2d layers
+            for layer in bn_layers:
+                hook = layer.register_forward_hook(get_dua_hook(momentum))
+                hooks.append(hook)
+
+            img = input['pixel_values'].to(self.device, non_blocking=True)
+
+            # Process each image in the batch separately for DUA augmentation
+            augmented_imgs = []
+            for i in range(img.shape[0]):
+                single_img = img[i]  # Shape: [C, H, W]
+                aug_img = utils.get_adaption_inputs_default(single_img, tr_transform_adapt, self.device)
+                augmented_imgs.append(aug_img)
+
+            # Stack all augmented images back to batch
+            augmented_img = torch.cat(augmented_imgs, dim=0)
+
+            # DUA adaptation with augmented images
+            _ = model(augmented_img)  # Just for BatchNorm adaptation
             counters["for"]+= 1
 
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+
+            # Update mom_pre for next batch (ContinualTTA style)
+            mom_pre *= self.decay_factor
+
+            # Evaluation with original images (no augmentation)
             model.eval()
+            original_img = input['pixel_values'].to(self.device, non_blocking=True)
+            outputs = model(original_img)
             evaluator.add(outputs, labels)
-        
+
         result = evaluator.compute()
 
         return result
@@ -633,7 +768,11 @@ class Baseline:
                 base_lr=self.lr
             )
         
-        evaluator = utils.Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        if self.model_arch == "rt_detr":
+            evaluator = utils.RTDETR_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+        elif self.model_arch == "faster_rcnn":
+            evaluator = utils.FastRCNN_Evaluator(class_list = classes_list, task = task, reference_preprocessor= reference_preprocessor)
+            
         for batch_i, labels, input in zip(tqdm(range(len(tta_raw_data))), tta_raw_data, tta_valid_dataloader):
             # 추후 image에 augment넣는 작업 추가 - fixmatch style 이용
             imgs = input['pixel_values'].to(self.device, non_blocking=True)
@@ -649,10 +788,12 @@ class Baseline:
                 teacher_outputs = teacher_model(teacher_input)
                 counters["for"]+= 1
 
-            sizes = torch.tensor([[800, 1280]], device=self.device)
+            # Create target_sizes matching the batch size
+            batch_size = teacher_input.shape[0]
+            sizes = torch.tensor([[800, 1280]] * batch_size, device=self.device)
 
             teacher_results = reference_preprocessor.post_process_object_detection(
-                teacher_outputs, target_sizes=sizes, threshold=0.3
+                teacher_outputs, target_sizes=sizes, threshold=0.5
             )
 
             pseudo_label = utils.make_label(teacher_results, (800, 1280))
@@ -672,7 +813,7 @@ class Baseline:
             if self.use_scheduler:
                 scheduler.step()
 
-            utils.update_ema_variables(student_model, teacher_model, alpha=0.999, global_step=global_step)
+            utils.update_ema_variables(student_model, teacher_model, alpha=0.99, global_step=global_step)
             global_step += 1
             evaluator.add(teacher_outputs, labels)
         
