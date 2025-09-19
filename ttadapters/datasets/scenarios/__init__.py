@@ -28,8 +28,8 @@ class SHIFTDiscreteScenario(dict):
     ):
         super().__init__(self)
 
-        for key in self.keys:
-            if key in exclude_list:
+        for key in SHIFTDiscreteScenario.keys:
+            if exclude_list is not None and key in exclude_list:
                 continue
 
             self[key] = SHIFTDiscreteSubsetForObjectDetection(
