@@ -308,13 +308,13 @@ class SaveOutput:
         self.outputs = []
 
     def get_out_mean(self):
-        out = torch.vstack(self.outputs)
-        out = torch.mean(out, dim=0)
+        out = torch.vstack(self.outputs)   # [B, C, H, W]
+        out = torch.mean(out, dim=[0, 2, 3])
         return out
 
     def get_out_var(self):
-        out = torch.vstack(self.outputs)
-        out = torch.var(out, dim=0, correction=0)
+        out = torch.vstack(self.outputs)   # [B, C, H, W]
+        out = torch.var(out, dim=[0, 2, 3], correction=0)
         return out
     
 def extract_activation_alignment(model, method, device, data_root, reference_preprocessor, batch_size=32):
