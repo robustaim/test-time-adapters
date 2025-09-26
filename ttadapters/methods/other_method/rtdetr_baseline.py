@@ -528,12 +528,8 @@ class ActMAD:
             for batch in tqdm(loader, total=loader.train_len, desc="Evaluation"):
                 self.model.eval()
 
-                # Convert detectron2 format to RT-DETR format
-                images, labels = convert_detectron_to_rtdetr_format(batch)
-
-                # Prepare inputs for RT-DETR
-                inputs = self.preprocessor(images=images, annotations=labels, return_tensors="pt")
-                pixel_values = inputs['pixel_values'].to(self.device)
+                # Get pixel_values directly from batch (same as other methods)
+                pixel_values = batch['pixel_values'].to(self.device)
 
                 hook_list = [chosen_bn_layers[i].register_forward_hook(save_outputs[i]) for i in range(n_chosen_layers)]
                 _ = self.model(pixel_values=pixel_values)
@@ -900,7 +896,7 @@ class DUA:
                             self.mom_pre *= self.decay_factor
 
                     # Standard normalization
-                    if isinstance(self, (nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                    if isinstance(self, nn.BatchNorm2d):
                         if hasattr(self, 'adapt_type') and self.adapt_type == "DUA":
                             scale = self.weight * (self.running_var + self.eps).rsqrt()
                             bias = self.bias - self.running_mean * scale
@@ -908,6 +904,19 @@ class DUA:
                             bias = bias.reshape(1, -1, 1, 1)
                         else:
                             scale = self.weight * (self.running_var + self.eps).rsqrt()
+                            bias = self.bias - self.running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
+                    elif isinstance(self, RTDetrFrozenBatchNorm2d):
+                        # RTDetrFrozenBatchNorm2d has different structure - use eps=1e-5 as default
+                        eps = getattr(self, 'eps', 1e-5)
+                        if hasattr(self, 'adapt_type') and self.adapt_type == "DUA":
+                            scale = self.weight * (self.running_var + eps).rsqrt()
+                            bias = self.bias - self.running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
+                        else:
+                            scale = self.weight * (self.running_var + eps).rsqrt()
                             bias = self.bias - self.running_mean * scale
                             scale = scale.reshape(1, -1, 1, 1)
                             bias = bias.reshape(1, -1, 1, 1)
@@ -1159,21 +1168,36 @@ class NORM:
                     if hasattr(self, 'adapt_type') and self.adapt_type == "NORM":
                         alpha = x.shape[0] / (self.source_sum + x.shape[0])
 
-                        if isinstance(self, (nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                        if isinstance(self, nn.BatchNorm2d):
                             running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
                             running_var = (1 - alpha) * self.running_var + alpha * x.var(dim=[0,2,3])
                             scale = self.weight * (running_var + self.eps).rsqrt()
                             bias = self.bias - running_mean * scale
                             scale = scale.reshape(1, -1, 1, 1)
                             bias = bias.reshape(1, -1, 1, 1)
-
+                        elif isinstance(self, RTDetrFrozenBatchNorm2d):
+                            # RTDetrFrozenBatchNorm2d has different structure - use eps=1e-5 as default
+                            eps = getattr(self, 'eps', 1e-5)
+                            running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
+                            running_var = (1 - alpha) * self.running_var + alpha * x.var(dim=[0,2,3])
+                            scale = self.weight * (running_var + eps).rsqrt()
+                            bias = self.bias - running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
                         elif isinstance(self, nn.LayerNorm):
                             # For LayerNorm, use standard operation
                             return nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
 
                     else:
-                        if isinstance(self, (nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                        if isinstance(self, nn.BatchNorm2d):
                             scale = self.weight * (self.running_var + self.eps).rsqrt()
+                            bias = self.bias - self.running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
+                        elif isinstance(self, RTDetrFrozenBatchNorm2d):
+                            # RTDetrFrozenBatchNorm2d has different structure - use eps=1e-5 as default
+                            eps = getattr(self, 'eps', 1e-5)
+                            scale = self.weight * (self.running_var + eps).rsqrt()
                             bias = self.bias - self.running_mean * scale
                             scale = scale.reshape(1, -1, 1, 1)
                             bias = bias.reshape(1, -1, 1, 1)

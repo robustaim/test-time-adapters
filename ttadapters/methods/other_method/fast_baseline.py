@@ -117,7 +117,7 @@ class ActMAD:
         data_root,
         device=None,
         batch_size=4,
-        learning_rate=0.001,
+        learning_rate=0.0001,
         clean_bn_extract_batch=8
     ):
         self.model = model
@@ -466,7 +466,7 @@ class ActMAD:
             dataloader = DataLoader(
                 dataset,
                 batch_size=self.batch_size,
-                shuffle=True,
+                shuffle=False,
                 collate_fn=collate_fn
             )
             dataloader.valid_len = math.ceil(len(dataset) / self.batch_size)
@@ -726,7 +726,7 @@ class DUA:
             dataloader = DataLoader(
                 dataset,
                 batch_size=self.batch_size,
-                shuffle=True,
+                shuffle=False,
                 collate_fn=collate_fn
             )
             dataloader.valid_len = math.ceil(len(dataset) / self.batch_size)
@@ -959,7 +959,7 @@ class NORM:
             dataloader = DataLoader(
                 dataset,
                 batch_size=self.batch_size,
-                shuffle=True,
+                shuffle=False,
                 collate_fn=collate_fn
             )
             dataloader.valid_len = math.ceil(len(dataset) / self.batch_size)
@@ -1218,7 +1218,7 @@ class DUA:
             dataloader = DataLoader(
                 dataset,
                 batch_size=self.batch_size,
-                shuffle=True,
+                shuffle=False,
                 collate_fn=collate_fn
             )
             dataloader.valid_len = math.ceil(len(dataset) / self.batch_size)
