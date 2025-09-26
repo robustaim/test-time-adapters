@@ -463,11 +463,14 @@ class ActMAD:
         """Extract activation alignment from clean data for RT-DETR"""
         from ttadapters.datasets import SHIFTClearDatasetForObjectDetection
 
-        dataset = SHIFTClearDatasetForObjectDetection(
+        shift_dataset = SHIFTClearDatasetForObjectDetection(
             root=data_root, train=True,
             transform=datasets.detectron_image_transform,
             transforms=datasets.default_valid_transforms
         )
+
+        # Wrap with DatasetAdapterForTransformers to ensure dict format
+        dataset = DatasetAdapterForTransformers(shift_dataset)
 
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
         loader.train_len = math.ceil(len(dataset)/batch_size)
