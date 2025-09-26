@@ -316,6 +316,45 @@ class SaveOutput:
         out = torch.vstack(self.outputs)   # [B, C, H, W]
         out = torch.var(out, dim=[0, 2, 3], correction=0)
         return out
+
+class AverageMeterRTDETR(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+class SaveOutputRTDETR:
+    """RT-DETR specific SaveOutput class"""
+    def __init__(self):
+        self.outputs = []
+
+    def __call__(self, module, module_in, module_out):
+        self.outputs.append(module_out.clone())
+
+    def clear(self):
+        self.outputs = []
+
+    def get_out_mean(self):
+        out = torch.vstack(self.outputs)
+        out = torch.mean(out, dim=0)
+        return out
+
+    def get_out_var(self):
+        out = torch.vstack(self.outputs)
+        out = torch.var(out, dim=0, correction=0)
+        return out
     
 def extract_activation_alignment(model, method, device, data_root, reference_preprocessor, batch_size=32):
     train_dataloader = DataLoader(

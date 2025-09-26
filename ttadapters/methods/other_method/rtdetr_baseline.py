@@ -513,10 +513,10 @@ class ActMAD:
         n_chosen_layers = len(chosen_bn_layers)
         print(f"ActMAD: Using {n_chosen_layers} normalization layers")
 
-        save_outputs = [utils.SaveOutput() for _ in range(n_chosen_layers)]
+        save_outputs = [utils.SaveOutputRTDETR() for _ in range(n_chosen_layers)]
 
-        clean_mean_act_list = [utils.AverageMeter() for _ in range(n_chosen_layers)]
-        clean_var_act_list = [utils.AverageMeter() for _ in range(n_chosen_layers)]
+        clean_mean_act_list = [utils.AverageMeterRTDETR() for _ in range(n_chosen_layers)]
+        clean_var_act_list = [utils.AverageMeterRTDETR() for _ in range(n_chosen_layers)]
 
         clean_mean_list_final = []
         clean_var_list_final = []
@@ -609,7 +609,7 @@ class ActMAD:
         self.optimizer.zero_grad()
 
         n_chosen_layers = len(self.chosen_bn_layers)
-        save_outputs_tta = [utils.SaveOutput() for _ in range(n_chosen_layers)]
+        save_outputs_tta = [utils.SaveOutputRTDETR() for _ in range(n_chosen_layers)]
 
         hook_list_tta = [
             self.chosen_bn_layers[x].register_forward_hook(save_outputs_tta[x])
@@ -672,7 +672,7 @@ class ActMAD:
             CLASSES = None
 
         # Use the same evaluator as baseline.py
-        from ttladapters.methods.other_method import utils
+        # from ttladapters.methods.other_method import utils
         evaluator = utils.Evaluator(class_list=CLASSES, task=task_name, reference_preprocessor=self.preprocessor)
 
         # Performance measurement
