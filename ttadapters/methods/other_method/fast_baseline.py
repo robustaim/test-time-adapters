@@ -1261,7 +1261,7 @@ class DUA:
         return results
 class MeanTeacher:
     """
-    Mean-Teacher method for test-time adaptation with FixMatch-style augmentation
+    Mean-Teacher method for test-time adaptation following ContinualTTA implementation
     """
 
     def __init__(
@@ -1302,11 +1302,20 @@ class MeanTeacher:
         self._setup_fixmatch_augment()
 
     def _setup_teacher_model(self):
+        # Create teacher model as deep copy
         self.teacher_model = copy.deepcopy(self.model)
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
 
+        # Configure teacher model attributes similar to ContinualTTA
+        self.teacher_model.online_adapt = False
+        if hasattr(self.model, 'online_adapt'):
+            self.model.online_adapt = False
+
+        # Set up optimizer for broader parameter adaptation
         params = []
+
+        # Adapt BatchNorm layers (similar to ContinualTTA normalization adaptation)
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.BatchNorm2d, FrozenBatchNorm2d)):
                 if hasattr(module, 'weight') and module.weight is not None:
@@ -1345,29 +1354,36 @@ class MeanTeacher:
         return FixMatchAugment(n=self.fixmatch_n, m=self.fixmatch_m)
 
     def _update_teacher_ema(self):
+        """Update teacher model parameters using EMA following ContinualTTA approach"""
         with torch.no_grad():
             for teacher_param, student_param in zip(self.teacher_model.parameters(), self.model.parameters()):
-                if teacher_param.requires_grad or student_param.requires_grad:
+                # Only update parameters that require gradients (following ContinualTTA)
+                if student_param.requires_grad:
                     teacher_param.data = self.ema_alpha * teacher_param.data + (1 - self.ema_alpha) * student_param.data
 
     def _apply_fixmatch_augmentation(self, batch):
+        """Apply weak and strong augmentations similar to ContinualTTA"""
         weak_batch = []
         strong_batch = []
 
         for item in batch:
+            # Weak augmentation (original)
             weak_item = copy.deepcopy(item)
             weak_batch.append(weak_item)
 
+            # Strong augmentation
             strong_item = copy.deepcopy(item)
             try:
-                strong_item["image"] = self.fixmatch_augment(strong_item["image"])
+                # Apply strong augmentation and store as separate key
+                strong_item["strong_aug_image"] = self.fixmatch_augment(strong_item["image"])
             except Exception:
-                strong_item = copy.deepcopy(weak_item)
+                strong_item["strong_aug_image"] = strong_item["image"]
             strong_batch.append(strong_item)
 
         return weak_batch, strong_batch
 
     def _set_pseudo_labels(self, inputs, outputs):
+        """Set pseudo labels following ContinualTTA implementation"""
         new_inputs = []
         for inp, oup in zip(inputs, outputs):
             instances = oup['instances']
@@ -1377,28 +1393,52 @@ class MeanTeacher:
             if len(high_conf_instances) == 0:
                 continue
 
-            new_inp = {k: inp[k] for k in inp if k not in ['instances']}
-            new_instances = Instances(inp['instances'].image_size)
+            # Create new input following ContinualTTA structure
+            new_inp = {k: inp[k] for k in inp if k not in ['instances', 'image', 'strong_aug_image']}
+
+            # Use strong augmented image
+            new_inp['image'] = inp['strong_aug_image'] if 'strong_aug_image' in inp else inp['image']
+
+            # Handle image size scaling if needed
+            new_img_size = inp['instances'].image_size
+            ori_img_size = high_conf_instances.image_size
+
+            new_instances = Instances(new_img_size)
             new_instances.gt_classes = high_conf_instances.pred_classes
             new_instances.gt_boxes = high_conf_instances.pred_boxes
+
+            # Scale boxes if image sizes differ
+            if new_img_size != ori_img_size:
+                new_instances.gt_boxes.scale(
+                    new_img_size[1] / ori_img_size[1],
+                    new_img_size[0] / ori_img_size[0]
+                )
+
             new_inp['instances'] = new_instances
             new_inputs.append(new_inp)
 
         return new_inputs
 
     def adapt_single_batch(self, batch):
+        """Adapt single batch following ContinualTTA mean-teacher approach"""
+        # Apply weak and strong augmentations
         weak_batch, strong_batch = self._apply_fixmatch_augmentation(batch)
 
+        # Teacher model inference on weak augmentation
         self.teacher_model.eval()
         with torch.no_grad():
             teacher_outputs = self.teacher_model(weak_batch)
 
+        # Perform adaptation if optimizer is available
         if self.optimizer is not None:
+            # Generate pseudo labels
             pseudo_labeled_batch = self._set_pseudo_labels(strong_batch, teacher_outputs)
 
             if len(pseudo_labeled_batch) > 0:
+                # Set model to training mode following ContinualTTA approach
                 self.model.train()
 
+                # Set specific components to training mode
                 if hasattr(self.model, 'backbone'):
                     self.model.backbone.train()
                 if hasattr(self.model, 'proposal_generator'):
@@ -1408,6 +1448,7 @@ class MeanTeacher:
                     self.model.roi_heads.train()
                     self.model.roi_heads.training = True
 
+                # Set BatchNorm layers to training mode
                 for name, module in self.model.named_modules():
                     if isinstance(module, (nn.BatchNorm2d, FrozenBatchNorm2d)):
                         module.train()
@@ -1415,21 +1456,36 @@ class MeanTeacher:
                 try:
                     self.optimizer.zero_grad()
 
+                    # Forward pass with EventStorage (following ContinualTTA)
                     with EventStorage() as storage:
                         model_output = self.model(pseudo_labeled_batch)
 
+                    # Handle losses
                     if isinstance(model_output, dict):
                         losses = model_output
                         total_detection_loss = sum([losses[k] for k in losses])
 
                         if total_detection_loss > 0:
                             total_detection_loss.backward()
+
+                            # Add gradient clipping (similar to ContinualTTA)
+                            if hasattr(self.model, 'backbone'):
+                                torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 1.0)
+
                             self.optimizer.step()
+
+                            # EMA update following ContinualTTA approach
                             self._update_teacher_ema()
 
-                except Exception:
+                except Exception as e:
+                    # Reset model state on exception
+                    self.model.eval()
                     pass
+                finally:
+                    # Ensure model is back to eval mode
+                    self.model.eval()
 
+        # Final inference using teacher model
         self.teacher_model.eval()
         with torch.no_grad():
             final_outputs = self.teacher_model(weak_batch)
