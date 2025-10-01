@@ -72,6 +72,51 @@ Pluggable Test-time Adapter Implementations
 
 
 ## Datasets
+### SHIFT
+```
+INFO: <simple> weather datasets - Normal: 20800, Corrupted: 129200
+INFO: <clear> weather datasets - Daytime: 20800, Night: 9350, Dawn: 9650
+INFO: <rainy> weather datasets - Daytime: 20600, Night: 11500, Dawn: 9600
+INFO: <cloudy> weather datasets - Daytime: 13850, Night: 6000, Dawn: 6750
+INFO: <foggy> weather datasets - Daytime: 12900, Night: 7200, Dawn: 7450
+INFO: <overcast> weather datasets - Daytime: 7850, Night: 3250, Dawn: 3250
+INFO: Splitting val
+INFO: <simple> weather datasets - Normal: 2800, Corrupted: 22200
+INFO: <clear> weather datasets - Daytime: 2800, Night: 1200, Dawn: 1400
+INFO: <rainy> weather datasets - Daytime: 3200, Night: 1950, Dawn: 1400
+INFO: <cloudy> weather datasets - Daytime: 2400, Night: 1200, Dawn: 1250
+INFO: <foggy> weather datasets - Daytime: 2650, Night: 1350, Dawn: 1350
+INFO: <overcast> weather datasets - Daytime: 1600, Night: 700, Dawn: 550
+```
+```
+INFO: Processing for 1x
+INFO: Splitting train
+INFO: <daytime_to_night> datasets - Clear: 960, Rainy: 560, Cloudy: 720, Foggy: 480, Overcast: 200, Total: 2920/9040
+INFO: <clear_to_foggy> datasets - Daytime: 1800, Night: 520, Dawn: 560, Total: 2880/9040
+INFO: <clear_to_rainy> datasets - Daytime: 1600, Night: 1000, Dawn: 640, Total: 3240/9040
+INFO: Splitting val
+INFO: <daytime_to_night> datasets - Clear: 160, Rainy: 280, Cloudy: 200, Foggy: 80, Overcast: 160, Total: 880/2280
+INFO: <clear_to_foggy> datasets - Daytime: 240, Night: 200, Dawn: 240, Total: 680/2280
+INFO: <clear_to_rainy> datasets - Daytime: 360, Night: 240, Dawn: 120, Total: 720/2280
+INFO: Processing for 10x
+INFO: Splitting train
+INFO: <daytime_to_night> datasets - Clear: 3200, Rainy: 4000, Cloudy: 2800, Foggy: 2800, Overcast: 1600, Total: 14400/40616
+INFO: <clear_to_foggy> datasets - Daytime: 4800, Night: 2616, Dawn: 4400, Total: 11816/40616
+INFO: <clear_to_rainy> datasets - Daytime: 6800, Night: 3200, Dawn: 4400, Total: 14400/40616
+INFO: Splitting val
+INFO: <daytime_to_night> datasets - Clear: 1012, Rainy: 0, Cloudy: 1457, Foggy: 400, Overcast: 0, Total: 2869/10069
+INFO: <clear_to_foggy> datasets - Daytime: 1600, Night: 400, Dawn: 1200, Total: 3200/10069
+INFO: <clear_to_rainy> datasets - Daytime: 1200, Night: 2000, Dawn: 800, Total: 4000/10069
+INFO: Processing for 100x
+INFO: Splitting train
+INFO: <daytime_to_night> datasets - Clear: 8000, Rainy: 8000, Cloudy: 6322, Foggy: 0, Overcast: 0, Total: 22322/74462
+INFO: <clear_to_foggy> datasets - Daytime: 16000, Night: 7612, Dawn: 4000, Total: 27612/74462
+INFO: <clear_to_rainy> datasets - Daytime: 8528, Night: 4000, Dawn: 12000, Total: 24528/74462
+INFO: Splitting val
+INFO: <daytime_to_night> datasets - Clear: 0, Rainy: 4000, Cloudy: 0, Foggy: 0, Overcast: 0, Total: 4000/20000
+INFO: <clear_to_foggy> datasets - Daytime: 4000, Night: 4000, Dawn: 0, Total: 8000/20000
+INFO: <clear_to_rainy> datasets - Daytime: 0, Night: 8000, Dawn: 0, Total: 8000/20000
+```
 
 
 ## Usage
