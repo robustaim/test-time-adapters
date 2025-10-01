@@ -38,7 +38,7 @@ from supervision.detection.core import Detections
 
 # ContinualTTA의 custom detectron2 import (표준 detectron2보다 우선)
 from detectron2.layers import FrozenBatchNorm2d
-from detectron2.structures import Boxes, Instances, ImageList, pairwise_iou
+from detectron2.structures import Boxes, Instances, pairwise_iou
 from detectron2.utils.events import EventStorage
 
 from torchvision.tv_tensors import Image, BoundingBoxes
@@ -65,6 +65,68 @@ import warnings
 
 from torch.utils.data import Dataset
 
+def task_to_subset_types(task: str):
+    """Convert task string to SHIFT dataset subset type"""
+    T = SHIFTDiscreteSubsetForObjectDetection.SubsetType
+
+    # weather
+    if task == "cloudy":
+        return T.CLOUDY_DAYTIME
+    if task == "overcast":
+        return T.OVERCAST_DAYTIME
+    if task == "rainy":
+        return T.RAINY_DAYTIME
+    if task == "foggy":
+        return T.FOGGY_DAYTIME
+
+    # time
+    if task == "night":
+        return T.CLEAR_NIGHT
+    if task in {"dawn", "dawn/dusk"}:
+        return T.CLEAR_DAWN
+    if task == "clear":
+        return T.CLEAR_DAYTIME
+
+    # simple
+    if task == "normal":
+        return T.NORMAL
+    if task == "corrupted":
+        return T.CORRUPTED
+
+    raise ValueError(f"Unknown task: {task}")
+
+
+class SHIFTCorruptedDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
+    """SHIFT corrupted dataset wrapper"""
+    def __init__(
+            self, root: str, force_download: bool = False,
+            train: bool = True, valid: bool = False,
+            transform=None, target_transform=None, transforms=None,
+            task="clear"
+    ):
+        super().__init__(
+            root=root, force_download=force_download,
+            train=train, valid=valid, subset_type=task_to_subset_types(task),
+            transform=transform, target_transform=target_transform, transforms=transforms
+        )
+
+
+def collate_fn(batch):
+    """Collate function for object detection"""
+    batched_inputs = []
+    for image, metadata in batch:
+        original_height, original_width = image.shape[-2:]
+        instances = Instances(image_size=(original_height, original_width))
+        instances.gt_boxes = Boxes(metadata["boxes2d"])  # xyxy
+        instances.gt_classes = metadata["boxes2d_classes"]
+        batched_inputs.append({
+            "image": image,
+            "instances": instances,
+            "height": original_height,
+            "width": original_width
+        })
+    return batched_inputs
+
 class DIRECT:
     """
     DIRECT (No Adaptation) method - baseline without any test-time adaptation
@@ -79,7 +141,7 @@ class DIRECT:
     ):
         self.model = model
         self.data_root = data_root
-        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.batch_size = batch_size
 
     @classmethod
@@ -101,8 +163,8 @@ class DIRECT:
 
     def _setup(self):
         """Setup the DIRECT method"""
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
-        self.model.eval()
 
     def adapt_single_batch(self, batch):
         """
@@ -115,8 +177,7 @@ class DIRECT:
             outputs: Model outputs
         """
         self.model.eval()
-        with torch.no_grad():
-            outputs = self.model(batch)
+        outputs = self.model(batch)
         return outputs
 
     def evaluate_task(self, task=None, dataset=None, dataloader=None, threshold=0.0):
@@ -147,34 +208,34 @@ class DIRECT:
         predictions_list = []
         targets_list = []
 
-        torch.cuda.empty_cache()
-        gc.collect()
+        torch.cuda.synchronize()
+        start = time.perf_counter()
 
-        inference_time = 0
-        total_batches = len(dataloader) if hasattr(dataloader, '__len__') else getattr(dataloader, 'valid_len', None)
+        with torch.inference_mode():
+            for batch in tqdm(dataloader, total=dataloader.valid_len, desc=f"DIRECT {task_name}"):
+                start_time = time.time()
+                outputs = self.adapt_single_batch(batch)
 
-        for batch_idx, batch in enumerate(tqdm(dataloader, total=total_batches, desc=f"DIRECT {task_name}")):
-            start_time = time.time()
-            outputs = self.adapt_single_batch(batch)
-            inference_time += time.time() - start_time
+                for i, (output, input_data) in enumerate(zip(outputs, batch)):
+                    instances = output['instances']
+                    mask = instances.scores > threshold
 
-            for i, (output, input_data) in enumerate(zip(outputs, batch)):
-                instances = output['instances']
-                mask = instances.scores > threshold
+                    pred_detection = Detections(
+                        xyxy=instances.pred_boxes.tensor[mask].detach().cpu().numpy(),
+                        class_id=instances.pred_classes[mask].detach().cpu().numpy(),
+                        confidence=instances.scores[mask].detach().cpu().numpy()
+                    )
+                    gt_instances = input_data['instances']
+                    target_detection = Detections(
+                        xyxy=gt_instances.gt_boxes.tensor.detach().cpu().numpy(),
+                        class_id=gt_instances.gt_classes.detach().cpu().numpy()
+                    )
 
-                pred_detection = Detections(
-                    xyxy=instances.pred_boxes.tensor[mask].detach().cpu().numpy(),
-                    class_id=instances.pred_classes[mask].detach().cpu().numpy(),
-                    confidence=instances.scores[mask].detach().cpu().numpy()
-                )
-                gt_instances = input_data['instances']
-                target_detection = Detections(
-                    xyxy=gt_instances.gt_boxes.tensor.detach().cpu().numpy(),
-                    class_id=gt_instances.gt_classes.detach().cpu().numpy()
-                )
+                    predictions_list.append(pred_detection)
+                    targets_list.append(target_detection)
 
-                predictions_list.append(pred_detection)
-                targets_list.append(target_detection)
+        torch.cuda.synchronize()
+        end = time.perf_counter()
 
         map_metric.update(predictions=predictions_list, targets=targets_list)
         print(f"Computing mAP for {task_name}")
@@ -188,14 +249,13 @@ class DIRECT:
             }
 
         total_samples = len(predictions_list)
-        fps = total_samples / inference_time if inference_time > 0 else 0
+        inference_time = end - start
 
         return {
             "mAP@0.50:0.95": m_ap.map50_95.item(),
             "mAP@0.50": m_ap.map50.item(),
             "mAP@0.75": m_ap.map75.item(),
             "inference_time": inference_time,
-            "fps": fps,
             "total_samples": total_samples,
             **per_class_map,
         }
@@ -255,6 +315,9 @@ class DIRECT:
         dataloaders = self.prepare_dataloaders(tasks)
 
         results = {}
+        final_inference_time = 0.0
+        final_total_samples = 0
+
         for task in tasks:
             if task not in dataloaders:
                 print(f"Warning: No dataloader found for task {task}, skipping...")
@@ -266,8 +329,12 @@ class DIRECT:
                 dataset=dataset,
                 dataloader=dataloader
             )
-            print(f"Results for {task}: {results[task]}")
 
+            final_inference_time += results[task]["inference_time"]
+            final_total_samples += results[task]["total_samples"]
+            print(f"Results for {task}: {results[task]}")
+        fps = final_total_samples / final_inference_time
+        print(f"FPS : {fps:.3f}")
         return results
 
 class ActMAD:
@@ -324,6 +391,7 @@ class ActMAD:
     def _setup(self):
         """Setup the ActMAD method"""
         # Move model to device
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
 
         # Unfreeze model parameters
@@ -347,7 +415,7 @@ class ActMAD:
             transforms=datasets.default_valid_transforms
         )
 
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
         loader.train_len = math.ceil(len(dataset)/batch_size)
 
         # model unfreeze
@@ -716,6 +784,7 @@ class DUA:
 
     def _setup(self):
         """Setup the DUA method"""
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
         self._apply_dua_adaptation()
 
@@ -971,6 +1040,7 @@ class NORM:
 
     def _setup(self):
         """Setup the NORM method"""
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
         self._apply_norm_adaptation()
 
@@ -1208,6 +1278,7 @@ class DUA:
 
     def _setup(self):
         """Setup the DUA method"""
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
         self._apply_dua_adaptation()
 
@@ -1487,6 +1558,7 @@ class MeanTeacher:
         return instance
 
     def _setup(self):
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
         self._setup_teacher_model()
         self._setup_training_mode()
@@ -2128,6 +2200,7 @@ class WHW:
 
     def _setup(self):
         """Setup the WHW method with parallel adapters"""
+        self.model = copy.deepcopy(self.model)
         self.model.to(self.device)
         self._freeze_backbone()
         self._load_source_statistics()
@@ -2998,7 +3071,7 @@ class WHW:
             transforms=datasets.default_valid_transforms
         )
 
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn)
         loader.train_len = math.ceil(len(dataset)/self.batch_size)
 
         # Collections
