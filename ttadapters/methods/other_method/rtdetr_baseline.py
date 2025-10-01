@@ -463,16 +463,13 @@ class ActMAD:
         """Extract activation alignment from clean data for RT-DETR"""
         from ttadapters.datasets import SHIFTClearDatasetForObjectDetection
 
-        shift_dataset = SHIFTClearDatasetForObjectDetection(
-            root=data_root, train=True,
-            transform=datasets.detectron_image_transform,
-            transforms=datasets.default_valid_transforms
-        )
+        shift_dataset = SHIFTClearDatasetForObjectDetection(root=data_root, train=True)
 
         # Wrap with DatasetAdapterForTransformers to ensure dict format
         dataset = DatasetAdapterForTransformers(shift_dataset)
-
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        
+        from functools import partial
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=partial(collate_fn, preprocessor=self.preprocessor))
         loader.train_len = math.ceil(len(dataset)/batch_size)
 
         # model unfreeze
@@ -582,7 +579,7 @@ class ActMAD:
         """Setup chosen BN layers from layer names"""
         current_bn_dict = {
             name: module for name, module in self.model.named_modules()
-            if isinstance(module, (nn.LayerNorm, nn.BatchNorm2d))
+            if isinstance(module, (nn.LayerNorm, nn.BatchNorm2d, RTDetrFrozenBatchNorm2d))
         }
 
         self.chosen_bn_layers = []
@@ -907,6 +904,10 @@ class DUA:
                             bias = self.bias - self.running_mean * scale
                             scale = scale.reshape(1, -1, 1, 1)
                             bias = bias.reshape(1, -1, 1, 1)
+
+                        out_dtype = x.dtype
+                        out = x * scale.to(out_dtype) + bias.to(out_dtype)
+
                     elif isinstance(self, RTDetrFrozenBatchNorm2d):
                         # RTDetrFrozenBatchNorm2d has different structure - use eps=1e-5 as default
                         eps = getattr(self, 'eps', 1e-5)
@@ -926,7 +927,11 @@ class DUA:
 
                     elif isinstance(self, nn.LayerNorm):
                         # Standard LayerNorm operation
-                        return nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+                        out = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+
+                    else:
+                        # Fallback: just return input
+                        out = x
 
                     return out
 
