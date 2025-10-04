@@ -492,7 +492,10 @@ class SHIFTContinuous100SubsetForObjectDetection(SHIFTContinuousSubsetForObjectD
 
 def patch_fast_download_for_object_detection():
     warnings.warn("This is a patch for fast download only for object detection. By using this, you will not be able to use the full dataset for other tasks like segmentation. So, if you need to use the full dataset in a later time, please remove all the downloaded files and run the download script again without applying this patch.", UserWarning)
-    old_code = SHIFTDataset.download.__code__
-    new_consts = tuple("--group \"[img, det_2d]\"" if const == "--group \"all\"" else const for const in old_code.co_consts)
+    old_code = SHIFTDataset.download.__func__.__code__
+    new_consts = tuple(
+        const.replace('--group "all"', '--group "[img, det_2d]"') if isinstance(const, str) and '--group "all"' in const else const 
+        for const in old_code.co_consts
+    )
     new_code = old_code.replace(co_consts=new_consts)
-    SHIFTDataset.download.__code__ = new_code
+    SHIFTDataset.download.__func__.__code__ = new_code
