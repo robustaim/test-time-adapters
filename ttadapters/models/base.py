@@ -1,12 +1,30 @@
-from torch import nn, load, save, hub
-from os import path, makedirs
 from typing import Union, Any, Optional
+from dataclasses import dataclass
+from os import path, makedirs
+from enum import Enum
+
+from torch import nn, load, save, hub
 
 from ..datasets import BaseDataset
 
 
+class ModelProvider(Enum):
+    Detectron2 = "Detectron2"
+    HuggingFace = "HuggingFace"
+    Ultralytics = "Ultralytics"
+
+
+@dataclass
+class WeightsInfo:
+    weight_path: str = ""
+    version: str = ""
+    weight_key: Optional[str] = None
+    exclude_keys: Optional[list[str]] = None
+
+
 class BaseModel(nn.Module):
-    model_name = "BaseModel"
+    model_name: str = "BaseModel"
+    model_provider: ModelProvider = ModelProvider.Detectron2  # Default provider
 
     def __init__(self, dataset: Union[BaseDataset, str] = ""):
         super().__init__()
@@ -27,23 +45,59 @@ class BaseModel(nn.Module):
 
     def load_from(
         self,
-        version: Union[str, Any] = "",
         weight_path: str = path.join(".", "weights"),
+        version: str = "",
         weight_key: Optional[str] = None,
+        exclude_keys: Optional[list[str]] = None,
+        strict: bool = True
     ):
-        if isinstance(version, str):
-            if version:
-                version = f"_{version}"
-            model_id = f"{self.model_name}_{self.dataset_name}{version}"
-            if "http" in weight_path:
-                state = hub.load_state_dict_from_url(weight_path, map_location="cpu")
-            else:
-                file_name = path.join(weight_path, f"{model_id}.pt")
-                state = load(file_name, map_location="cpu")
-        elif callable(version):
-            state = version()
+        """Load model weights from a file or URL.
+
+        Args:
+            weight_path (str, optional): Path to the weights directory or file. 
+                Can be a local path, detectron2 model path, or URL. Defaults to path.join(".", "weights").
+            version (str, optional): Version suffix to append to the model filename. Defaults to "".
+            weight_key (Optional[str], optional): Key to extract weights from a nested state dict. Defaults to None.
+            exclude_keys (Optional[list[str]], optional): List of state dict keys to exclude from loading. Defaults to None.
+            strict (bool, optional): Whether to strictly enforce that the keys in state_dict match 
+                the keys returned by this module's state_dict() function. Defaults to True.
+                Note: This parameter is automatically set to False when loading from detectron2 checkpoints.
+
+        Returns:
+            dict: Missing and unexpected keys from loading the state dict, or checkpoint metadata for detectron2 models.
+        """
+        if "detectron2://" in weight_path:
+            from detectron2.checkpoint import DetectionCheckpointer
+            checkpointer = DetectionCheckpointer(self)
+            checkpointables = [weight_key] if weight_key else None
+            exclude_states = {k: v for k, v in self.state_dict().items() if exclude_keys and k in exclude_keys}
+            result = checkpointer.load(weight_path, checkpointables=checkpointables)
+            if exclude_states:  # re-apply excluded states
+                self.load_state_dict(exclude_states, strict=False)
+            if result and exclude_keys:
+                return {k: v for k, v in result.items() if k not in exclude_keys}
+            return result
+        elif "http://" in weight_path or "https://" in weight_path:
+            state = hub.load_state_dict_from_url(weight_path, map_location="cpu")
         else:
-            state = version
+            model_id = f"{self.model_name}_{self.dataset_name}{'_'+version if version else ''}"
+            file_name = path.join(weight_path, f"{model_id}.pt")
+            state = load(file_name, map_location="cpu")
+
         if weight_key:
             state = state[weight_key]
-        return self.load_state_dict(state)
+        if hasattr(state, "state_dict"):  # some checkpoints have nested state_dict
+            state = state.state_dict()
+
+        if exclude_keys and len(exclude_keys) > 0:  # exclude specified keys
+            state = {k: v for k, v in state.items() if k not in exclude_keys}
+
+        model_state = self.state_dict()  # exclude size-mismatched keys
+        new_state = {}
+        for k, v in state.items():
+            if k in model_state and v.size() == model_state[k].size():
+                new_state[k] = v
+            else:
+                print(f"NOTE: Size mismatch for {k}: copying a param with shape {v.size()} from checkpoint, the shape in current model is {model_state[k].size()}")
+
+        return self.load_state_dict(new_state, strict=strict)

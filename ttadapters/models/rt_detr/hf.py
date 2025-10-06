@@ -19,7 +19,7 @@ def collate_fn(batch):
     )
 
 
-class RTDetr50ForObjectDetection(RTDetrForObjectDetection, BaseModel):
+class HFRTDetrForObjectDetection(RTDetrForObjectDetection, BaseModel):
     model_id = "PekingU/rtdetr_r50vd"
     model_name = "RT-DETR-R50"
 

@@ -1,4 +1,5 @@
 import torch
+from torch.nn import functional
 from torchvision import tv_tensors
 import torchvision.transforms.v2.functional as F
 
@@ -59,26 +60,22 @@ class ResizeShortestEdge:
         new_w = int(w * scale)
 
         # Apply max_size constraint
-        if max(new_h, new_w) > self.max_size:
-            scale = self.max_size / max(new_h, new_w)
-            new_h = int(h * scale)
-            new_w = int(w * scale)
+        if max(h, w) * scale > self.max_size:
+            scale = self.max_size / max(h, w)  # 1333/1920 = 0.694
+            new_h = int(h * scale)  # 1080 * 0.694 = 749
+            new_w = int(w * scale)  # 1920 * 0.694 = 1333
 
         # Resize image
         resized_image = F.resize(image, size=[new_h, new_w], antialias=True)
 
         # Process BBox
         if target is not None and self.box_key in target:
-            # Calculate scale factors
-            scale_x = new_w / w
-            scale_y = new_h / h
-
             # Scale BBox
             if isinstance(target[self.box_key], tv_tensors.BoundingBoxes):
                 # Handle tv_tensors.BoundingBoxes
                 boxes = target[self.box_key].clone()
-                boxes[:, [0, 2]] *= scale_x  # x1, x2
-                boxes[:, [1, 3]] *= scale_y  # y1, y2
+                boxes[:, [0, 2]] *= scale  # x1, x2
+                boxes[:, [1, 3]] *= scale  # y1, y2
 
                 # Create new BoundingBoxes
                 target[self.box_key] = tv_tensors.BoundingBoxes(
@@ -89,8 +86,8 @@ class ResizeShortestEdge:
             elif isinstance(target[self.box_key], torch.Tensor):
                 # Handle regular tensor
                 target[self.box_key] = target[self.box_key].clone()
-                target[self.box_key][:, [0, 2]] *= scale_x  # x1, x2
-                target[self.box_key][:, [1, 3]] *= scale_y  # y1, y2
+                target[self.box_key][:, [0, 2]] *= scale  # x1, x2
+                target[self.box_key][:, [1, 3]] *= scale  # y1, y2
 
         if target is not None:
             return resized_image, target
@@ -182,7 +179,7 @@ class MaskedImageList:
             u0 = max_size[-1] - image_size[1]
             u1 = max_size[-2] - image_size[0]
             padding_size = [0, u0, 0, u1]
-            batched_imgs = F.pad(tensors[0], padding_size, value=pad_value).unsqueeze_(0)
+            batched_imgs = functional.pad(tensors[0], padding_size, value=pad_value).unsqueeze_(0)
         else:
             # max_size can be a tensor in tracing mode, therefore convert to list
             batch_shape = [len(tensors)] + list(tensors[0].shape[:-2]) + list(max_size)

@@ -4,22 +4,23 @@ from detectron2.modeling import build_model
 from detectron2.config import get_cfg
 from detectron2 import model_zoo
 
-from torchvision.tv_tensors import Image, BoundingBoxes
+from torchvision.tv_tensors import Image
 from detectron2.structures import Boxes, Instances
 
-from torch import hub, nn
+from torch import nn
 
 import warnings
 
-from ..base import BaseModel
+from ..base import BaseModel, ModelProvider, WeightsInfo
 from ...datasets import BaseDataset
 
 
-def collate_fn(batch: list[Image, BoundingBoxes]):
+def collate_fn(batch: list[Image, dict]):
     batched_inputs = []
     for image, metadata in batch:
-        original_height, original_width = image.shape[-2:]
-        instances = Instances(image_size=(original_height, original_width))
+        resized_height, resized_width = image.shape[-2:]
+        original_height, original_width = metadata['original_hw']
+        instances = Instances(image_size=(resized_height, resized_width))
         instances.gt_boxes = Boxes(metadata["boxes2d"])  # xyxy
         instances.gt_classes = metadata["boxes2d_classes"]
         batched_inputs.append({
@@ -34,10 +35,11 @@ def collate_fn(batch: list[Image, BoundingBoxes]):
 class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
     model_name = "Faster_RCNN-R50"
     model_config = "COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"
+    model_provider = ModelProvider.Detectron2
 
     class Weights:
-        IMAGENET = lambda: hub.load_state_dict_from_url("https://dl.fbaipublicfiles.com/detectron2/ImageNetPretrained/MSRA/R-50.pkl", map_location="cpu")
-        NATUREYOO = lambda: hub.load_state_dict_from_url("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_Resnet_50_SHIFT.pth", map_location="cpu")
+        IMAGENET_OFFICIAL = WeightsInfo("detectron2://ImageNetPretrained/MSRA/R-50.pkl")
+        SHIFT_CLEAR_NATUREYOO = WeightsInfo("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_Resnet_50_SHIFT.pth", weight_key="model")
 
     def __init__(self, dataset: BaseDataset):
         num_classes = len(dataset.classes)
@@ -65,6 +67,7 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
 
 class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
     model_name = "SwinT_RCNN-Tiny"
+    model_provider = ModelProvider.Detectron2
     default_params = dict(
         patch_size=4,
         in_chans=3,
@@ -86,7 +89,14 @@ class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
     )
 
     class Weights:
-        NATUREYOO = lambda: hub.load_state_dict_from_url("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_SwinT_Tiny_SHIFT.pth", map_location="cpu")
+        IMAGENET_XIAOHU2015 = WeightsInfo("https://github.com/xiaohu2015/SwinT_detectron2/releases/download/v1.1/faster_rcnn_swint_T.pth", weight_key="model", exclude_keys = [
+                "roi_heads.box_predictor.cls_score.weight",
+                "roi_heads.box_predictor.cls_score.bias",
+                "roi_heads.box_predictor.bbox_pred.weight",
+                "roi_heads.box_predictor.bbox_pred.bias"
+            ]
+        )
+        SHIFT_CLEAR_NATUREYOO = WeightsInfo("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_SwinT_Tiny_SHIFT.pth", weight_key="model")
 
     def __init__(self, dataset: BaseDataset):
         num_classes = len(dataset.classes)

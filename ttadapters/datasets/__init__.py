@@ -10,6 +10,7 @@ from .shift import (
 
 from .base import BaseDataset, DatasetHolder, DataLoaderHolder
 from .transform import ResizeShortestEdge, MaskedImageList, ConvertRGBtoBGR
+from . import scenarios
 
 from torchvision.transforms import v2 as T
 
