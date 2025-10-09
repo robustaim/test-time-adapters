@@ -337,7 +337,7 @@ class HFRTDetrDataPreparation(DataPreparation):
         return self.transforms(self.dataset[idx], idx=idx)
 
     def collate_fn(self, batch):
-        target_size = random.choice(self.multi_scale) if self.enable_strong_augment else self.img_size
+        target_size = random.choice(self.multi_scale) if self.evaluation_mode else self.img_size
 
         try:
             images = [item['image'] for item in batch]
