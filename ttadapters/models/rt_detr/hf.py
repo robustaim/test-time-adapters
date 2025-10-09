@@ -241,6 +241,7 @@ class HFRTDetrDataPreparation(DataPreparation):
             T.RandomPhotometricDistort(),
             T.RandomZoomOut(),
             T.RandomIoUCrop(),
+            T.Resize(size=(800, 1280)),  # required to be overridded with dataset img_size
             T.RandomHorizontalFlip()
         ]),
         default_augment: T.Compose = T.Compose([
