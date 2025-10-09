@@ -235,7 +235,7 @@ class HFRTDetrDataPreparation(DataPreparation):
         evaluation_mode: bool = False,
         confidence_threshold: float = 0.05,
         strong_augment_threshold_epoch: int = 71,
-        multi_scale: list[int] = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800],
+        multi_scale: list[int] = [480, 640, 800],
         longest_edge: int = 1333,
         strong_augment: T.Compose = T.Compose([
             T.RandomPhotometricDistort(),
