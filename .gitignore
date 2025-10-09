@@ -184,3 +184,5 @@ data/
 results/
 results-*/
 wandb/
+logs/
+trainer_output/

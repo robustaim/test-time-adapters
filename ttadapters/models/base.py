@@ -2,10 +2,11 @@ from typing import Union, Any, Optional
 from dataclasses import dataclass
 from os import path, makedirs
 from enum import Enum
+import gc
 
-from torch import nn, load, save, hub
+from torch import nn, load, save, hub, cuda
 
-from ..datasets import BaseDataset
+from ..datasets import BaseDataset, DataPreparation
 
 
 class ModelProvider(Enum):
@@ -25,6 +26,9 @@ class WeightsInfo:
 class BaseModel(nn.Module):
     model_name: str = "BaseModel"
     model_provider: ModelProvider = ModelProvider.Detectron2  # Default provider
+    DataPreparation = DataPreparation
+    class Trainer:
+        pass
 
     def __init__(self, dataset: Union[BaseDataset, str] = ""):
         super().__init__()
@@ -80,9 +84,21 @@ class BaseModel(nn.Module):
         elif "http://" in weight_path or "https://" in weight_path:
             state = hub.load_state_dict_from_url(weight_path, map_location="cpu")
         else:
-            model_id = f"{self.model_name}_{self.dataset_name}{'_'+version if version else ''}"
-            file_name = path.join(weight_path, f"{model_id}.pt")
-            state = load(file_name, map_location="cpu")
+            if self.model_provider == ModelProvider.HuggingFace:
+                revision = version if version else "main"
+                reference_model = self.from_pretrained(
+                    weight_path, revision=revision, config=self.config, dtype=self.dtype, ignore_mismatched_sizes=True
+                )  # to initialize the model architecture
+                state = reference_model.state_dict()
+                if hasattr(reference_model, "generation_config"):
+                    self.generation_config = reference_model.generation_config
+                del reference_model
+                cuda.empty_cache()
+                gc.collect()
+            else:
+                model_id = f"{self.model_name}_{self.dataset_name}{'_'+version if version else ''}"
+                file_name = path.join(weight_path, f"{model_id}.pt")
+                state = load(file_name, map_location="cpu")
 
         if weight_key:
             state = state[weight_key]
@@ -100,4 +116,10 @@ class BaseModel(nn.Module):
             else:
                 print(f"NOTE: Size mismatch for {k}: copying a param with shape {v.size()} from checkpoint, the shape in current model is {model_state[k].size()}")
 
-        return self.load_state_dict(new_state, strict=strict)
+        result = self.load_state_dict(new_state, strict=strict)
+        if self.model_provider == ModelProvider.HuggingFace:
+            self.tie_weights()  # for HF models with tied weights
+            if hasattr(self, "post_init"):
+                self.post_init()
+
+        return result

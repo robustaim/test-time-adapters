@@ -4,7 +4,7 @@ from detectron2.modeling import build_model
 from detectron2.config import get_cfg
 from detectron2 import model_zoo
 
-from torchvision.tv_tensors import Image
+from torchvision.tv_tensors import Image, BoundingBoxFormat, BoundingBoxes
 from detectron2.structures import Boxes, Instances
 
 from torch import nn
@@ -12,30 +12,62 @@ from torch import nn
 import warnings
 
 from ..base import BaseModel, ModelProvider, WeightsInfo
-from ...datasets import BaseDataset
+from ...datasets import BaseDataset, DataPreparation
 
 
-def collate_fn(batch: list[Image, dict]):
-    batched_inputs = []
-    for image, metadata in batch:
-        resized_height, resized_width = image.shape[-2:]
-        original_height, original_width = metadata['original_hw']
-        instances = Instances(image_size=(resized_height, resized_width))
-        instances.gt_boxes = Boxes(metadata["boxes2d"])  # xyxy
-        instances.gt_classes = metadata["boxes2d_classes"]
-        batched_inputs.append({
-            "image": image,
-            "instances": instances,
-            "height": original_height,
-            "width": original_width
-        })
-    return batched_inputs
+from detectron2.data.transforms import ResizeShortestEdge, ConvertRGBtoBGR
+
+
+from detectron2.structures import ImageList
+
+class DataPreparationForRCNN(DataPreparation):
+    def __init__(
+        self, bbox_key: str = "boxes2d", class_key: str = "boxes2d_classes", original_size_key: str = "original_hw"
+    ):
+        super().__init__()
+        self.bbox_key = bbox_key
+        self.class_key = class_key
+        self.original_size_key = original_size_key
+
+    detectron_image_transform = T.Compose([
+        ConvertRGBtoBGR()
+    ])
+
+    default_train_transforms = T.Compose([
+        ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333, box_key='boxes2d'),  # Detectron2 Faster R-CNN default training transform
+        T.RandomHorizontalFlip(p=0.5)  # Random horizontal flip with 50% probability
+    ])
+
+    default_valid_transforms = T.Compose([
+        ResizeShortestEdge(800, max_size=1333, box_key='boxes2d')  # Detectron2 Faster R-CNN default validation transform
+    ])
+
+    def collate_fn(self, batch: list[Image, dict]):
+        batched_inputs = []
+        for image, metadata in batch:
+            resized_height, resized_width = image.shape[-2:]
+            original_height, original_width = metadata['original_hw']
+            instances = Instances(image_size=(resized_height, resized_width))
+            bboxes: BoundingBoxes = metadata["boxes2d"]  # xyxy
+            if bboxes.format != BoundingBoxFormat.XYXY:
+                bboxes = bboxes.convert_format(BoundingBoxFormat.XYXY, image_size=(original_height, original_width))
+            instances.gt_boxes = Boxes()  # xyxy
+            instances.gt_classes = metadata["boxes2d_classes"]
+            batched_inputs.append({
+                "image": image,
+                "instances": instances,
+                "height": original_height,
+                "width": original_width
+            })
+        return batched_inputs
 
 
 class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
-    model_name = "Faster_RCNN-R50"
+    model_name = "Faster_R-CNN-R50"
     model_config = "COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"
     model_provider = ModelProvider.Detectron2
+    DataPreparation = DataPreparation
+    Trainer = None
 
     class Weights:
         IMAGENET_OFFICIAL = WeightsInfo("detectron2://ImageNetPretrained/MSRA/R-50.pkl")
@@ -66,8 +98,10 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
 
 
 class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
-    model_name = "SwinT_RCNN-Tiny"
+    model_name = "SwinT_R-CNN-Tiny"
     model_provider = ModelProvider.Detectron2
+    DataPreparation = DataPreparation
+    Trainer = None
     default_params = dict(
         patch_size=4,
         in_chans=3,
