@@ -11,6 +11,7 @@ from torchvision.transforms.v2.functional import convert_bounding_box_format
 from torchvision.tv_tensors import BoundingBoxFormat, BoundingBoxes
 from torchvision.transforms import v2 as T
 from torchvision.ops import box_convert
+from torch import nn
 import torch
 
 from supervision.detection.core import Detections
@@ -45,14 +46,8 @@ class HFRTDetrTrainer(Trainer):
 
         data_collator = kwargs.pop("data_collator", None)
         if data_collator is None:
-            if train_dataset is None:
-                self.train_collator = None
-            else:
-                self.train_collator = getattr(train_dataset, "multi_scale_collate_fn", train_dataset.collate_fn)
-            if eval_dataset is None:
-                self.eval_collator = None
-            else:
-                self.eval_collator = getattr(eval_dataset, "multi_scale_collate_fn", eval_dataset.collate_fn)
+            self.train_collator = train_dataset.collate_fn if train_dataset else None
+            self.eval_collator = eval_dataset.collate_fn if eval_dataset else None
         else:
             self.train_collator = data_collator
             self.eval_collator = data_collator
@@ -210,11 +205,13 @@ class HFRTDetrTrainer(Trainer):
         else:
             preds = ModelOutput(*eval_pred.predictions[1:3])
             labels = eval_pred.label_ids
-            results = self.eval_post_process(preds, target_sizes=None)  # do not resize to original size
+            sizes = [label['orig_size'].cpu().tolist() for label in labels]
+
+            results = self.eval_post_process(preds, target_sizes=sizes)
 
             predictions = [Detections.from_transformers(result) for result in results]
             targets = [Detections(
-                xyxy=box_convert(label['boxes'], "cxcywh", "xyxy").cpu().numpy(),
+                xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().numpy(),
                 class_id=label['class_labels'].cpu().numpy(),
             ) for label in labels]  # keep `normalized` xyxy format
 
@@ -236,9 +233,10 @@ class HFRTDetrDataPreparation(DataPreparation):
         dataset_key: dict = dict(bboxes="boxes2d", classes="boxes2d_classes", original_size="original_hw"),
         img_size: int = 640,
         evaluation_mode: bool = False,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.05,
         strong_augment_threshold_epoch: int = 71,
         multi_scale: list[int] = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800],
+        longest_edge: int = 1333,
         strong_augment: T.Compose = T.Compose([
             T.RandomPhotometricDistort(),
             T.RandomZoomOut(),
@@ -252,6 +250,7 @@ class HFRTDetrDataPreparation(DataPreparation):
         self.dataset = dataset
         self.dataset_key = dataset_key
         self.img_size = img_size
+        self.longest_edge = longest_edge
         self.confidence_threshold = confidence_threshold
         self.evaluation_mode = evaluation_mode
 
@@ -269,6 +268,7 @@ class HFRTDetrDataPreparation(DataPreparation):
             self.default_augment = default_augment
 
         self.image_processor = RTDetrImageProcessorFast.from_pretrained(self.model_id)
+        self.image_processor.size = {"shortest_edge": self.img_size, "longest_edge": self.longest_edge}
         self.image_processor.do_resize = True
 
     def transforms(self, *args, idx=None):
@@ -284,16 +284,17 @@ class HFRTDetrDataPreparation(DataPreparation):
         if not isinstance(bbox, BoundingBoxes):
             logger.warning_once("Assume the bbox is in Pascal VOC format (x1, y1, x2, y2) since it's not a BoundingBoxes instance. Please ensure this is correct.")
             bbox = BoundingBoxes(bbox, format=BoundingBoxFormat.XYXY, canvas_size=img_size)
-        coco_bbox = convert_bounding_box_format(bbox, new_format=BoundingBoxFormat.XYWH)
+
+        if bbox.format != BoundingBoxFormat.XYWH:  # from Pascal VOC format (x1, y1, x2, y2)
+            bbox = convert_bounding_box_format(bbox, new_format=BoundingBoxFormat.XYWH)  # to COCO format: [x, y, width, height]
 
         # Convert to COCO_Detection Format
         annotations = []
         target = dict(image_id=idx, annotations=annotations)
-        for box, coco, cls in zip(bbox, coco_bbox, bbox_classes):
-            width, height = coco[2:].tolist()
+        for box, cls in zip(bbox, bbox_classes):
+            width, height = box[2:].tolist()
             annotations.append(dict(
-                bbox_xyxy=box,  # from Pascal VOC format (x1, y1, x2, y2)
-                bbox=coco,      # to COCO format: [x, y, width, height]
+                bbox=box,
                 category_id=cls.item(),
                 area=width*height,
                 iscrowd=0
@@ -335,18 +336,16 @@ class HFRTDetrDataPreparation(DataPreparation):
         return self.transforms(self.dataset[idx], idx=idx)
 
     def collate_fn(self, batch):
+        target_size = random.choice(self.multi_scale) if self.enable_strong_augment else self.img_size
+
         try:
             images = [item['image'] for item in batch]
             targets = [item['target'] for item in batch]
         except TypeError:  # fallback to simple collate
             images = [item[0] for item in batch]
             targets = [item[1] for item in batch]
+        self.image_processor.size = {"shortest_edge": target_size, "longest_edge": self.longest_edge}
         return self.pre_process((images, targets))
-
-    def multi_scale_collate_fn(self, batch):
-        target_size = random.choice(self.multi_scale) if self.enable_strong_augment else self.img_size
-        self.image_processor.size = {'height': target_size, 'width': target_size}
-        return self.collate_fn(batch)
 
 
 class HFRTDetrForObjectDetection(BaseModel, RTDetrForObjectDetection):
