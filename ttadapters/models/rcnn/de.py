@@ -289,7 +289,7 @@ class DetectronDataPreparation(DataPreparation):
         transformed_boxes = from_numpy(aug_input.boxes.copy())
 
         except_keys = list(self.dataset_key.values())
-        resized_height, resized_width = image.shape[-2:]  # HWC
+        resized_height, resized_width = transformed_image.shape[-2:]  # HWC
         instances = Instances(image_size=(resized_height, resized_width))
         instances.gt_boxes = Boxes(transformed_boxes)
         instances.gt_classes = bbox_classes
