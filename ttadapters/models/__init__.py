@@ -1,2 +1,2 @@
-#from .rcnn import *
+from .rcnn import *
 from .rt_detr import *

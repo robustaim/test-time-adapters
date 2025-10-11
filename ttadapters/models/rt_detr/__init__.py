@@ -1,1 +1,1 @@
-from .hf import HFRTDetrForObjectDetection
+from .hf import RTDetrForObjectDetection

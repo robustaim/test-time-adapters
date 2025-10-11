@@ -3,7 +3,7 @@ from typing import Optional
 import random
 import gc
 
-from transformers import RTDetrConfig, RTDetrForObjectDetection, RTDetrImageProcessorFast
+from transformers import RTDetrConfig, RTDetrImageProcessorFast, RTDetrForObjectDetection as _RTDetrForObjectDetection
 from transformers.trainer import Trainer, TrainingArguments, is_sagemaker_mp_enabled, logger
 from transformers.trainer_utils import EvalPrediction
 
@@ -31,13 +31,19 @@ class ModelOutput:
     pred_boxes: torch.Tensor
 
 
-class HFRTDetrTrainer(Trainer):
+@dataclass
+class RTDetrTrainingArguments(TrainingArguments):
+    backbone_learning_rate: float = None  # Set to 1/10th of the main learning rate if not specified
+
+
+class RTDetrTrainer(Trainer):
     def __init__(
         self,
         model: BaseModel,
         classes: list[str],
         train_dataset: DataPreparation | None = None,
         eval_dataset: DataPreparation | None = None,
+        args: RTDetrTrainingArguments | None = None,
         **kwargs
     ):
         self.map_metric = MeanAveragePrecision()
@@ -59,7 +65,7 @@ class HFRTDetrTrainer(Trainer):
 
         super().__init__(
             model=model, train_dataset=train_dataset, eval_dataset=eval_dataset,
-            compute_metrics=compute_metrics, **kwargs
+            compute_metrics=compute_metrics, args=args, **kwargs
         )
 
     def train(self, *args, **kwargs):
@@ -219,12 +225,7 @@ class HFRTDetrTrainer(Trainer):
             return {}
 
 
-@dataclass
-class HFRTDetrTrainingArguments(TrainingArguments):
-    backbone_learning_rate: float = None  # Set to 1/10th of the main learning rate if not specified
-
-
-class HFRTDetrDataPreparation(DataPreparation):
+class RTDetrDataPreparation(DataPreparation):
     model_id = "PekingU/rtdetr_r50vd"
 
     def __init__(
@@ -241,13 +242,16 @@ class HFRTDetrDataPreparation(DataPreparation):
             T.RandomPhotometricDistort(),
             T.RandomZoomOut(),
             T.RandomIoUCrop(),
-            T.Resize(size=(800, 1280)),  # required to be overridded with dataset img_size
+            T.Resize(size=(800, 1280)),  # required to be overridden with dataset img_size
             T.RandomHorizontalFlip()
         ]),
         default_augment: T.Compose = T.Compose([
             T.RandomHorizontalFlip()
         ])
     ):
+        self.dataset_name = dataset.dataset_name
+        self.classes = dataset.classes
+
         self.dataset = dataset
         self.dataset_key = dataset_key
         self.img_size = img_size
@@ -330,9 +334,6 @@ class HFRTDetrDataPreparation(DataPreparation):
     def post_process(self, batch, target_sizes=None):
         return self.image_processor.post_process_object_detection(batch, target_sizes=target_sizes, threshold=self.confidence_threshold)
 
-    def __len__(self):
-        return len(self.dataset)
-
     def __getitem__(self, idx):
         return self.transforms(self.dataset[idx], idx=idx)
 
@@ -349,13 +350,13 @@ class HFRTDetrDataPreparation(DataPreparation):
         return self.pre_process((images, targets))
 
 
-class HFRTDetrForObjectDetection(BaseModel, RTDetrForObjectDetection):
+class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection):
     model_id = "PekingU/rtdetr_r50vd"
     model_name = "RT-DETR-R50"
     model_provider = ModelProvider.HuggingFace
-    DataPreparation = HFRTDetrDataPreparation
-    Trainer = HFRTDetrTrainer
-    TrainingArguments = HFRTDetrTrainingArguments
+    DataPreparation = RTDetrDataPreparation
+    Trainer = RTDetrTrainer
+    TrainingArguments = RTDetrTrainingArguments
 
     class Weights:
         COCO_OFFICIAL = WeightsInfo("PekingU/rtdetr_r50vd")

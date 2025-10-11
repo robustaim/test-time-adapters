@@ -63,9 +63,18 @@ class DataLoaderHolder:
 
 
 class DataPreparation(BaseDataset):
-    def __init__(self, dataset: BaseDataset):
+    def __init__(
+        self,
+        dataset: BaseDataset,
+        dataset_key: dict = dict(bboxes="boxes2d", classes="boxes2d_classes", original_size="original_hw"),
+        img_size: int = 640,
+        evaluation_mode: bool = False,
+    ):
         super().__init__()
         self.dataset: BaseDataset = dataset
+        self.dataset_key = dataset_key
+        self.img_size = img_size
+        self.evaluation_mode = evaluation_mode
 
         self.transforms: Callable = lambda inputs: inputs
         self.collate_fn: Callable = lambda batch: batch
