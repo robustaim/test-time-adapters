@@ -235,7 +235,7 @@ class RTDetrDataPreparation(DataPreparation):
         img_size: int = 800,
         evaluation_mode: bool = False,
         confidence_threshold: float = 0.05,
-        strong_augment_threshold_epoch: int = 71,
+        strong_augment_threshold_epoch: int = 0,  # duration epoch of strong augment
         multi_scale: list[int] = [480, 640, 800],
         longest_edge: int = 1333,
         strong_augment: T.Compose = T.Compose([
