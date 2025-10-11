@@ -1,11 +1,12 @@
 from torch.utils.data import Dataset, DataLoader
+from typing import Optional, Callable
 from dataclasses import dataclass
-from typing import Optional
 import math
 
 
 class BaseDataset(Dataset):
     dataset_name = "BaseDataset"
+    classes = ()
 
     def __len__(self):
         raise NotImplementedError("This method should be overridden by subclasses.")
@@ -59,3 +60,29 @@ class DataLoaderHolder:
             if self.train: print(', ', end='')
             print(f"Test: {self.test_len}", end='')
         print('\n')
+
+
+class DataPreparation(BaseDataset):
+    def __init__(
+        self,
+        dataset: BaseDataset,
+        dataset_key: dict = dict(bboxes="boxes2d", classes="boxes2d_classes", original_size="original_hw"),
+        img_size: int = 640,
+        evaluation_mode: bool = False,
+    ):
+        super().__init__()
+        self.dataset: BaseDataset = dataset
+        self.dataset_key = dataset_key
+        self.img_size = img_size
+        self.evaluation_mode = evaluation_mode
+
+        self.transforms: Callable = lambda inputs: inputs
+        self.collate_fn: Callable = lambda batch: batch
+        self.pre_process: Callable = lambda batch: batch
+        self.post_process: Callable = lambda batch, *args, **kwargs: batch
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]

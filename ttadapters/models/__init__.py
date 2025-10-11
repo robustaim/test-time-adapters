@@ -1,2 +1,2 @@
 from .rcnn import *
-#from .rt_detr import RTDetrConfig, RTDetrForObjectDetection, RTDetr50ForObjectDetection, RTDetrImageProcessorFast
+from .rt_detr import *

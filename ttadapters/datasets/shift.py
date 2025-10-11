@@ -109,6 +109,8 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
     shift_type = Type.DISCRETE      # also supports "continuous/1x", "continuous/10x", "continuous/100x"
     backend = ZipBackend()          # also supports HDF5Backend(), FileBackend()
 
+    __FIRST_LOAD = False
+
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False
@@ -133,29 +135,32 @@ class SHIFTDataset(_SHIFTDataset, BaseDataset):
             verbose=True
         )
 
-        # Print the tensor shape of the first batch.
-        original_getitem = self.__class__.__getitem__
-        self.__class__.__getitem__ = SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
-        for i, batch in enumerate(DataLoader(self, shuffle=False)):
-            print(f"Batch {i}:\n")
-            print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
-            print("-" * 80)
-            for k, data in batch[views[0]].items():
-                if isinstance(data, torch.Tensor):
-                    print(f"{k:20} {str(data.shape):35} {data.min():10.2f} {data.max():10.2f}")
-                else:
-                    print(f"{k:20} {data}")
-            break
-        print()
-        self.__class__.__getitem__ = original_getitem  # restore __getitem__
+        if not SHIFTDataset.__FIRST_LOAD:
+            SHIFTDataset.__FIRST_LOAD = True
 
-        # Print the sample indices within a video.
-        # The video indices groups frames based on their video sequences. They are useful for training on videos.
-        video_to_indices = self.video_to_indices
-        for video, indices in video_to_indices.items():
-            print(f"Video name: {video}")
-            print(f"Sample indices within a video: {indices}")
-            break
+            # Print the tensor shape of the first batch.
+            original_getitem = self.__class__.__getitem__
+            self.__class__.__getitem__ = SHIFTDataset.__getitem__  # override __getitem__ to keep the original behavior
+            for i, batch in enumerate(DataLoader(self, shuffle=False)):
+                print(f"Batch {i}:\n")
+                print(f"{'Item':20} {'Shape':35} {'Min':10} {'Max':10}")
+                print("-" * 80)
+                for k, data in batch[views[0]].items():
+                    if isinstance(data, torch.Tensor):
+                        print(f"{k:20} {str(data.shape):35} {data.min():10.2f} {data.max():10.2f}")
+                    else:
+                        print(f"{k:20} {data}")
+                break
+            print()
+            self.__class__.__getitem__ = original_getitem  # restore __getitem__
+
+            # Print the sample indices within a video.
+            # The video indices groups frames based on their video sequences. They are useful for training on videos.
+            video_to_indices = self.video_to_indices
+            for video, indices in video_to_indices.items():
+                print(f"Video name: {video}")
+                print(f"Sample indices within a video: {indices}")
+                break
 
     @classmethod
     def download(cls, root: str, force: bool = False, silent: bool = False):
