@@ -444,7 +444,7 @@ class SHIFTContinuousSubsetForObjectDetection(SHIFTContinuousDatasetForObjectDet
     @classmethod
     def subset_split(cls, data_root: str, origin: str, force: bool = False):
         shift_type_value = cls.shift_type.value.split("/")[0]
-        origin = origin.split("/")[0]
+        origin = origin.replace("1x", "").replace("10x", "").replace("100x", "")
         if path.basename(path.normpath(origin)) != shift_type_value:
             origin = path.join(origin, shift_type_value)
 
@@ -457,7 +457,7 @@ class SHIFTContinuousSubsetForObjectDetection(SHIFTContinuousDatasetForObjectDet
                     data = load(open(path.join(origin, "images", speed, sett, "front", "det_2d.json")))
 
                     for temporal_change in ["daytime_to_night"]:
-                        locals()[temporal_change] = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['shift_type'] == temporal_change])
+                        alls = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['shift_type'] == temporal_change])
                         clear = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == "clear" and d['attributes']['shift_type'] == temporal_change])
                         rainy = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == "rainy" and d['attributes']['shift_type'] == temporal_change])
                         cloudy = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['weather_coarse'] == "cloudy" and d['attributes']['shift_type'] == temporal_change])
@@ -469,10 +469,10 @@ class SHIFTContinuousSubsetForObjectDetection(SHIFTContinuousDatasetForObjectDet
                         for weather in [None, "clear", "rainy", "cloudy", "foggy", "overcast"]:
                             save_path = path.join(data_root, temporal_change+("_"+weather if weather else ""), shift_type_value, "images", speed, sett, "front")
                             makedirs(save_path)
-                            dump(locals()[weather if weather else temporal_change], open(path.join(save_path, "det_2d.json"), "w"))
+                            dump(locals()[weather] if weather else alls, open(path.join(save_path, "det_2d.json"), "w"))
 
                     for weather_change in ["clear_to_foggy", "clear_to_rainy"]:
-                        locals()[weather_change] = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['shift_type'] == weather_change])
+                        alls = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['shift_type'] == weather_change])
                         daytime = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['timeofday_coarse'] == "daytime" and d['attributes']['shift_type'] == weather_change])
                         night = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['timeofday_coarse'] == "night" and d['attributes']['shift_type'] == weather_change])
                         dawn = dict(config=data['config'], frames=[d for d in data['frames'] if d['attributes']['timeofday_coarse'] == "dawn/dusk" and d['attributes']['shift_type'] == weather_change])
@@ -482,7 +482,7 @@ class SHIFTContinuousSubsetForObjectDetection(SHIFTContinuousDatasetForObjectDet
                         for temporal in [None, "daytime", "night", "dawn"]:
                             save_path = path.join(data_root, weather_change+("_"+temporal if temporal else ""), shift_type_value, "images", speed, sett, "front")
                             makedirs(save_path)
-                            dump(locals()[temporal if temporal else weather_change], open(path.join(save_path, "det_2d.json"), "w"))
+                            dump(locals()[temporal] if temporal else alls, open(path.join(save_path, "det_2d.json"), "w"))
         else:
             print(f"INFO: Subset split for '{cls.dataset_name}' dataset is already done. Skipping...")
 

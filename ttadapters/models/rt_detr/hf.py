@@ -232,7 +232,7 @@ class RTDetrDataPreparation(DataPreparation):
         self,
         dataset: BaseDataset,
         dataset_key: dict = dict(bboxes="boxes2d", classes="boxes2d_classes", original_size="original_hw"),
-        img_size: int = 640,
+        img_size: int = 800,
         evaluation_mode: bool = False,
         confidence_threshold: float = 0.05,
         strong_augment_threshold_epoch: int = 71,

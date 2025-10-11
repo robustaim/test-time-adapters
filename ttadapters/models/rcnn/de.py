@@ -328,7 +328,6 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
         cfg.merge_from_file(model_zoo.get_config_file(self.model_config))
         cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
         cfg.MODEL.FPN.TOP_LEVELS = 2
-        cfg.MODEL.BACKBONE.FREEZE_AT = -1
 
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', message='.*To copy construct from a tensor.*')
@@ -394,8 +393,6 @@ class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
         cfg.MODEL.PIXEL_STD = [57.375, 57.120, 58.395]
 
         cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
-        cfg.MODEL.FPN.TOP_LEVELS = 2
-        cfg.MODEL.BACKBONE.FREEZE_AT = -1
 
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=FutureWarning)
