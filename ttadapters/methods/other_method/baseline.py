@@ -28,7 +28,7 @@ from detectron2.layers import FrozenBatchNorm2d
 from detectron2.structures import Boxes, Instances, pairwise_iou
 from transformers.models.rt_detr.modeling_rt_detr import RTDetrFrozenBatchNorm2d, RTDetrObjectDetectionOutput
 
-from utils import AverageMeter, SaveOutput, SaveOutputRTDETR
+from .utils import AverageMeter, SaveOutput, SaveOutputRTDETR
 
 
 @dataclass
@@ -48,6 +48,7 @@ class ActMADConfig:
     loss: nn.Module = nn.L1Loss(reduction="mean")
 
     clear_dataset: Dataset | None = None
+    collate_fn: ModuleType | None = None
     discrete_scenario: ModuleType | None = None
     continuous_scenario: ModuleType | None = None
 
@@ -105,7 +106,7 @@ class ActMAD(nn.Module):
     def _extract_or_load_clean_statistics(self):
         # Load existing statistics if available; otherwise, create new ones
 
-        if self.stats_save_path.exists():
+        if self.cfg.statistic_save_path.exists():
             saved_stats = torch.load(self.cfg.statistic_save_path)
             self.clean_mean_list_final = saved_stats["clean_mean_list_final"]
             self.clean_var_list_final = saved_stats["clean_var_list_final"]
@@ -117,7 +118,6 @@ class ActMAD(nn.Module):
                 self.clean_var_list_final,
                 self.layer_names
             ) = self.extract_activation_alignment(
-                data_root=self.data_root,
                 batch_size=self.clean_bn_extract_batch
             )
 
@@ -135,7 +135,7 @@ class ActMAD(nn.Module):
         # Extract statistics from the training set (clear condition) used during training
         dataset = self.cfg.clear_dataset
 
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.collate_fn)
         loader_len = math.ceil(len(dataset)/batch_size)
 
         chosen_bn_info = []
@@ -173,15 +173,12 @@ class ActMAD(nn.Module):
 
         if self.cfg.model_type == "rtdetr":
             save_outputs = [SaveOutputRTDETR() for _ in range(n_chosen_layers)]
-
-            clean_mean_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
-            clean_var_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
         
-        elif self.cfg.model_type == ("rcnn", "swinrcnn"):
+        elif self.cfg.model_type in ("rcnn", "swinrcnn"):
             save_outputs = [SaveOutput() for _ in range(n_chosen_layers)]
 
-            clean_mean_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
-            clean_var_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
+        clean_mean_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
+        clean_var_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
 
         clean_mean_list_final = []
         clean_var_list_final = []
