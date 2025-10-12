@@ -159,7 +159,7 @@ python example.py
 
 #### Apply to Your Own Model
 ```python
-from ttadapters.methods import APTConfig, AdaptationPlugin
+from ttadapters.methods import APTConfig, APTPlugin
 ```
 
 
