@@ -81,6 +81,9 @@ class ActMAD(nn.Module):
         self.model = copy.deepcopy(self.model)
         self.model.to(self.cfg.device)
 
+        for k, v in self.model.named_parameters():
+            v.requires_grad = True
+
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
                 self.model.parameters(),
@@ -222,6 +225,10 @@ class ActMAD(nn.Module):
                 warnings.warn(f"Layer {layer_name} not found!")
 
     def forward(self, x):
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+        self.model.eval()
         self.optimizer.zero_grad()
 
         if self.cfg.model_type == "rtdetr":
@@ -410,6 +417,7 @@ class NORM(nn.Module):
                         module.forward = norm_forward.__get__(module, module.__class__)
 
     def forward(self, x):
+        self.model.eval()
         outputs = self.model(x)
         return outputs
 
@@ -497,6 +505,7 @@ class DUA(nn.Module):
                     self.bn_layers.append(module)
 
     def forward(self, x):
+        self.model.eval()
         current_momentum = self.mom_pre + self.min_momentum_constant
 
         if self.cfg.model_type == "rtdetr":
@@ -1125,14 +1134,14 @@ class WHW(nn.Module):
             self.s_stats = torch.load(self.source_feat_stats, map_location=self.device)
             return
 
-        self.s_stats = self.collect_source_statistics(iou_threshold=self.cfg.iou_threshold, output_path=self.cfg.output_path)
+        self.s_stats = self.collect_source_statistics(batch_size= self.cfg.clear_statistics_batch, iou_threshold=self.cfg.iou_threshold, output_path=self.cfg.output_path)
 
-    def collect_source_statistics(self, iou_threshold=0.5, output_path=None):
+    def collect_source_statistics(self, batch_size=16, iou_threshold=0.5, output_path=None):
         # Collect source-domain features and compute summary statistics
         dataset = self.cfg.clear_dataset
 
-        loader = DataLoader(self.cfg.clear_dataset, batch_size=self.cfg.clear_statistics_batch, shuffle=False)
-        loader_len = math.ceil(len(dataset)/self.cfg.clear_statistics_batch)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.collate_fn)
+        loader_len = math.ceil(len(dataset)/batch_size)
 
         # Collections
         gl_features = {} # Global features from backbone
