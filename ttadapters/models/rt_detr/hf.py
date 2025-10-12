@@ -360,7 +360,7 @@ class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection):
 
     class Weights:
         COCO_OFFICIAL = WeightsInfo("PekingU/rtdetr_r50vd")
-        SHIFT_CLEAR = WeightsInfo("")
+        SHIFT_CLEAR = WeightsInfo("b-re-w/rtdetr_r50vd_shift_clear")
 
     def __init__(self, config: RTDetrConfig | None = None, dataset: BaseDataset | str = "", **kwargs):
         if dataset:
