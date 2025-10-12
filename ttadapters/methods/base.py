@@ -33,11 +33,25 @@ class AdaptationEngine(BaseModel, PreTrainedModel):
         self.Trainer = basemodel.Trainer
 
         self.basemodel = basemodel
+        self.adapting = False
 
     def forward(self, *args, **kwargs):
         return self.basemodel(*args, **kwargs)
 
-    def adapt(self, *args, **kwargs):
+    def online(self, mode=True):
+        """Online learning mode (test-time adaptation)"""
+        self.adapting = mode
+        for module in self.children():
+            if hasattr(module, "online"):
+                module.online(mode)
+        return self
+
+    def offline(self):
+        """Offline mode (static mode)"""
+        return self.online(False)
+
+    def fit(self, *args, **kwargs):
+        """Fitting adaptation engine to basemodel"""
         pass
 
     @classmethod

@@ -99,7 +99,7 @@ def visualize_bbox_frames(
 
 def visualize_bbox_frame_pair(
     dataset, idx: int | None = None,
-    bbox_key: str = "boxes2d", bbox_class_key: str | None = "boxes2d_classes", figsize: tuple[int, int] = (7, 5)
+    bbox_key: str | None = "boxes2d", bbox_class_key: str | None = "boxes2d_classes", figsize: tuple[int, int] = (7, 5)
 ):
     """
     Visualize a frame pair from a dataset with its bounding boxes.
@@ -107,7 +107,7 @@ def visualize_bbox_frame_pair(
     Args:
         dataset (Dataset): The dataset containing images and annotations. Each item should return (image, annotation).
         idx (int | None, optional): Index of the frame to visualize. If None, a random index is selected. Defaults to None.
-        bbox_key (str, optional): The key in the annotation dict for bounding boxes. Defaults to "boxes2d".
+        bbox_key (str | None, optional): The key in the annotation dict for bounding boxes. If None, whole annotation object is treated as bounding boxes itself. Defaults to "boxes2d".
         bbox_class_key (str | None, optional): The key in the annotation dict for class labels. If None, all boxes are shown with the same color. Defaults to "boxes2d_classes".
         figsize (tuple[int, int], optional): Figure size for matplotlib. Defaults to (7, 5).
 
@@ -117,9 +117,15 @@ def visualize_bbox_frame_pair(
     if idx is None:
         idx = randint(0, len(dataset)-1)
 
-    rgb_image1, annotation1, rgb_image2, annotation2 = dataset[idx]
-    bbox1: BoundingBoxes = annotation1[bbox_key]
-    bbox2: BoundingBoxes = annotation2[bbox_key]
+    rgb_image1, rgb_image2, annotation1, annotation2 = dataset[idx]
+    bbox1: BoundingBoxes = annotation1[bbox_key] if bbox_key else annotation1
+    bbox2: BoundingBoxes = annotation2[bbox_key] if bbox_key else annotation2
+
+    if bbox1.format != BoundingBoxFormat.XYWH:
+        bbox1 = convert_bounding_box_format(bbox1, new_format=BoundingBoxFormat.XYWH)
+    if bbox2.format != BoundingBoxFormat.XYWH:
+        bbox2 = convert_bounding_box_format(bbox2, new_format=BoundingBoxFormat.XYWH)
+
     if bbox_class_key is None:
         cls_labels1, cls_labels2 = [0] * len(bbox1), [0] * len(bbox2)
         edgecolors = [(random(), random(), random())]
@@ -133,9 +139,6 @@ def visualize_bbox_frame_pair(
         ax.imshow(img.permute(1, 2, 0) / 255.0)
         ax.set_title(f"Frame {idx}")
         ax.axis('off')
-
-        if bbox.format != BoundingBoxFormat.XYWH:
-            bbox = convert_bounding_box_format(bbox, new_format=BoundingBoxFormat.XYWH)
 
         for box, cls in zip(bbox, cls_labels):
             x1, y1, w, h = box

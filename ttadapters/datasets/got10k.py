@@ -41,6 +41,8 @@ from os import path
 import random
 
 from torchvision import datasets
+from torchvision.io import read_image, ImageReadMode
+from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
 
 from gdown.exceptions import FileURLRetrievalError
 
@@ -78,6 +80,8 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
         self.transform = transform
         self.target_transform = target_transform
         self.transforms = transforms
+
+        self.loader = lambda path: read_image(path, mode=ImageReadMode.RGB)
         self._load_data()
 
     def _load_data(self):
@@ -125,6 +129,10 @@ class GOT10kDataset(datasets.ImageFolder, BaseDataset):
     def __getitem__(self, index: int):
         path, target = self.samples[index]
         sample = self.loader(path)
+        if not isinstance(target, BoundingBoxes):  # GOT10k has XYWH BBOX
+            target = BoundingBoxes(target, format=BoundingBoxFormat.XYWH, canvas_size=(sample.shape[-2], sample.shape[-1]))
+            self.samples[index] = (path, target)
+
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
@@ -142,10 +150,16 @@ class PairedGOT10kSample:
 
 
 class PairedGOT10kDataset(BaseDataset):
-    def __init__(self, base_dataset: GOT10kDataset, transform: Optional[Callable] = None, target_transform: Optional[Callable] = None):
+    def __init__(
+        self, base_dataset: GOT10kDataset,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        transforms: Optional[Callable] = None
+    ):
         super().__init__()
         self.transform = transform
         self.target_transform = target_transform
+        self.transforms = transforms
         self.pairs = self._create_pairs(base_dataset)
         self.base_dataset = base_dataset
         self.use_teacher_forcing = False
@@ -167,16 +181,22 @@ class PairedGOT10kDataset(BaseDataset):
 
     def __getitem__(self, idx):
         pair = self.pairs[idx]
-        curr = self.base_dataset[pair.curr_idx]
-        prev = self.base_dataset[pair.prev_idx]
-        curr_img = self.transform(curr[0])
-        prev_gt = self.target_transform(prev[1])
-        curr_gt = self.target_transform(curr[1])
+        curr_img, curr_gt = self.base_dataset[pair.curr_idx]
+        prev_img, prev_gt = self.base_dataset[pair.prev_idx]
+
+        if self.transform is not None:
+            curr_img = self.transform(curr_img)
+            prev_img = self.transform(prev_img)
+        if self.target_transform is not None:
+            curr_gt = self.target_transform(curr_gt)
+            prev_gt = self.target_transform(prev_gt)
+        if self.transforms is not None:
+            curr_img, curr_gt = self.transforms(curr_img, curr_gt)
+            prev_img, prev_gt = self.transforms(prev_img, prev_gt)
 
         if self.use_teacher_forcing:
             return curr_img, prev_gt, curr_gt
         else:
-            prev_img = self.transform(prev[0])
             return prev_img, curr_img, prev_gt, curr_gt
 
     def extract_valid(self, train_ratio=0.9, seed=42) -> 'PairedGOT10kDataset':

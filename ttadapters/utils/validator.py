@@ -3,6 +3,7 @@ import time
 import gc
 import asyncio
 import nest_asyncio
+from contextlib import nullcontext
 
 from tqdm.auto import tqdm
 
@@ -50,7 +51,6 @@ class DetectionEvaluator:
                 model = copy.deepcopy(model)
 
         model = model.to(device).to(dtype)
-        model.eval()
 
         map_metric = MeanAveragePrecision()
         predictions_list = []
@@ -61,7 +61,7 @@ class DetectionEvaluator:
         if no_grad:  # use no_grad for inference
             disable_grad = torch.no_grad
         else:  # let model decide gradient requirement
-            disable_grad = lambda: (yield)
+            disable_grad = nullcontext
 
         tqdm_loader = tqdm(loader, total=loader_length, desc=f"Evaluation for {desc}")
         try:
@@ -97,45 +97,46 @@ class DetectionEvaluator:
 
                         collapse_time += time.time() - start
 
-                    match model.model_provider:
-                        case ModelProvider.Detectron2:
-                            from detectron2.modeling.postprocessing import detector_postprocess
-                            from detectron2.structures import Instances
+                    with torch.no_grad:
+                        match model.model_provider:
+                            case ModelProvider.Detectron2:
+                                from detectron2.modeling.postprocessing import detector_postprocess
+                                from detectron2.structures import Instances
 
-                            for output, input_data in zip(outputs, batch):
+                                for output, input_data in zip(outputs, batch):
+                                    output = data_preparation.post_process(output)
+                                    predictions_list.append(Detections.from_detectron2(output))
+
+                                    gt_instances = Instances(image_size=input_data['instances'].image_size)
+                                    gt_instances.pred_boxes = input_data['instances'].gt_boxes
+                                    gt_instances.gt_classes = input_data['instances'].gt_classes
+                                    gt_instances = detector_postprocess(  # recover original image size
+                                        gt_instances, input_data['height'], input_data['width']
+                                    )
+                                    gt_instances.gt_boxes = gt_instances.pred_boxes
+
+                                    targets_list.append(Detections(
+                                        xyxy=gt_instances.gt_boxes.tensor.detach().cpu().numpy(),
+                                        class_id=gt_instances.gt_classes.detach().cpu().numpy()
+                                    ))
+                            case ModelProvider.Ultralytics:
                                 output = data_preparation.post_process(output)
-                                predictions_list.append(Detections.from_detectron2(output))
-
-                                gt_instances = Instances(image_size=input_data['instances'].image_size)
-                                gt_instances.pred_boxes = input_data['instances'].gt_boxes
-                                gt_instances.gt_classes = input_data['instances'].gt_classes
-                                gt_instances = detector_postprocess(  # recover original image size
-                                    gt_instances, input_data['height'], input_data['width']
+                                pred_detection = Detections.from_ultralytics(output)
+                                target_detection = Detections(
+                                    xyxy=input_data['bboxes'].detach().cpu().numpy(),
+                                    class_id=input_data['cls'].detach().cpu().numpy()
                                 )
-                                gt_instances.gt_boxes = gt_instances.pred_boxes
-
-                                targets_list.append(Detections(
-                                    xyxy=gt_instances.gt_boxes.tensor.detach().cpu().numpy(),
-                                    class_id=gt_instances.gt_classes.detach().cpu().numpy()
-                                ))
-                        case ModelProvider.Ultralytics:
-                            output = data_preparation.post_process(output)
-                            pred_detection = Detections.from_ultralytics(output)
-                            target_detection = Detections(
-                                xyxy=input_data['bboxes'].detach().cpu().numpy(),
-                                class_id=input_data['cls'].detach().cpu().numpy()
-                            )
-                            raise NotImplementedError("Ultralytics post_process is not implemented yet.")
-                        case ModelProvider.HuggingFace:
-                            sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
-                            outputs = data_preparation.post_process(outputs, target_sizes=sizes)
-                            predictions_list.extend([Detections.from_transformers(output) for output in outputs])
-                            targets_list.extend([Detections(
-                                xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().numpy(),
-                                class_id=label['class_labels'].cpu().numpy(),
-                            ) for label in batch['labels']])
-                        case _:
-                            raise ValueError(f"Unsupported model provider: {model.model_provider}")
+                                raise NotImplementedError("Ultralytics post_process is not implemented yet.")
+                            case ModelProvider.HuggingFace:
+                                sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
+                                outputs = data_preparation.post_process(outputs, target_sizes=sizes)
+                                predictions_list.extend([Detections.from_transformers(output) for output in outputs])
+                                targets_list.extend([Detections(
+                                    xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().numpy(),
+                                    class_id=label['class_labels'].cpu().numpy(),
+                                ) for label in batch['labels']])
+                            case _:
+                                raise ValueError(f"Unsupported model provider: {model.model_provider}")
         except OutOfMemoryError as e:  # catch OOM error to close tqdm properly
             tqdm_loader.close()
             if clear_tqdm_when_oom:
