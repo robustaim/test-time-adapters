@@ -39,7 +39,7 @@ class ActMADConfig:
     data_root: str = './datasets'
     device: torch.device = torch.device("cuda")
     batch_size: int = 4
-    clean_bn_extract_batch: int = 16
+    clean_bn_extract_batch: int = 32
 
     lr: float = 1e-4
     momentum: float = 0.9
@@ -52,7 +52,7 @@ class ActMADConfig:
     discrete_scenario: ModuleType | None = None
     continuous_scenario: ModuleType | None = None
 
-    statistic_save_path: Path = Path("./save")
+    statistic_save_path: Path = Path("./save_actmad_statistics.pt")
 
 
 class ActMAD(nn.Module):
@@ -71,7 +71,9 @@ class ActMAD(nn.Module):
         self.layer_names: list[str] | None = None
         self.chosen_bn_layers: list[str] | None = None
 
-        if config.model_type == ("rtdetr", "yolo"):
+        self.loss = config.loss
+
+        if config.model_type in ("rtdetr", "yolo"):
             self.adaptation_layers = config.adaptation_layers
         
         self._setup()
@@ -88,15 +90,15 @@ class ActMAD(nn.Module):
             self.optimizer = optim.SGD(
                 self.model.parameters(),
                 lr=self.cfg.lr,
-                momentum=self.cfg.momentum,
-                weight_decay=self.cfg.weight_decay
+                # momentum=self.cfg.momentum,
+                # weight_decay=self.cfg.weight_decay
             )
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
                 self.model.parameters(),
-                lr=self.cfg.lr,
-                weight_decay=self.cfg.weight_decay
+                # lr=self.cfg.lr,
+                # weight_decay=self.cfg.weight_decay
             )
 
         else :
@@ -133,7 +135,6 @@ class ActMAD(nn.Module):
         # Select batch normalization layers to be used for loss generation
         self._setup_chosen_bn_layers()
 
-    @torch.inference_mode()
     def extract_activation_alignment(self, batch_size):
         # Extract statistics from the training set (clear condition) used during training
         dataset = self.cfg.clear_dataset
@@ -186,11 +187,18 @@ class ActMAD(nn.Module):
         clean_mean_list_final = []
         clean_var_list_final = []
 
-        with torch.inference_mode():
+        with torch.no_grad():
             self.model.eval()
             for batch in tqdm(loader, total=loader_len, desc="Extract statistic"):
                 hook_list = [chosen_bn_layers[i].register_forward_hook(save_outputs[i]) for i in range(n_chosen_layers)]
-                _ = self.model(batch)
+                if self.cfg.model_type == "rtdetr":
+                    # Move batch data to device
+                    pixel_values = batch["pixel_values"].to(self.device)
+                    labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                              for k, v in label.items()} for label in batch["labels"]]
+                    _ = self.model(pixel_values=pixel_values, labels=labels)
+                elif self.cfg.model_type == "rcnn":
+                    _ = self.model(batch)
 
                 for i in range(n_chosen_layers):
                     clean_mean_act_list[i].update(save_outputs[i].get_out_mean())  # compute mean from clean data
@@ -224,7 +232,10 @@ class ActMAD(nn.Module):
             else:
                 warnings.warn(f"Layer {layer_name} not found!")
 
-    def forward(self, x):
+    def forward(self, x=None, **kwargs):
+        if x is None:
+            x = kwargs
+
         for param in self.model.parameters():
             param.requires_grad = True
 
@@ -240,7 +251,11 @@ class ActMAD(nn.Module):
                 for i in range(n_chosen_layers)
             ]
 
-            output = self.model(pixel_values=x['pixel_values'], labels=x['labels'])
+            # Move batch data to device
+            pixel_values = x['pixel_values'].to(self.device)
+            labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                      for k, v in label.items()} for label in x['labels']]
+            outputs = self.model(pixel_values=pixel_values, labels=labels)
 
         elif self.cfg.model_type == "rcnn":
             n_chosen_layers = len(self.chosen_bn_layers)
@@ -262,11 +277,11 @@ class ActMAD(nn.Module):
         loss_var = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
 
         for i in range(n_chosen_layers):
-            loss_mean += self.l1_loss(
+            loss_mean += self.loss(
                 batch_mean_tta[i].to(self.device),
                 self.clean_mean_list_final[i].to(self.device)
             )
-            loss_var += self.l1_loss(
+            loss_var += self.loss(
                 batch_var_tta[i].to(self.device),
                 self.clean_var_list_final[i].to(self.device)
             )
@@ -309,7 +324,7 @@ class NORM(nn.Module):
         self.device = config.device
         self.batch_size = config.batch_size
 
-        if config.model_type == ("rtdetr", "yolo"):
+        if config.model_type in ("rtdetr", "yolo"):
             self.adaptation_layers = config.adaptation_layers
         
         self._setup()
@@ -346,9 +361,12 @@ class NORM(nn.Module):
                     module.adapt_type = "NORM"
                     module.source_sum = self.cfg.source_sum
 
-                    def norm_forward(self, x):
+                    # Capture source_sum in closure
+                    source_sum = self.cfg.source_sum
+
+                    def norm_forward(self, x, _source_sum=source_sum):
                         if hasattr(self, 'adapt_type') and self.adapt_type == "NORM":
-                            alpha = x.shape[0] / (self.cfg.source_sum + x.shape[0])
+                            alpha = x.shape[0] / (_source_sum + x.shape[0])
 
                             if isinstance(self, nn.BatchNorm2d):
                                 running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
@@ -397,9 +415,12 @@ class NORM(nn.Module):
                         module.adapt_type = "NORM"
                         module.source_sum = self.cfg.source_sum
 
-                        def norm_forward(self, x):
+                        # Capture source_sum in closure
+                        source_sum = self.cfg.source_sum
+
+                        def norm_forward(self, x, _source_sum=source_sum):
                             if hasattr(self, 'adapt_type') and self.adapt_type == "NORM":
-                                alpha = x.shape[0] / (self.cfg.source_sum + x.shape[0])
+                                alpha = x.shape[0] / (_source_sum + x.shape[0])
                                 running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
                                 running_var = (1 - alpha) * self.running_var + alpha * x.var(dim=[0,2,3])
                                 scale = self.weight * (running_var + self.eps).rsqrt()
@@ -416,9 +437,17 @@ class NORM(nn.Module):
 
                         module.forward = norm_forward.__get__(module, module.__class__)
 
-    def forward(self, x):
+    def forward(self, x=None, **kwargs):
+        if x is None:
+            x = kwargs
         self.model.eval()
-        outputs = self.model(x)
+        if self.cfg.model_type == "rtdetr":
+            pixel_values = x['pixel_values'].to(self.device)
+            labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                      for k, v in label.items()} for label in x['labels']]
+            outputs = self.model(pixel_values=pixel_values, labels=labels)
+        elif self.cfg.model_type == "rcnn":
+            outputs = self.model(x)
         return outputs
 
 @dataclass
@@ -453,7 +482,7 @@ class DUA(nn.Module):
         self.decay_factor = config.decay_factor
         self.mom_pre = config.mom_pre
 
-        if config.model_type == ("rtdetr", "yolo"):
+        if config.model_type in ("rtdetr", "yolo"):
             self.adaptation_layers = config.adaptation_layers
         
         self._setup()
@@ -504,7 +533,9 @@ class DUA(nn.Module):
                         module.original_running_var = module.running_var.clone()
                     self.bn_layers.append(module)
 
-    def forward(self, x):
+    def forward(self, x=None, **kwargs):
+        if x is None:
+            x = kwargs
         self.model.eval()
         current_momentum = self.mom_pre + self.min_momentum_constant
 
@@ -544,7 +575,13 @@ class DUA(nn.Module):
             hook_handle = layer.register_forward_hook(get_dua_hook(current_momentum))
             hooks.append(hook_handle)
 
-        outputs = self.model(x)
+        if self.cfg.model_type == "rtdetr":
+            pixel_values = x['pixel_values'].to(self.device)
+            labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                      for k, v in label.items()} for label in x['labels']]
+            outputs = self.model(pixel_values=pixel_values, labels=labels)
+        elif self.cfg.model_type == "rcnn":
+            outputs = self.model(x)
 
         for hook in hooks:
             hook.remove()
@@ -583,7 +620,7 @@ class MeanTeacher(nn.Module):
         self.device = config.device
         self.batch_size = config.batch_size
 
-        if config.model_type == ("rtdetr", "yolo"):
+        if config.model_type in ("rtdetr", "yolo"):
             self.adaptation_layers = config.adaptation_layers
         
         self._setup()
@@ -595,10 +632,12 @@ class MeanTeacher(nn.Module):
         self._setup_strong_augmentation()
 
     def _setup_teacher_model(self):
-        # Make a teacher model 
+        # Make a teacher model
         self.teacher_model = copy.deepcopy(self.model)
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
+
+        params = []
 
         if self.cfg.model_type == "rtdetr":
             for name, module in self.model.named_modules():
@@ -689,7 +728,7 @@ class MeanTeacher(nn.Module):
         self.init_weights = [p.clone().detach() for p in params]
 
     def _setup_strong_augmentation(self):
-        self.strong_augment = self._create_randaugment_mc(n=self.augment_strength_n, m=self.augment_strength_m)
+        self.strong_augment = self._create_randaugment_mc(n=self.cfg.augment_strength_n, m=self.cfg.augment_strength_m)
     
     def _create_randaugment_mc(self, n: int, m: int):
         # https://github.com/natureyoo/ContinualTTA_ObjectDetection
@@ -873,7 +912,7 @@ class MeanTeacher(nn.Module):
                 probs = F.softmax(logit, dim=-1)
                 scores, labels = probs.max(dim=-1)
 
-                mask = scores > self.conf_threshold
+                mask = scores > self.cfg.conf_threshold
                 bbox = bbox[mask]
                 scores = scores[mask]
                 labels = labels[mask]
@@ -890,7 +929,7 @@ class MeanTeacher(nn.Module):
         elif self.cfg.model_type == "rcnn":
             pseudo_labels = []
             for img, label in zip(images, outputs):
-                inst = label['instances'][label['instances'].scores > self.conf_threshold]
+                inst = label['instances'][label['instances'].scores > self.cfg.conf_threshold]
 
                 new_inp = {k: img[k] for k in img if k not in ['instances', 'image', 'strong_aug_image']}
                 new_inp['image'] = img['strong_aug_image'] if 'strong_aug_image' in img else img['image']
@@ -1064,12 +1103,12 @@ class WHWConfig:
     ema_gamma: int = 128
     freq_weight: bool = False
 
-    source_feat_stats: str | None = None # path 
+    source_feat_stats: str | None = "./whw_source_statistics_clear.pt" # path 
 
     num_classes: int = 6
 
     iou_threshold: float = 0.5
-    output_path: str = "whw_source_statistics_clear.pt"
+    output_path: str = "./whw_source_statistics_clear.pt"
 
     clear_dataset: Dataset | None = None
     clear_statistics_batch: int = 16
@@ -1108,6 +1147,8 @@ class WHW(nn.Module):
         self.freq_weight = config.freq_weight
 
         self.source_feat_stats = config.source_feat_stats
+        self.adapters = nn.ModuleDict()
+        self.conv1_wrappers = nn.ModuleDict()
         self.s_stats = None  # Source statistics
         self.t_stats = {}    # Target statistics
         self.template_cov = {}
@@ -1130,8 +1171,8 @@ class WHW(nn.Module):
 
     def _load_source_statistics(self):
         # Load saved statistics if available, otherwise create new ones
-        if self.source_feat_stats is not None and os.path.exists(self.source_feat_stats):
-            self.s_stats = torch.load(self.source_feat_stats, map_location=self.device)
+        if self.source_feat_stats is not None and os.path.exists(self.cfg.output_path):
+            self.s_stats = torch.load(self.cfg.output_path, map_location=self.device)
             return
 
         self.s_stats = self.collect_source_statistics(batch_size= self.cfg.clear_statistics_batch, iou_threshold=self.cfg.iou_threshold, output_path=self.cfg.output_path)
@@ -1578,7 +1619,7 @@ class WHW(nn.Module):
         Matches configure_adaptation_model.py lines 26-42 from ContinualTTA
         """
         params = []
-        if self.learning_rate > 0:
+        if self.cfg.lr > 0:
             if self.adaptation_where == "adapter":
                 # Collect parameters from BOTH adapter types like ContinualTTA
                 for stage_name in ['res2', 'res3', 'res4', 'res5']:
@@ -1724,8 +1765,8 @@ class WHW(nn.Module):
         
         self.optimizer.zero_grad()
 
-        with torch.no_grad():
-            final_outputs, _, _ = self.model(x)
+        # with torch.no_grad():
+        final_outputs, _, _ = self.model(x)
         
         return final_outputs
 
