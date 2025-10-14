@@ -83,50 +83,12 @@ class ActMAD(nn.Module):
         self.model = copy.deepcopy(self.model)
         self.model.to(self.cfg.device)
 
-        params = []
-        for k, v in self.model.named_parameters():
-            v.requires_grad = False
-
-        if self.cfg.model_type == "rtdetr":
-            for name, m in self.model.named_modules():
-                if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
-                    should_adapt = False
-                    if self.adaptation_layers == "backbone":
-                        if ('model.backbone' in name and isinstance(m, RTDetrFrozenBatchNorm2d)) or \
-                           ('backbone' in name.lower() and isinstance(m, RTDetrFrozenBatchNorm2d)):
-                            should_adapt = True
-                    elif self.adaptation_layers == "encoder":
-                        if ('encoder' in name.lower() and not 'decoder' in name.lower()) and \
-                           isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
-                            should_adapt = True
-                    elif self.adaptation_layers == "backbone+encoder":
-                        if 'decoder' not in name.lower():
-                            should_adapt = True
-                    else:
-                        if 'decoder' not in name.lower():
-                            should_adapt = True
-
-                    if should_adapt:
-                        if hasattr(m, 'weight') and m.weight is not None and isinstance(m.weight, nn.Parameter):
-                            m.weight.requires_grad = True
-                            params.append(m.weight)
-                        if hasattr(m, 'bias') and m.bias is not None and isinstance(m.bias, nn.Parameter):
-                            m.bias.requires_grad = True
-                            params.append(m.bias)
-
-        elif self.cfg.model_type in ("rcnn", "swinrcnn"):
-            for name, m in self.model.named_modules():
-                if isinstance(m, FrozenBatchNorm2d):
-                    if hasattr(m, 'weight') and m.weight is not None:
-                        m.weight.requires_grad = True
-                        params.append(m.weight)
-                    if hasattr(m, 'bias') and m.bias is not None:
-                        m.bias.requires_grad = True
-                        params.append(m.bias)
+        for _, v in self.model.named_parameters():
+            v.requires_grad = True
 
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
-                params,
+                self.model.parameters(),
                 lr=self.cfg.lr,
                 momentum=self.cfg.momentum,
                 weight_decay=self.cfg.weight_decay
@@ -134,7 +96,7 @@ class ActMAD(nn.Module):
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
-                params,
+                self.model.parameters(),
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay
             )
@@ -308,15 +270,15 @@ class ActMAD(nn.Module):
         batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
 
         # Compute ActMAD loss
-        loss_mean = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
-        loss_var = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
+        loss_mean = 0.0
+        loss_var = 0.0
 
         for i in range(n_chosen_layers):
-            loss_mean += self.loss(
+            loss_mean = loss_mean + self.loss(
                 batch_mean_tta[i].to(self.device),
                 self.clean_mean_list_final[i].to(self.device)
             )
-            loss_var += self.loss(
+            loss_var = loss_var + self.loss(
                 batch_var_tta[i].to(self.device),
                 self.clean_var_list_final[i].to(self.device)
             )
@@ -325,7 +287,6 @@ class ActMAD(nn.Module):
 
         # Backward and update
         loss.backward()
-
         self.optimizer.step()
 
         # Clean up hooks
