@@ -290,6 +290,10 @@ class ActMAD(nn.Module):
 
         # Backward and update
         loss.backward()
+
+        # Gradient clipping for numerical stability
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+
         self.optimizer.step()
 
         # Clean up hooks
@@ -361,12 +365,9 @@ class NORM(nn.Module):
                     module.adapt_type = "NORM"
                     module.source_sum = self.cfg.source_sum
 
-                    # Capture source_sum in closure
-                    source_sum = self.cfg.source_sum
-
-                    def norm_forward(self, x, _source_sum=source_sum):
+                    def norm_forward(self, x):
                         if hasattr(self, 'adapt_type') and self.adapt_type == "NORM":
-                            alpha = x.shape[0] / (_source_sum + x.shape[0])
+                            alpha = x.shape[0] / (self.source_sum + x.shape[0])
 
                             if isinstance(self, nn.BatchNorm2d):
                                 running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
@@ -415,12 +416,9 @@ class NORM(nn.Module):
                         module.adapt_type = "NORM"
                         module.source_sum = self.cfg.source_sum
 
-                        # Capture source_sum in closure
-                        source_sum = self.cfg.source_sum
-
-                        def norm_forward(self, x, _source_sum=source_sum):
+                        def norm_forward(self, x):
                             if hasattr(self, 'adapt_type') and self.adapt_type == "NORM":
-                                alpha = x.shape[0] / (_source_sum + x.shape[0])
+                                alpha = x.shape[0] / (self.source_sum + x.shape[0])
                                 running_mean = (1 - alpha) * self.running_mean + alpha * x.mean(dim=[0,2,3])
                                 running_var = (1 - alpha) * self.running_var + alpha * x.var(dim=[0,2,3])
                                 scale = self.weight * (running_var + self.eps).rsqrt()
@@ -495,7 +493,6 @@ class DUA(nn.Module):
     def _apply_dua_adaptation(self):
         # This code is required because some models use frozen batch normalization layers.
         if self.cfg.model_type == "rtdetr":
-            self.bn_layers = []
             for name, module in self.model.named_modules():
                 if isinstance(module, (nn.BatchNorm2d, nn.LayerNorm, RTDetrFrozenBatchNorm2d)):
                     should_adapt = False
@@ -518,62 +515,96 @@ class DUA(nn.Module):
                         continue
 
                     module.adapt_type = "DUA"
-                    if hasattr(module, 'running_mean'):
-                        if not hasattr(module, 'original_running_mean'):
-                            module.original_running_mean = module.running_mean.clone()
-                            module.original_running_var = module.running_var.clone()
-                        self.bn_layers.append(module)
-           
+                    module.min_momentum_constant = self.min_momentum_constant
+                    module.decay_factor = self.decay_factor
+                    module.mom_pre = self.mom_pre
+
+                    if not hasattr(module, 'original_running_mean') and hasattr(module, 'running_mean'):
+                        module.original_running_mean = module.running_mean.clone()
+                        module.original_running_var = module.running_var.clone()
+
+                    def dua_forward(self, x):
+                        if hasattr(self, 'adapt_type') and self.adapt_type == "DUA":
+                            with torch.no_grad():
+                                current_momentum = self.mom_pre + self.min_momentum_constant
+
+                                if isinstance(self, (nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                                    batch_mean = x.mean(dim=[0, 2, 3])
+                                    batch_var = x.var(dim=[0, 2, 3], unbiased=True)
+                                elif isinstance(self, nn.LayerNorm):
+                                    dims = tuple(range(-len(self.normalized_shape), 0))
+                                    batch_mean = x.mean(dim=dims, keepdim=True).squeeze()
+                                    batch_var = x.var(dim=dims, keepdim=True, unbiased=True).squeeze()
+
+                                if hasattr(self, 'running_mean'):
+                                    self.running_mean.mul_(1 - current_momentum).add_(batch_mean, alpha=current_momentum)
+                                    self.running_var.mul_(1 - current_momentum).add_(batch_var, alpha=current_momentum)
+
+                                self.mom_pre *= self.decay_factor
+
+                        # Standard normalization
+                        if isinstance(self, nn.BatchNorm2d):
+                            scale = self.weight * (self.running_var + self.eps).rsqrt()
+                            bias = self.bias - self.running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
+                            out_dtype = x.dtype
+                            out = x * scale.to(out_dtype) + bias.to(out_dtype)
+                        elif isinstance(self, RTDetrFrozenBatchNorm2d):
+                            eps = getattr(self, 'eps', 1e-5)
+                            scale = self.weight * (self.running_var + eps).rsqrt()
+                            bias = self.bias - self.running_mean * scale
+                            scale = scale.reshape(1, -1, 1, 1)
+                            bias = bias.reshape(1, -1, 1, 1)
+                            out_dtype = x.dtype
+                            out = x * scale.to(out_dtype) + bias.to(out_dtype)
+                        elif isinstance(self, nn.LayerNorm):
+                            out = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+                        else:
+                            out = x
+
+                        return out
+
+                    module.forward = dua_forward.__get__(module, module.__class__)
+
         if self.cfg.model_type == "rcnn":
-            self.bn_layers = []
-            for module in self.model.modules():
+            for name, module in self.model.named_modules():
                 if isinstance(module, (nn.BatchNorm2d, FrozenBatchNorm2d)):
+                    module.adapt_type = "DUA"
+                    module.min_momentum_constant = self.min_momentum_constant
+                    module.decay_factor = self.decay_factor
+                    module.mom_pre = self.mom_pre
+
                     if not hasattr(module, 'original_running_mean'):
                         module.original_running_mean = module.running_mean.clone()
                         module.original_running_var = module.running_var.clone()
-                    self.bn_layers.append(module)
+
+                    def dua_forward(self, x):
+                        if hasattr(self, 'adapt_type') and self.adapt_type == "DUA":
+                            with torch.no_grad():
+                                current_momentum = self.mom_pre + self.min_momentum_constant
+                                batch_mean = x.mean(dim=[0, 2, 3])
+                                batch_var = x.var(dim=[0, 2, 3], unbiased=True)
+
+                                self.running_mean.mul_(1 - current_momentum).add_(batch_mean, alpha=current_momentum)
+                                self.running_var.mul_(1 - current_momentum).add_(batch_var, alpha=current_momentum)
+                                self.mom_pre *= self.decay_factor
+
+                        scale = self.weight * (self.running_var + self.eps).rsqrt()
+                        bias = self.bias - self.running_mean * scale
+                        scale = scale.reshape(1, -1, 1, 1)
+                        bias = bias.reshape(1, -1, 1, 1)
+                        out_dtype = x.dtype
+                        out = x * scale.to(out_dtype) + bias.to(out_dtype)
+
+                        return out
+
+                    module.forward = dua_forward.__get__(module, module.__class__)
 
     def forward(self, x=None, **kwargs):
         if x is None:
             x = kwargs
         self.model.eval()
-        current_momentum = self.mom_pre + self.min_momentum_constant
-
-        if self.cfg.model_type == "rtdetr":
-            def get_dua_hook(momentum_val):
-                def hook(module, input, output):
-                    x = input[0]
-                    with torch.inference_mode():
-                        if isinstance(module, (nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
-                            batch_mean = x.mean(dim=[0, 2, 3])
-                            batch_var = x.var(dim=[0, 2, 3], unbiased=True)
-                        elif isinstance(module, nn.LayerNorm):
-                            dims = tuple(range(-len(module.normalized_shape), 0))
-                            batch_mean = x.mean(dim=dims, keepdim=True).squeeze()
-                            batch_var = x.var(dim=dims, keepdim=True, unbiased=True).squeeze()
-
-                        # Update running statistics
-                        module.running_mean.mul_(1 - momentum_val).add_(batch_mean, alpha=momentum_val)
-                        module.running_var.mul_(1 - momentum_val).add_(batch_var, alpha=momentum_val)
-                return hook
-        
-        elif self.cfg.model_type == "rcnn":
-            def get_dua_hook(momentum_val):
-                def hook(module, input, output):
-                    x = input[0]
-                    with torch.inference_mode():
-                        batch_mean = x.mean(dim=[0, 2, 3])
-                        batch_var = x.var(dim=[0, 2, 3], unbiased=True)
-
-                        # Update running statistics
-                        module.running_mean.mul_(1 - momentum_val).add_(batch_mean, alpha=momentum_val)
-                        module.running_var.mul_(1 - momentum_val).add_(batch_var, alpha=momentum_val)
-                return hook
-            
-        hooks = []
-        for layer in self.bn_layers:
-            hook_handle = layer.register_forward_hook(get_dua_hook(current_momentum))
-            hooks.append(hook_handle)
 
         if self.cfg.model_type == "rtdetr":
             pixel_values = x['pixel_values'].to(self.device)
@@ -583,18 +614,13 @@ class DUA(nn.Module):
         elif self.cfg.model_type == "rcnn":
             outputs = self.model(x)
 
-        for hook in hooks:
-            hook.remove()
-
-        self.mom_pre *= self.decay_factor
-
         return outputs
     
 @dataclass
 class MeanTeacherConfig:
     model_type: str = "rcnn" # "swinrcnn", "yolo11", "rtdetr"
     adaptation_layers: str = "backbone+encoder" # "backbone", "encoder"
-    
+
     data_root: str = './datasets'
     device: torch.device = torch.device("cuda")
     batch_size: int = 4
@@ -606,9 +632,16 @@ class MeanTeacherConfig:
 
     conf_threshold: float = 0.3
     ema_alpha: float = 0.99
+    # Augmentation strength (reduce these values for RT-DETR if performance is poor)
+    # For RT-DETR: consider augment_strength_n=1, augment_strength_m=5
+    # For RCNN: keep augment_strength_n=2, augment_strength_m=10
     augment_strength_n: int = 2
     augment_strength_m: int = 10
     cutout_size: int = 16
+
+    # RT-DETR specific
+    image_size: int = 800
+    reference_model_id: str = "PekingU/rtdetr_r50vd"
 
 class MeanTeacher(nn.Module):
     def __init__(self, model, config):
@@ -636,6 +669,13 @@ class MeanTeacher(nn.Module):
         self.teacher_model = copy.deepcopy(self.model)
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
+
+        # Set EMA alpha from config
+        self.ema_alpha = self.cfg.ema_alpha
+
+        # Initialize weight_reg (default to 0.0 if not set)
+        if not hasattr(self, 'weight_reg'):
+            self.weight_reg = 0.0
 
         params = []
 
@@ -710,9 +750,11 @@ class MeanTeacher(nn.Module):
                             m.bias.requires_grad = True
                             params += [m.bias]
         
+        trainable_params = params 
+        
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
-                self.model.parameters(),
+                trainable_params,
                 lr=self.cfg.lr,
                 momentum=self.cfg.momentum,
                 weight_decay=self.cfg.weight_decay
@@ -720,7 +762,7 @@ class MeanTeacher(nn.Module):
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
-                self.model.parameters(),
+                trainable_params,
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay
             )
@@ -834,79 +876,148 @@ class MeanTeacher(nn.Module):
 
         return RandAugmentMC(n, m, augment_pool)
     
-    def forward(self, x):
+    def forward(self, x=None, **kwargs):
+        if x is None:
+            x = kwargs
+
+        # Apply augmentation
         weak_batch, strong_batch = self._apply_augmentation(x)
 
+        # Get teacher predictions on weak (original) batch
+        self.teacher_model.eval()
         with torch.no_grad():
-            teacher_outputs = self.teacher_model(weak_batch)
+            if self.cfg.model_type == "rtdetr":
+                teacher_outputs = self.teacher_model(
+                    pixel_values=weak_batch['pixel_values'].to(self.device),
+                    labels=weak_batch['labels']
+                )
+            elif self.cfg.model_type == "rcnn":
+                teacher_outputs = self.teacher_model(weak_batch)
 
+        # Create pseudo labels for strong batch
         pseudo_labeled_batch = self._set_pseudo_labels(strong_batch, teacher_outputs)
 
+        # Train student model with pseudo labels
+        self.model.train()
         self.optimizer.zero_grad()
 
         if self.cfg.model_type == "rtdetr":
-            model_output = self.model(pixel_values=pseudo_labeled_batch['pixel_values'], labels=pseudo_labeled_batch['labels'])
-            total_loss = model_output.loss
+            model_output = self.model(
+                pixel_values=pseudo_labeled_batch['pixel_values'].to(self.device),
+                labels=pseudo_labeled_batch['labels']
+            )
 
-            if self.weight_reg > 0.0:
-                reg_loss = torch.tensor(0.0, device=self.device)
-                for param, init_param in zip(self.optimizer.param_groups[0]['params'], self.init_weights):
-                    reg_loss += torch.mean((param - init_param) ** 2)
-                total_loss += self.weight_reg * reg_loss
+            if model_output.loss is not None and model_output.loss > 0:
+                total_loss = model_output.loss
 
-            if total_loss > 0:
-                total_loss.backward()
-                self.optimizer.step()
-
-        elif self.cfg.model_type == "rcnn":
-            model_output = self.model(pseudo_labeled_batch)
-            if isinstance(model_output, dict):
-                losses = model_output
-                total_loss = sum([losses[k] for k in losses])
-
-                if self.weight_reg > 0.0:
+                # Add weight regularization if needed
+                if hasattr(self, 'weight_reg') and self.weight_reg > 0.0:
                     reg_loss = torch.tensor(0.0, device=self.device)
                     for param, init_param in zip(self.optimizer.param_groups[0]['params'], self.init_weights):
                         reg_loss += torch.mean((param - init_param) ** 2)
                     total_loss += self.weight_reg * reg_loss
 
-                if total_loss > 0:
-                    total_loss.backward()
+                total_loss.backward()
 
-                    if hasattr(self.model, 'backbone'):
-                        torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 1.0)
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-                    self.optimizer.step()
-        
+                self.optimizer.step()
+
+        elif self.cfg.model_type == "rcnn":
+            # For Detectron2, we need EventStorage context for training
+            from detectron2.utils.events import EventStorage
+
+            with EventStorage() as storage:
+                model_output = self.model(pseudo_labeled_batch)
+                if isinstance(model_output, dict):
+                    losses = model_output
+                    total_loss = sum([losses[k] for k in losses])
+
+                    if hasattr(self, 'weight_reg') and self.weight_reg > 0.0:
+                        reg_loss = torch.tensor(0.0, device=self.device)
+                        for param, init_param in zip(self.optimizer.param_groups[0]['params'], self.init_weights):
+                            reg_loss += torch.mean((param - init_param) ** 2)
+                        total_loss += self.weight_reg * reg_loss
+
+                    if total_loss > 0:
+                        total_loss.backward()
+
+                        if hasattr(self.model, 'backbone'):
+                            torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 1.0)
+
+                        self.optimizer.step()
+
+        # Update teacher with EMA
         self._update_teacher_ema()
 
+        # Return teacher's output for evaluation (use eval mode)
+        self.teacher_model.eval()
         with torch.no_grad():
-            final_outputs = self.teacher_model(x)
+            if self.cfg.model_type == "rtdetr":
+                final_outputs = self.teacher_model(
+                    pixel_values=x['pixel_values'].to(self.device),
+                    labels=x['labels']
+                )
+            elif self.cfg.model_type == "rcnn":
+                final_outputs = self.teacher_model(x)
 
         return final_outputs
 
 
-    def _apply_augmentation(self, batch: torch.Tensor):
-        weak_batch = []
-        strong_batch = []
-
-        for item in batch:
-            weak_item = copy.deepcopy(item)
-            weak_batch.append(weak_item)
-
-            strong_item = copy.deepcopy(item)
-            try:
-                # Apply RandAugmentMC which handles the conversion internally
-                strong_item["strong_aug_image"] = self.strong_augment(strong_item["image"])
-            except Exception as e:
-                # Fallback to original image if augmentation fails
-                strong_item["strong_aug_image"] = strong_item["image"]
-            strong_batch.append(strong_item)
-    
-        return weak_batch, strong_batch
-    
-    def _set_pseudo_labels(self, images: torch.Tensor, outputs: RTDetrObjectDetectionOutput):
+    def _apply_augmentation(self, batch):
         if self.cfg.model_type == "rtdetr":
+            # For RT-DETR: batch is {'pixel_values': tensor, 'labels': list}
+            # Return weak (original) and strong (augmented) versions
+            weak_batch = batch
+
+            # Apply strong augmentation to pixel_values
+            pixel_values = batch['pixel_values']
+            batch_size = pixel_values.shape[0]
+            strong_pixel_values = []
+
+            for i in range(batch_size):
+                img = pixel_values[i]  # [C, H, W]
+                try:
+                    # Apply RandAugmentMC
+                    strong_img = self.strong_augment(img)
+                    strong_pixel_values.append(strong_img)
+                except Exception as e:
+                    # Fallback to original image if augmentation fails
+                    strong_pixel_values.append(img)
+
+            strong_pixel_values = torch.stack(strong_pixel_values)
+            strong_batch = {
+                'pixel_values': strong_pixel_values,
+                'labels': batch['labels']
+            }
+
+            return weak_batch, strong_batch
+
+        elif self.cfg.model_type == "rcnn":
+            # For RCNN: batch is a list of dict items
+            weak_batch = []
+            strong_batch = []
+
+            for item in batch:
+                weak_item = copy.deepcopy(item)
+                weak_batch.append(weak_item)
+
+                strong_item = copy.deepcopy(item)
+                try:
+                    # Apply RandAugmentMC which handles the conversion internally
+                    strong_item["strong_aug_image"] = self.strong_augment(strong_item["image"])
+                except Exception as e:
+                    # Fallback to original image if augmentation fails
+                    strong_item["strong_aug_image"] = strong_item["image"]
+                strong_batch.append(strong_item)
+
+            return weak_batch, strong_batch
+    
+    def _set_pseudo_labels(self, strong_batch, outputs):
+        if self.cfg.model_type == "rtdetr":
+            # strong_batch is {'pixel_values': tensor, 'labels': list}
+            # outputs is RTDetrObjectDetectionOutput from teacher model
             annotation = []
             for bbox, logit in zip(outputs.pred_boxes, outputs.logits):
                 probs = F.softmax(logit, dim=-1)
@@ -918,17 +1029,19 @@ class MeanTeacher(nn.Module):
                 labels = labels[mask]
                 annotation.append({
                     'class_labels' : labels,
-                    'boxes' : bbox    
+                    'boxes' : bbox
                 })
             pseudo_labels = {
-                'pixel_values': images,
+                'pixel_values': strong_batch['pixel_values'],
                 'labels' : annotation
             }
             return pseudo_labels
 
         elif self.cfg.model_type == "rcnn":
+            # strong_batch is a list of dict items
+            # outputs is a list of predictions from teacher model
             pseudo_labels = []
-            for img, label in zip(images, outputs):
+            for img, label in zip(strong_batch, outputs):
                 inst = label['instances'][label['instances'].scores > self.cfg.conf_threshold]
 
                 new_inp = {k: img[k] for k in img if k not in ['instances', 'image', 'strong_aug_image']}
@@ -946,10 +1059,10 @@ class MeanTeacher(nn.Module):
                         new_img_size[1] / ori_img_size[1],
                         new_img_size[0] / ori_img_size[0]
                     )
-                
+
                 new_inp['instances'] = new_inst
                 pseudo_labels.append(new_inp)
-            
+
             return pseudo_labels
 
     def _update_teacher_ema(self):
@@ -1091,7 +1204,7 @@ class WHWConfig:
     adaptation_where: str = "adapter"
     adapter_bottleneck_ratio: int = 32
 
-    skip_redundant: str | None = None
+    skip_redundant: str | None = None # "ema+"
     skip_period: int = 10
     skip_beta: float = 1.2
     skip_tau: float = 1.0
@@ -1166,6 +1279,7 @@ class WHW(nn.Module):
         self._initialize_feature_stats()
         self._setup_parallel_adapters()
         self._patch_forward_box()
+        self._patch_model_forward()  # Add this to patch model's forward method
         self._setup_adaptation()
         self._setup_training_mode()
 
@@ -1738,7 +1852,7 @@ class WHW(nn.Module):
 
         if adapt_loss:
             total_loss = sum(adapt_loss.values())
-            self.adaptation_step += 1
+            self.adaptation_steps += 1
 
             # loss-based skipping logic
             cur_used = self._should_adapt(adapt_loss)
