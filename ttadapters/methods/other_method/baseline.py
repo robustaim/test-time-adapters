@@ -23,6 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as T
 
 from detectron2.layers import FrozenBatchNorm2d
 from detectron2.structures import Boxes, Instances, pairwise_iou
@@ -79,26 +80,63 @@ class ActMAD(nn.Module):
         self._setup()
 
     def _setup(self):
-        # Basic setup
         self.model = copy.deepcopy(self.model)
         self.model.to(self.cfg.device)
 
+        params = []
         for k, v in self.model.named_parameters():
-            v.requires_grad = True
+            v.requires_grad = False
+
+        if self.cfg.model_type == "rtdetr":
+            for name, m in self.model.named_modules():
+                if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                    should_adapt = False
+                    if self.adaptation_layers == "backbone":
+                        if ('model.backbone' in name and isinstance(m, RTDetrFrozenBatchNorm2d)) or \
+                           ('backbone' in name.lower() and isinstance(m, RTDetrFrozenBatchNorm2d)):
+                            should_adapt = True
+                    elif self.adaptation_layers == "encoder":
+                        if ('encoder' in name.lower() and not 'decoder' in name.lower()) and \
+                           isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
+                            should_adapt = True
+                    elif self.adaptation_layers == "backbone+encoder":
+                        if 'decoder' not in name.lower():
+                            should_adapt = True
+                    else:
+                        if 'decoder' not in name.lower():
+                            should_adapt = True
+
+                    if should_adapt:
+                        if hasattr(m, 'weight') and m.weight is not None and isinstance(m.weight, nn.Parameter):
+                            m.weight.requires_grad = True
+                            params.append(m.weight)
+                        if hasattr(m, 'bias') and m.bias is not None and isinstance(m.bias, nn.Parameter):
+                            m.bias.requires_grad = True
+                            params.append(m.bias)
+
+        elif self.cfg.model_type in ("rcnn", "swinrcnn"):
+            for name, m in self.model.named_modules():
+                if isinstance(m, FrozenBatchNorm2d):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        m.weight.requires_grad = True
+                        params.append(m.weight)
+                    if hasattr(m, 'bias') and m.bias is not None:
+                        m.bias.requires_grad = True
+                        params.append(m.bias)
 
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
-                self.model.parameters(),
+                params,
                 lr=self.cfg.lr,
-                # momentum=self.cfg.momentum,
-                # weight_decay=self.cfg.weight_decay
+                momentum=self.cfg.momentum,
+                weight_decay=self.cfg.weight_decay
             )
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
-                self.model.parameters(),
-                # lr=self.cfg.lr,
-                # weight_decay=self.cfg.weight_decay
+                params,
+                lr=self.cfg.lr,
+                weight_decay=self.cfg.weight_decay
             )
 
         else :
@@ -236,9 +274,6 @@ class ActMAD(nn.Module):
         if x is None:
             x = kwargs
 
-        for param in self.model.parameters():
-            param.requires_grad = True
-
         self.model.eval()
         self.optimizer.zero_grad()
 
@@ -291,9 +326,6 @@ class ActMAD(nn.Module):
         # Backward and update
         loss.backward()
 
-        # Gradient clipping for numerical stability
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-
         self.optimizer.step()
 
         # Clean up hooks
@@ -312,11 +344,6 @@ class NORMConfig:
     device: torch.device = torch.device("cuda")
     batch_size: int = 4
     source_sum=128
-
-    lr: float = 1e-4
-    momentum: float = 0.9
-    weight_decay: float = 1e-4 # 0.01
-    optimizer_option: str = "SGD" # AdamW
 
 class NORM(nn.Module):
     def __init__(self, model, config):
@@ -341,6 +368,7 @@ class NORM(nn.Module):
     def _apply_norm_adaptation(self):
         # This code is required because some models use frozen batch normalization layers.
         for name, module in self.model.named_modules():
+            should_adapt = False
             if self.cfg.model_type == "rtdetr":
                 if isinstance(module, (nn.BatchNorm2d, nn.LayerNorm, RTDetrFrozenBatchNorm2d)):
                     should_adapt = False
@@ -443,7 +471,7 @@ class NORM(nn.Module):
             pixel_values = x['pixel_values'].to(self.device)
             labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                       for k, v in label.items()} for label in x['labels']]
-            outputs = self.model(pixel_values=pixel_values, labels=labels)
+            outputs = self.model(pixel_values=pixel_values)
         elif self.cfg.model_type == "rcnn":
             outputs = self.model(x)
         return outputs
@@ -610,7 +638,7 @@ class DUA(nn.Module):
             pixel_values = x['pixel_values'].to(self.device)
             labels = [{k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                       for k, v in label.items()} for label in x['labels']]
-            outputs = self.model(pixel_values=pixel_values, labels=labels)
+            outputs = self.model(pixel_values=pixel_values)
         elif self.cfg.model_type == "rcnn":
             outputs = self.model(x)
 
@@ -957,7 +985,6 @@ class MeanTeacher(nn.Module):
             if self.cfg.model_type == "rtdetr":
                 final_outputs = self.teacher_model(
                     pixel_values=x['pixel_values'].to(self.device),
-                    labels=x['labels']
                 )
             elif self.cfg.model_type == "rcnn":
                 final_outputs = self.teacher_model(x)
@@ -1224,7 +1251,7 @@ class WHWConfig:
     output_path: str = "./whw_source_statistics_clear.pt"
 
     clear_dataset: Dataset | None = None
-    clear_statistics_batch: int = 16
+    clear_statistics_batch: int = 64
 
 class WHW(nn.Module):
     # https://github.com/robustaim/ContinualTTA_ObjectDetection/blob/main/detectron2/modeling/meta_arch/rcnn.py
@@ -1606,14 +1633,9 @@ class WHW(nn.Module):
         roi_heads._forward_box = _forward_box_with_outs
 
     def _patch_model_forward(self):
-        """
-        Patch model's forward to return (results, adapt_loss, feature_sim)
-        This makes the model behave exactly
-        """
         original_forward = self.model.forward
 
         def continual_tta_forward(batched_inputs):
-            # forward that returns adapt_loss
             images = self.model.preprocess_image(batched_inputs)
             features = self.model.backbone(images.tensor)
 
@@ -1623,11 +1645,6 @@ class WHW(nn.Module):
             adapt_loss = {}
             feature_sim = {}
 
-            # Set to eval mode for proposal/roi_heads
-            self.model.roi_heads.training = False
-            self.model.proposal_generator.training = False
-
-            # Get proposals
             proposals, _ = self.model.proposal_generator(images, features, None)
 
             # Get box features and predictions
@@ -1835,12 +1852,13 @@ class WHW(nn.Module):
             warnings.warn("Unknown optimizer_option.")
 
     def _setup_training_mode(self):
-        # Set model components to training mode
         self.model.training = True
+        self.model.backbone.train()
+
         if hasattr(self.model, 'proposal_generator'):
-            self.model.proposal_generator.training = True
+            self.model.proposal_generator.eval()
         if hasattr(self.model, 'roi_heads'):
-            self.model.roi_heads.training = True
+            self.model.roi_heads.eval()
 
         for adapter in self.adapters.values():
             adapter.train()
@@ -1848,7 +1866,9 @@ class WHW(nn.Module):
         self.model.online_adapt = True
 
     def forward(self, x):
-        _, adapt_loss, feature_sim = self.model(x)
+        self.optimizer.zero_grad()
+
+        final_outputs, adapt_loss, feature_sim = self.model(x)
 
         if adapt_loss:
             total_loss = sum(adapt_loss.values())
@@ -1861,12 +1881,12 @@ class WHW(nn.Module):
                 total_loss.backward()
 
                 if hasattr(self.model, 'backbone'):
-                    torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 5.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 1.0)
 
                 # Clip adapter gradients
                 for adapter in self.adapters.values():
-                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), 5.0)
-                
+                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
+
                 self.optimizer.step()
                 self.used_steps += 1
 
@@ -1877,11 +1897,6 @@ class WHW(nn.Module):
             if "global_align" in adapt_loss:
                 self._update_loss_ema(adapt_loss["global_align"].item())
         
-        self.optimizer.zero_grad()
-
-        # with torch.no_grad():
-        final_outputs, _, _ = self.model(x)
-        
         return final_outputs
 
     def _should_adapt(self, adapt_loss: dict) -> bool:
@@ -1891,7 +1906,7 @@ class WHW(nn.Module):
         if "global_align" not in adapt_loss:
             return True
         
-        loss_value = adapt_loss["globel_align"].item()
+        loss_value = adapt_loss["global_align"].item()
 
         # Calculate divergence threshold
         div_thr = 2 * sum(self.s_div.values()) * self.skip_tau if self.skip_redundant is not None else 2 * sum(self.s_div.values())
