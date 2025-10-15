@@ -97,7 +97,7 @@ class DetectionEvaluator:
 
                         collapse_time += time.time() - start
 
-                    with torch.no_grad:
+                    with torch.no_grad():
                         match model.model_provider:
                             case ModelProvider.Detectron2:
                                 from detectron2.modeling.postprocessing import detector_postprocess
