@@ -21,7 +21,8 @@ dependencies = [
     "ipywidgets>=8.1.7",
     "tqdm>=4.67.1",
     "wandb>=0.21.0",
-    "gdown>=5.2.0"
+    "gdown>=5.2.0",
+    "hf-xet>=1.1.10"
 ]
 [project.optional-dependencies]
 torch = [
