@@ -72,7 +72,7 @@ class AdaptationEngine(BaseModel, PreTrainedModel):
         **kwargs,
     ) -> "AdaptationEngine":
         model_args = basemodel, *model_args
-        return super(PreTrainedModel, cls).from_pretrained(
+        return super(BaseModel, cls).from_pretrained(
             pretrained_model_name_or_path=model_id,
             *model_args,
             config=config,
