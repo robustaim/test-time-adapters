@@ -128,10 +128,13 @@ class DetectionEvaluator:
                             case ModelProvider.HuggingFace:
                                 sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
                                 outputs = data_preparation.post_process(outputs, target_sizes=sizes)
-                                predictions_list.extend([Detections.from_transformers(output) for output in outputs])
+                                predictions_list.extend([  # dtype converting
+                                    Detections.from_transformers({k: v.float() if isinstance(v, torch.Tensor) else v for k, v in output.items()})
+                                    for output in outputs
+                                ])
                                 targets_list.extend([Detections(
-                                    xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().numpy(),
-                                    class_id=label['class_labels'].cpu().numpy(),
+                                    xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().float().numpy(),
+                                    class_id=label['class_labels'].cpu().float().numpy(),
                                 ) for label in batch['labels']])
                             case _:
                                 raise ValueError(f"Unsupported model provider: {model.model_provider}")
