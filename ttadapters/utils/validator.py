@@ -50,8 +50,6 @@ class DetectionEvaluator:
                 print("WARNING: reset_adaptation() is not implemented for this model. Assuming the evaluation is running with deep-copy mode.")
                 model = copy.deepcopy(model)
 
-        model = model.to(device).to(dtype)
-
         map_metric = MeanAveragePrecision()
         predictions_list = []
         targets_list = []
