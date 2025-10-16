@@ -69,7 +69,7 @@ class DetectionCovarianceGate(nn.Module):
             bbox = bbox.unsqueeze(0)
 
         batch_size = bbox.shape[0]
-        h = bbox[:, 3]  # height
+        h = torch.clamp(bbox[:, 3], min=1.0)  # height
 
         # Bbox size proportional standard deviation
         std = torch.stack([
@@ -79,12 +79,13 @@ class DetectionCovarianceGate(nn.Module):
             self.std_weight_size * h       # h
         ], dim=1)  # [batch, 4]
 
-        # Optional: confidence weighting
+        # Optional confidence weighting
         if confidence is not None:
             if confidence.dim() == 0:
                 confidence = confidence.unsqueeze(0)
             conf_weight = 1.0 / (confidence.clamp(min=1e-6))
             std = std * conf_weight.unsqueeze(1)
+        std = torch.clamp(std, min=0.1)
 
         # Create diagonal covariance matrices
         R = torch.diag_embed(std ** 2)  # [batch, 4, 4]
@@ -123,11 +124,13 @@ class AdaptiveKalmanFilterCXCYWH(nn.Module):
         self,
         dim_x: int = 8,  # [cx, cy, w, h, vx, vy, vw, vh]
         dim_z: int = 4,  # [cx, cy, w, h]
-        learnable_uncertainty: bool = False
+        learnable_uncertainty: bool = False,
+        min_variance: float = 1e-6
     ):
         super().__init__()
         self.dim_x = dim_x
         self.dim_z = dim_z
+        self.min_variance = min_variance
 
         # Gates
         self.transition_gate = StateTransitionGate(dim_x)
@@ -148,8 +151,8 @@ class AdaptiveKalmanFilterCXCYWH(nn.Module):
             mean: [8, 1] state [cx, cy, w, h, vx, vy, vw, vh]
             covariance: [8, 8] state covariance
         """
-        F = self.transition_gate()
-        Q = self.system_cov_gate()
+        F = self.transition_gate().to(mean.device)
+        Q = self.system_cov_gate().to(mean.device)
 
         mean_pred = F @ mean
         cov_pred = F @ covariance @ F.T + Q
@@ -169,27 +172,49 @@ class AdaptiveKalmanFilterCXCYWH(nn.Module):
             measurement: [4, 1] detection [cx, cy, w, h]
             confidence: scalar confidence
         """
-        H = self.observation_gate()
+        H = self.observation_gate().to(mean.device)
 
         if measurement.dim() == 3:
             bbox = measurement.squeeze(-1)
         else:
             bbox = measurement.squeeze(-1)
 
-        R = self.detection_cov_gate(bbox, confidence)
+        R = self.detection_cov_gate(bbox, confidence).to(mean.device)
+        R = R + torch.eye(R.shape[-1], device=R.device) * self.min_variance  # stabilize
 
         # Innovation
         innovation = measurement - H @ mean
 
         # Innovation covariance
         S = H @ covariance @ H.T + R
+        S = S + torch.eye(S.shape[-1], device=S.device) * self.min_variance
 
-        # Kalman gain
-        K = covariance @ H.T @ torch.linalg.inv(S)
+        # Kalman gain / solve
+        # K = covariance @ H.T @ inv(S) by solving `S @ K.T = (covariance @ H.T).T`
+        cov_HT = covariance @ H.T  # [8, 4]
+        try:
+            # Cholesky: S = L @ L.T
+            L = torch.linalg.cholesky(S)  # Lower triangular matrix
+
+            # Solve twice (forward + backward substitution)
+            # 1. L @ y = cov_HT.T
+            y = torch.linalg.solve_triangular(L, cov_HT.T, upper=False)
+            # 2. L.T @ K.T = y
+            K = torch.linalg.solve_triangular(L.T, y, upper=True).T
+        except RuntimeError:  # Fall-back
+            # `solve(S, X)` solves `S @ X = B`
+            # S.T @ K.T = cov_HT.T
+            K = torch.linalg.solve(S.T, cov_HT.T).T  # [8, 4]
 
         # Update
         mean_new = mean + K @ innovation
-        cov_new = (self.I - K @ H) @ covariance
+        # Joseph form (Stable covariance update)
+        # cov_new = (I - K@H) @ cov @ (I - K@H).T + K @ R @ K.T
+        IKH = self.I - K @ H
+        cov_new = IKH @ covariance @ IKH.T + K @ R @ K.T
+
+        # Ensure covariance is symmetric
+        cov_new = (cov_new + cov_new.T) / 2
 
         return mean_new, cov_new
 
@@ -220,8 +245,9 @@ def initialize_state_cxcywh(bbox: torch.Tensor) -> Tuple[torch.Tensor, torch.Ten
     mean[:4, 0] = bbox  # [cx, cy, w, h]
     mean[4:, 0] = 0.0   # all velocities = 0
 
-    covariance = torch.eye(8, device=bbox.device) * 10.
-    covariance[4:, 4:] *= 1000.  # high velocity uncertainty
+    covariance = torch.eye(8, device=bbox.device)
+    covariance[:4, :4] *= 100.   # position/size uncertainty
+    covariance[4:, 4:] *= 1000.  # velocity uncertainty
 
     return mean, covariance
 
