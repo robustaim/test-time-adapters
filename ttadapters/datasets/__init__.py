@@ -7,6 +7,7 @@ from .shift import (
     SHIFTContinuous100DatasetForObjectDetection, SHIFTContinuousSubsetForObjectDetection,
     SHIFTContinuous10SubsetForObjectDetection, SHIFTContinuous100SubsetForObjectDetection
 )
+from .cityscapes import CityScapesDataset, CityScapesForObjectDetection
 
 from .base import BaseDataset, DatasetHolder, DataLoaderHolder, DataPreparation
 from . import scenarios

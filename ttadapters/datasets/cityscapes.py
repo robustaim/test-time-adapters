@@ -21,7 +21,7 @@ from tqdm.auto import tqdm
 
 from torchvision import tv_tensors
 from torchvision.io import read_image, ImageReadMode
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torchvision.datasets import utils
 import torch
 
@@ -29,13 +29,13 @@ from cityscapesscripts.helpers.labels import labels as cs_labels
 from cityscapesscripts.download import downloader
 from cityscapesscripts.download.downloader import login, download_packages
 
-#from .base import BaseDataset
+from .base import BaseDataset
 
 downloader.tqdm = tqdm  # Use tqdm from this module
 utils.tqdm = tqdm
 
 
-class CityScapesDataset(Dataset):
+class CityScapesDataset(BaseDataset):
     dataset_name = "CityScapes"
 
     # CityScapes instance classes
@@ -330,6 +330,7 @@ class CityScapesForObjectDetection(CityScapesDataset):
             target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
 
         target['image_id'] = idx
+        target['original_hw'] = image_tv.shape[-2:]
 
         # Apply transforms
         if self.transform is not None:
