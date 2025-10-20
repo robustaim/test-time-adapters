@@ -12,7 +12,6 @@ dependencies = [
     "numpy>=2.3.1",
     "supervision>=0.25.1",
     "torchinfo>=1.8.0",
-    "imagecorruptions>=1.1.2",
     "cityscapesscripts>=2.2.4",
     "shift-dev",
 
@@ -32,6 +31,9 @@ torch = [
 torch-cu128 = [
     "torch",
     "torchvision"
+]
+dev = [
+    "imagecorruptions>=1.1.2"
 ]
 
 
