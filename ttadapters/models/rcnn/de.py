@@ -241,14 +241,14 @@ class DetectronDataPreparation(DataPreparation):
         train_transforms: AugmentationList = AugmentationList([  # Detectron2 Faster R-CNN default
             PermuteChannels(),  # (C, H, W) -> (H, W, C)
             ConvertRGBtoBGR(),
-            ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1333, sample_style="choice"),
+            ResizeShortestEdge([640, 672, 704, 736, 768, 800], max_size=1600, sample_style="choice"),  # change max_size to 1600 for cityscapes dataset; original is 1333.
             RandomFlip(prob=0.5),  # Random horizontal flip with 50% probability
             PermuteChannels(reverse=True)  # (H, W, C) -> (C, H, W) - stupid detectron;;
         ]),
         valid_transforms: AugmentationList = AugmentationList([  # Detectron2 Faster R-CNN default
             PermuteChannels(),  # (C, H, W) -> (H, W, C)
             ConvertRGBtoBGR(),
-            ResizeShortestEdge(800, max_size=1333),
+            ResizeShortestEdge(800, max_size=1600),  # change max_size to 1600 for cityscapes dataset; original is 1333.
             PermuteChannels(reverse=True)  # (H, W, C) -> (C, H, W) - stupid detectron;;
         ])
     ):

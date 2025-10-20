@@ -237,7 +237,7 @@ class RTDetrDataPreparation(DataPreparation):
         confidence_threshold: float = 0.05,
         strong_augment_threshold_epoch: int = 0,  # duration epoch of strong augment
         multi_scale: list[int] = [480, 640, 800],
-        longest_edge: int = 1333,
+        longest_edge: int = 1600,  # change max_size to 1600 for cityscapes dataset; original is 1333.
         strong_augment: T.Compose = T.Compose([
             T.RandomPhotometricDistort(),
             T.RandomZoomOut(),
