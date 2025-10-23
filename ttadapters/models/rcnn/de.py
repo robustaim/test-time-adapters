@@ -1,7 +1,9 @@
 from typing import Callable
 import warnings
+import random
 import gc
 
+import torch
 from torch import nn, cuda, from_numpy
 from torch.utils.data import DataLoader
 from torchvision.tv_tensors import Image, BoundingBoxFormat, BoundingBoxes
@@ -11,6 +13,7 @@ from detectron2.engine import DefaultTrainer
 from detectron2.engine.hooks import PeriodicWriter
 
 from detectron2.structures import Boxes, Instances
+from detectron2.data.samplers import TrainingSampler
 from detectron2.data.transforms import AugmentationList, AugInput, ResizeShortestEdge, RandomFlip
 
 from detectron2.modeling.backbone.fpn import FPN, LastLevelMaxPool
@@ -23,6 +26,7 @@ from IPython.display import display
 from ipywidgets import Output
 
 import pandas as pd
+import numpy as np
 
 from .hook import TqdmProgressHook
 from .transforms import PermuteChannels, ConvertRGBtoBGR
@@ -59,7 +63,8 @@ class DetectronTrainerArgs:
         gradient_clipping_value: float = 1.0,
         gradient_clipping_norm_type: float = 2.0,
         use_amp: bool = False,
-        output_dir: str = "./results"
+        output_dir: str = "./results",
+        seed: int = 42
     ):
         # Merge default config
         cfg = get_cfg()
@@ -94,6 +99,7 @@ class DetectronTrainerArgs:
 
         # Dataloader settings
         self.DATALOADER.NUM_WORKERS = num_workers
+        self.SEED = seed
 
         # Evaluation settings
         self.TEST.EVAL_PERIOD = eval_period
@@ -153,12 +159,27 @@ class DetectronTrainer(DefaultTrainer):
     def build_train_loader(self, *args, **kwargs):
         if self.train_dataset is None:
             return None
+
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+
+        generator = torch.Generator()
+        generator.manual_seed(self.args.SEED * 2)
+
         return DataLoader(
             self.train_dataset,
             batch_size=self.args.SOLVER.IMS_PER_BATCH,
-            shuffle=True,
+            sampler=TrainingSampler(
+                size=len(self.train_dataset),
+                shuffle=True,
+                seed=self.args.SEED
+            ),
             num_workers=self.args.DATALOADER.NUM_WORKERS,
-            collate_fn=self.train_dataset.collate_fn
+            collate_fn=self.train_dataset.collate_fn,
+            worker_init_fn=seed_worker,
+            generator=generator
         )
 
     def build_test_loader(self, *args, **kwargs):
