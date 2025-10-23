@@ -114,7 +114,10 @@ class BaseModel(nn.Module):
             if k in model_state and v.size() == model_state[k].size():
                 new_state[k] = v
             else:
-                print(f"NOTE: Size mismatch for {k}: copying a param with shape {v.size()} from checkpoint, the shape in current model is {model_state[k].size()}")
+                if k not in model_state:
+                    print(f"NOTE: Key '{k}' found in checkpoint but not in current model. Skipping.")
+                else:
+                    print(f"NOTE: Size mismatch for {k}: copying a param with shape {v.size()} from checkpoint, the shape in current model is {model_state[k].size()}")
 
         result = self.load_state_dict(new_state, strict=strict)
         if self.model_provider == ModelProvider.HuggingFace:
