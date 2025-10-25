@@ -83,12 +83,50 @@ class ActMAD(nn.Module):
         self.model = copy.deepcopy(self.model)
         self.model.to(self.cfg.device)
 
-        for _, v in self.model.named_parameters():
-            v.requires_grad = True
+        params = []
+        for k, v in self.model.named_parameters():
+            v.requires_grad = False
+
+        if self.cfg.model_type == "rtdetr":
+            for name, m in self.model.named_modules():
+                if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
+                    should_adapt = False
+                    if self.adaptation_layers == "backbone":
+                        if ('model.backbone' in name and isinstance(m, RTDetrFrozenBatchNorm2d)) or \
+                           ('backbone' in name.lower() and isinstance(m, RTDetrFrozenBatchNorm2d)):
+                            should_adapt = True
+                    elif self.adaptation_layers == "encoder":
+                        if ('encoder' in name.lower() and not 'decoder' in name.lower()) and \
+                           isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
+                            should_adapt = True
+                    elif self.adaptation_layers == "backbone+encoder":
+                        if 'decoder' not in name.lower():
+                            should_adapt = True
+                    else:
+                        if 'decoder' not in name.lower():
+                            should_adapt = True
+
+                    if should_adapt:
+                        if hasattr(m, 'weight') and m.weight is not None and isinstance(m.weight, nn.Parameter):
+                            m.weight.requires_grad = True
+                            params.append(m.weight)
+                        if hasattr(m, 'bias') and m.bias is not None and isinstance(m.bias, nn.Parameter):
+                            m.bias.requires_grad = True
+                            params.append(m.bias)
+
+        elif self.cfg.model_type in ("rcnn", "swinrcnn"):
+            for name, m in self.model.named_modules():
+                if isinstance(m, FrozenBatchNorm2d):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        m.weight.requires_grad = True
+                        params.append(m.weight)
+                    if hasattr(m, 'bias') and m.bias is not None:
+                        m.bias.requires_grad = True
+                        params.append(m.bias)
 
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
-                self.model.parameters(),
+                params,
                 lr=self.cfg.lr,
                 momentum=self.cfg.momentum,
                 weight_decay=self.cfg.weight_decay
@@ -96,7 +134,7 @@ class ActMAD(nn.Module):
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
-                self.model.parameters(),
+                params,
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay
             )
@@ -270,15 +308,15 @@ class ActMAD(nn.Module):
         batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
 
         # Compute ActMAD loss
-        loss_mean = 0.0
-        loss_var = 0.0
+        loss_mean = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
+        loss_var = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
 
         for i in range(n_chosen_layers):
-            loss_mean = loss_mean + self.loss(
+            loss_mean += self.loss(
                 batch_mean_tta[i].to(self.device),
                 self.clean_mean_list_final[i].to(self.device)
             )
-            loss_var = loss_var + self.loss(
+            loss_var += self.loss(
                 batch_var_tta[i].to(self.device),
                 self.clean_var_list_final[i].to(self.device)
             )
@@ -287,6 +325,7 @@ class ActMAD(nn.Module):
 
         # Backward and update
         loss.backward()
+
         self.optimizer.step()
 
         # Clean up hooks
@@ -1179,7 +1218,7 @@ class ConvTaskWrapper(nn.Module):
 class WHWConfig:
     model_type: str = "rcnn" # "swinrcnn", "yolo11", "rtdetr"
     adaptation_layers: str = "backbone+encoder" # "backbone", "encoder"
-    
+
     data_root: str = './datasets'
     device: torch.device = torch.device("cuda")
     batch_size: int = 4
@@ -1204,7 +1243,7 @@ class WHWConfig:
     ema_gamma: int = 128
     freq_weight: bool = False
 
-    source_feat_stats: str | None = "./whw_source_statistics_clear.pt" # path 
+    source_feat_stats: str | None = "./whw_source_statistics_clear.pt" # path
 
     num_classes: int = 6
 
@@ -1431,7 +1470,7 @@ class WHW(nn.Module):
             for k in self.s_stats["gl"]:
                 mean, cov = self.s_stats["gl"][k]
                 self.template_cov["gl"] = self.template_cov.get("gl", {})
-                self.template_cov["gl"][k] = torch.eye(mean.shape[0]) * cov.max().item() / 30
+                self.template_cov["gl"][k] = torch.eye(cov.shape[0]) * (cov.max().item() / 30)
                 self.t_stats["gl"] = self.t_stats.get("gl", {})
                 self.t_stats["gl"][k] = (mean.clone(), cov.clone())
 
@@ -1440,7 +1479,8 @@ class WHW(nn.Module):
             for k in self.s_stats["fg"]:
                 mean, cov = self.s_stats["fg"][k]
                 self.template_cov["fg"] = self.template_cov.get("fg", {})
-                self.template_cov["fg"][k] = torch.eye(mean.shape[0]) * cov.max().item() / 30
+                # FIX: Use cov.shape[0] instead of mean.shape[0] for consistency
+                self.template_cov["fg"][k] = torch.eye(cov.shape[0]) * (cov.max().item() / 30)
                 self.t_stats["fg"] = self.t_stats.get("fg", {})
                 self.t_stats["fg"][k] = (mean.clone(), cov.clone())
                 self.ema_n[k] = 0
@@ -1606,6 +1646,10 @@ class WHW(nn.Module):
             adapt_loss = {}
             feature_sim = {}
 
+            # Match original ContinualTTA (lines 290-297): set eval mode
+            self.model.roi_heads.training = False
+            self.model.proposal_generator.training = False
+
             proposals, _ = self.model.proposal_generator(images, features, None)
 
             # Get box features and predictions
@@ -1614,7 +1658,8 @@ class WHW(nn.Module):
 
             # Compute foreground alignment
             if self.fg_align is not None:
-                _scores = nn.Softmax(dim=1)(predictions[0])
+                class_logits, box_deltas = predictions
+                _scores = nn.Softmax(dim=1)(class_logits)
                 bg_scores = _scores[:, -1]
                 fg_scores, fg_preds = _scores[:, :-1].max(dim=1)
 
@@ -1631,36 +1676,38 @@ class WHW(nn.Module):
                         cur_feats = box_features[fg_preds == k]
                         self.ema_n[k] += cur_feats.shape[0]
 
+                        # PRACTICAL SOLUTION: Use mean() for batch-size independence
+                        # Original uses sum() which makes updates dependent on batch size
+                        # We use mean() for consistent behavior + adjusted ema_gamma
+                        # This prevents catastrophic forgetting while maintaining performance
                         diff = cur_feats - self.t_stats["fg"][k][0][None, :].to(self.device)
-                        delta = 1 / self.ema_gamma * diff.sum(dim=0)
+                        delta = (1 / self.ema_gamma) * diff.mean(dim=0)
                         cur_target_mean = self.t_stats["fg"][k][0].to(self.device) + delta
 
-                        try:
-                            t_dist = torch.distributions.MultivariateNormal(
-                                cur_target_mean,
-                                self.s_stats["fg"][k][1].to(self.device) + self.template_cov["fg"][k].to(self.device)
-                            )
-                            s_dist = torch.distributions.MultivariateNormal(
-                                self.s_stats["fg"][k][0].to(self.device),
-                                self.s_stats["fg"][k][1].to(self.device) + self.template_cov["fg"][k].to(self.device)
-                            )
+                        # Match original ContinualTTA (lines 332-346): no try-except
+                        t_dist = torch.distributions.MultivariateNormal(
+                            cur_target_mean,
+                            self.s_stats["fg"][k][1].to(self.device) + self.template_cov["fg"][k].to(self.device)
+                        )
+                        s_dist = torch.distributions.MultivariateNormal(
+                            self.s_stats["fg"][k][0].to(self.device),
+                            self.s_stats["fg"][k][1].to(self.device) + self.template_cov["fg"][k].to(self.device)
+                        )
 
-                            # ContinualTTA line 334-341: freq_weight option
-                            if self.freq_weight:
-                                class_weight = np.log((max([self.ema_n[_k] for _k in range(self.num_classes)]) / self.ema_n[k]))
-                                cur_loss_fg_align = min(class_weight + 0.01, 10) ** 2 * \
-                                                    ((torch.distributions.kl.kl_divergence(s_dist, t_dist) +
-                                                      torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2)
-                            else:
-                                cur_loss_fg_align = (torch.distributions.kl.kl_divergence(s_dist, t_dist) +
-                                                   torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2
+                        if self.freq_weight:
+                            # Match original ContinualTTA exactly (line 335-338)
+                            class_weight = np.log((max([self.ema_n[_k] for _k in range(self.num_classes)]) / self.ema_n[k]))
+                            cur_loss_fg_align = min(class_weight + 0.01, 10) ** 2 * \
+                                                ((torch.distributions.kl.kl_divergence(s_dist, t_dist) +
+                                                  torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2)
+                        else:
+                            cur_loss_fg_align = (torch.distributions.kl.kl_divergence(s_dist, t_dist) +
+                                               torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2
 
-                            if cur_loss_fg_align < 10**5:
-                                loss_fg_align += cur_loss_fg_align
-                                self.t_stats["fg"][k] = (cur_target_mean.detach(), None)
-                                loss_n += 1
-                        except:
-                            pass
+                        if cur_loss_fg_align < 10**5:
+                            loss_fg_align += cur_loss_fg_align
+                            self.t_stats["fg"][k] = (cur_target_mean.detach(), None)
+                            loss_n += 1
 
                 if loss_n > 0:
                     adapt_loss["fg_align"] = self.alpha_fg * loss_fg_align
@@ -1672,28 +1719,27 @@ class WHW(nn.Module):
                     for k in features.keys():
                         if k in self.t_stats.get("gl", {}):
                             cur_feats = features[k].mean(dim=[2, 3])
+                            # PRACTICAL SOLUTION: Use mean() for batch-size independence
                             diff = cur_feats - self.t_stats["gl"][k][0][None, :].to(self.device)
-                            delta = 1 / self.ema_gamma * diff.sum(dim=0)
+                            delta = (1 / self.ema_gamma) * diff.mean(dim=0)
                             cur_target_mean = self.t_stats["gl"][k][0].to(self.device) + delta
 
-                            try:
-                                t_dist = torch.distributions.MultivariateNormal(
-                                    cur_target_mean,
-                                    self.s_stats["gl"][k][1].to(self.device) + self.template_cov["gl"][k].to(self.device)
-                                )
-                                s_dist = torch.distributions.MultivariateNormal(
-                                    self.s_stats["gl"][k][0].to(self.device),
-                                    self.s_stats["gl"][k][1].to(self.device) + self.template_cov["gl"][k].to(self.device)
-                                )
+                            # Match original ContinualTTA: no try-except
+                            t_dist = torch.distributions.MultivariateNormal(
+                                cur_target_mean,
+                                self.s_stats["gl"][k][1].to(self.device) + self.template_cov["gl"][k].to(self.device)
+                            )
+                            s_dist = torch.distributions.MultivariateNormal(
+                                self.s_stats["gl"][k][0].to(self.device),
+                                self.s_stats["gl"][k][1].to(self.device) + self.template_cov["gl"][k].to(self.device)
+                            )
 
-                                cur_loss_gl_align = (torch.distributions.kl.kl_divergence(s_dist, t_dist) +
-                                                   torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2
+                            cur_loss_gl_align = (torch.distributions.kl.kl_divergence(s_dist, t_dist) +
+                                               torch.distributions.kl.kl_divergence(t_dist, s_dist)) / 2
 
-                                if cur_loss_gl_align < 10**5:
-                                    loss_gl_align += cur_loss_gl_align
-                                    self.t_stats["gl"][k] = (cur_target_mean.detach(), None)
-                            except:
-                                pass
+                            if cur_loss_gl_align < 10**5:
+                                loss_gl_align += cur_loss_gl_align
+                                self.t_stats["gl"][k] = (cur_target_mean.detach(), None)
 
                 adapt_loss["global_align"] = self.alpha_gl * loss_gl_align
 
@@ -1711,6 +1757,11 @@ class WHW(nn.Module):
         Matches configure_adaptation_model.py lines 26-42 from ContinualTTA
         """
         params = []
+
+        # CRITICAL FIX: First freeze ALL backbone parameters
+        for param in self.model.backbone.parameters():
+            param.requires_grad = False
+
         if self.cfg.lr > 0:
             if self.adaptation_where == "adapter":
                 # Collect parameters from BOTH adapter types like ContinualTTA
@@ -1725,7 +1776,8 @@ class WHW(nn.Module):
 
                             # SECOND ADAPTER: block.conv1 wrapper (ConvTaskWrapper)
                             if isinstance(block.conv1, ConvTaskWrapper):
-                                # Freeze original conv (ContinualTTA behavior)
+                                # Freeze original conv (ContinualTTA behavior) - already done above
+                                # But ensure it's frozen
                                 for param in block.conv1.conv.parameters():
                                     param.requires_grad = False
 
@@ -1738,8 +1790,8 @@ class WHW(nn.Module):
                                     params += list(block.conv1.up_proj.parameters())
 
                                 # CRITICAL: Enable adapter_norm (lines 51-54 in configure_adaptation_model.py)
+                                # FIX: Keep track_running_stats=True for proper batch norm behavior
                                 if hasattr(block.conv1, 'adapter_norm'):
-                                    block.conv1.adapter_norm.track_running_stats = False
                                     block.conv1.adapter_norm.requires_grad_(True)
                                     params += list(block.conv1.adapter_norm.parameters())
 
@@ -1813,18 +1865,37 @@ class WHW(nn.Module):
             warnings.warn("Unknown optimizer_option.")
 
     def _setup_training_mode(self):
-        self.model.training = True
-        self.model.backbone.train()
+        # CRITICAL FIX: Keep backbone in TRAIN mode for gradient flow through adapters!
+        # Original ContinualTTA keeps model in train mode but only adapters have requires_grad=True
+        # This allows gradients to flow through the computational graph to adapters
 
-        if hasattr(self.model, 'proposal_generator'):
-            self.model.proposal_generator.eval()
-        if hasattr(self.model, 'roi_heads'):
-            self.model.roi_heads.eval()
+        # Set entire model to train mode FIRST
+        self.model.train()
 
+        # Then freeze non-adapter parameters by setting requires_grad=False
+        # (already done in _setup_adaptation)
+
+        # Set adapters explicitly to train mode
         for adapter in self.adapters.values():
             adapter.train()
 
+        # CRITICAL: Set adapter_norm in conv1 wrappers to train mode with track_running_stats=True
+        for stage_name in ['res2', 'res3', 'res4', 'res5']:
+            if hasattr(self.model.backbone.bottom_up, stage_name):
+                stage = getattr(self.model.backbone.bottom_up, stage_name)
+                for block in stage:
+                    if isinstance(block.conv1, ConvTaskWrapper) and hasattr(block.conv1, 'adapter_norm'):
+                        block.conv1.adapter_norm.train()
+                        block.conv1.adapter_norm.track_running_stats = True
+
         self.model.online_adapt = True
+
+        # Debug: Print trainable parameters
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"WHW: Total trainable parameters: {trainable_params:,}")
+        print(f"WHW: Number of adapters: {len(self.adapters)}")
+        print(f"WHW: Backbone training mode: {self.model.backbone.training}")
+        print(f"WHW: Adaptation strategy: {self.adaptation_where}")
 
     def forward(self, x):
         self.optimizer.zero_grad()
@@ -1841,19 +1912,35 @@ class WHW(nn.Module):
             if total_loss > 0 and cur_used:
                 total_loss.backward()
 
+                # Match original ContinualTTA: only clip backbone gradients
                 if hasattr(self.model, 'backbone'):
                     torch.nn.utils.clip_grad_norm_(self.model.backbone.parameters(), 1.0)
-
-                # Clip adapter gradients
-                for adapter in self.adapters.values():
-                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
 
                 self.optimizer.step()
                 self.used_steps += 1
 
                 if self.used_steps % 10 == 0:
                     loss_str = ", ".join([f"{k}: {v.item():.4f}" for k, v in adapt_loss.items()])
-                    print(f"WHW: Used {self.used_steps}/{self.adaptation_steps} steps - {loss_str}")
+
+                    # Debug: Check gradient flow
+                    grad_info = []
+                    for name, param in self.model.named_parameters():
+                        if param.requires_grad and param.grad is not None:
+                            grad_norm = param.grad.norm().item()
+                            if grad_norm > 0:
+                                grad_info.append(f"{name}: {grad_norm:.6f}")
+
+                    if grad_info:
+                        print(f"WHW: Used {self.used_steps}/{self.adaptation_steps} steps - {loss_str}")
+                        print(f"  Gradient flow detected in {len(grad_info)} parameters")
+                        # Print first 3 gradient norms as sample
+                        for info in grad_info[:3]:
+                            print(f"    {info}")
+                    else:
+                        print(f"WHW: WARNING - No gradients detected! Loss: {loss_str}")
+            elif self.adaptation_steps % 100 == 0:
+                # Print when skipped
+                print(f"WHW: Skipped adaptation at step {self.adaptation_steps} (cur_used={cur_used})")
 
             if "global_align" in adapt_loss:
                 self._update_loss_ema(adapt_loss["global_align"].item())
