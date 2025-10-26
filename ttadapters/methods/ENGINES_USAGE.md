@@ -124,30 +124,60 @@ for batch in dataloader:
     outputs = engine(batch)
 ```
 
-### 5. WHWEngine (What, How, Where to adapt)
+### 5. WHWEngine (What, How, Where to adapt) - PEFT Style
 
-Works with: **Detectron2 only** (full implementation)
+Works with: Detectron2, Transformers, Ultralytics ✅
+
+**PEFT-style adapter injection** like LoRA!
 
 ```python
 from ttadapters.methods import WHWEngine, WHWConfig
 
-# Configure
+# Configure - PEFT style with target_modules patterns
 config = WHWConfig(
-    adaptation_where="adapter",  # "adapter", "normalization", "full"
-    adapter_bottleneck_ratio=32,
+    # Pattern-based adapter injection (like LoRA)
+    target_modules=[".*backbone.*conv.*", ".*encoder.*linear.*"],
+    adapter_rank=32,  # Bottleneck ratio
+
+    # Optimization
     lr=1e-4,
-    fg_align="KL",
-    gl_align="KL",
-    source_statistics_path="./whw_source_stats.pt",
+    optimizer_type="SGD",
+
+    # Feature alignment (optional)
+    enable_global_align=True,
+    alpha_global=1.0,
+
+    # Source statistics
+    clean_dataset=clean_dataset,  # or source_statistics_path
+
     device="cuda"
 )
 
-# Create engine
+# Create engine (auto-detects framework)
 engine = WHWEngine(model, config)
 
 # Use in inference
 for batch in dataloader:
     outputs = engine(batch)
+```
+
+**PEFT Pattern Examples:**
+```python
+# Adapt all backbone Conv2d layers
+config = WHWConfig(target_modules=[".*backbone.*conv.*"])
+
+# Adapt specific ResNet stages
+config = WHWConfig(target_modules=[".*res[34].*conv[12]"])
+
+# Adapt all Linear layers in encoder
+config = WHWConfig(target_modules=[".*encoder.*\\.linear"])
+
+# Multiple patterns
+config = WHWConfig(target_modules=[
+    ".*backbone.*",      # All backbone layers
+    ".*encoder.*linear", # Encoder linear layers
+    ".*neck.*conv"       # Neck conv layers (YOLO)
+])
 ```
 
 ## Framework-Specific Examples
@@ -297,10 +327,9 @@ for batch in dataloader:
 | DUAEngine | ✅ | ✅ | ✅ |
 | NORMEngine | ✅ | ✅ | ✅ |
 | MeanTeacherEngine | ✅ | ✅ | ✅ |
-| WHWEngine | ✅ | ⚠️ (partial) | ⚠️ (partial) |
+| WHWEngine (PEFT) | ✅ | ✅ | ✅ |
 
-✅ = Full support
-⚠️ = Basic support (no parallel adapters)
+✅ = Full support with PEFT-style adapters
 
 ## Tips
 
