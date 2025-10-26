@@ -1,4 +1,11 @@
 from .base import AdaptationConfig, AdaptationEngine
+from .framework_adapters import (
+    FrameworkAdapter,
+    Detectron2Adapter,
+    TransformersAdapter,
+    UltralyticsAdapter,
+    create_adapter
+)
 
 from .auxtasks import *
 from .batchnorms import *
