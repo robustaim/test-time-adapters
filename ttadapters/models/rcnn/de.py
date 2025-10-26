@@ -35,6 +35,9 @@ from ...datasets import BaseDataset, DataPreparation
 from ...utils.validator import DetectionEvaluator
 
 
+DETECTRON_URL_PREFIX = "https://dl.fbaipublicfiles.com/detectron2/"
+
+
 class DetectronTrainerArgs:
     def __init__(
         self,
@@ -340,7 +343,9 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
 
     class Weights:
         IMAGENET_OFFICIAL = WeightsInfo("detectron2://ImageNetPretrained/MSRA/R-50.pkl")
+        COCO_OFFICIAL = WeightsInfo(model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml").replace(DETECTRON_URL_PREFIX, "detectron2://"))
         SHIFT_CLEAR_NATUREYOO = WeightsInfo("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_Resnet_50_SHIFT.pth", weight_key="model")
+        CITYSCAPES = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/Faster_R-CNN_Resnet_50_CityScapes.pth", weight_key="model")
 
     def __init__(self, dataset: BaseDataset):
         num_classes = len(dataset.classes)
@@ -394,13 +399,14 @@ class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
     )
 
     class Weights:
-        IMAGENET_XIAOHU2015 = WeightsInfo("https://github.com/xiaohu2015/SwinT_detectron2/releases/download/v1.1/faster_rcnn_swint_T.pth", weight_key="model", exclude_keys = [
+        COCO_XIAOHU2015 = WeightsInfo("https://github.com/xiaohu2015/SwinT_detectron2/releases/download/v1.1/faster_rcnn_swint_T.pth", weight_key="model", exclude_keys = [
             "roi_heads.box_predictor.cls_score.weight",
             "roi_heads.box_predictor.cls_score.bias",
             "roi_heads.box_predictor.bbox_pred.weight",
             "roi_heads.box_predictor.bbox_pred.bias"
         ])
         SHIFT_CLEAR_NATUREYOO = WeightsInfo("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_SwinT_Tiny_SHIFT.pth", weight_key="model")
+        CITYSCAPES = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/Faster_R-CNN_SwinT_Tiny_CityScapes.pth", weight_key="model")
 
     def __init__(self, dataset: BaseDataset):
         num_classes = len(dataset.classes)
