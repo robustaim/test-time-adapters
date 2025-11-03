@@ -131,7 +131,7 @@ class YOLOTrainer(DetectionTrainer):
         self.args.resume = True
         self.check_resume([])
         if self.resume:  # if check_resume changed self.resume to True
-            self.ckpt = torch.load(self.args.resume)
+            self.ckpt = torch.load(self.args.resume, weights_only=False)
 
     def evaluate(self):
         metrics = self.validate()
