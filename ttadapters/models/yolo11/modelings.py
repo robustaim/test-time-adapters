@@ -233,7 +233,7 @@ class YOLODataPreparation(DataPreparation):
             for idx in range(len(self.dataset)):
                 yolo_data = self.convert_to_yolo_label_format(idx, *self.dataset[idx])
                 self._labels.append({
-                    'bboxes': yolo_data['bboxes'].bboxes,  # Instances -> numpy array
+                    'bboxes': yolo_data['instances'].bboxes,  # Instances -> numpy array
                     'cls': yolo_data['cls']
                 })
         return self._labels
