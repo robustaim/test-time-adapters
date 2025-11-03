@@ -20,7 +20,7 @@ try:
     from ultralytics.engine import trainer as _trainer
 
 
-    settings['runs_dir'] = Path(".") / "results" / "runs"
+    settings['runs_dir'] = str(Path(".") / "results" / "runs")
     cache_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
     cache_dir.mkdir(exist_ok=True)
 
