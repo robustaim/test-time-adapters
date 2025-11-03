@@ -28,7 +28,7 @@ from ipywidgets import Output
 import pandas as pd
 import numpy as np
 
-from .hook import TqdmProgressHook
+from .hooks import TqdmProgressHook
 from .transforms import PermuteChannels, ConvertRGBtoBGR
 from ..base import BaseModel, ModelProvider, WeightsInfo
 from ...datasets import BaseDataset, DataPreparation

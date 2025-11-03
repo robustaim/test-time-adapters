@@ -1,1 +1,1 @@
-from .de import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection
+from .modelings import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection

@@ -1,1 +1,1 @@
-from .hf import RTDetrForObjectDetection
+from .modelings import RTDetrForObjectDetection
