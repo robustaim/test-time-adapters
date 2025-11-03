@@ -250,10 +250,6 @@ class YOLODataPreparation(DataPreparation):
         bbox_classes = target[self.dataset_key['classes']]
         original_height, original_width = target[self.dataset_key['original_size']]
 
-        # Convert to numpy for YOLO transforms (YOLO uses OpenCV/numpy internally)
-        if isinstance(image, torch.Tensor):
-            image = image.permute(1, 2, 0).numpy()  # CHW -> HWC
-
         # Resize Image
         if original_width < original_height:
             resized_height = self.img_size
@@ -264,6 +260,10 @@ class YOLODataPreparation(DataPreparation):
             resize_ratio = resized_width / original_width
             resized_height = int(original_height * resize_ratio)
         image = Resize((resized_height, resized_width))(image)
+
+        # Convert to numpy for YOLO transforms (YOLO uses OpenCV/numpy internally)
+        if isinstance(image, torch.Tensor):
+            image = image.permute(1, 2, 0).numpy()  # CHW -> HWC
 
         # Convert bbox to numpy and ensure XYXY format
         if isinstance(bbox, BoundingBoxes):
