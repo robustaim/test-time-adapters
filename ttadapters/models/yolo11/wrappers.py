@@ -2,12 +2,11 @@ import os
 import warnings
 from pathlib import Path
 
-cache_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
-cache_dir.mkdir(exist_ok=True)
-os.environ['YOLO_CONFIG_DIR'] = str(cache_dir)
 
 try:
+    from ultralytics import settings
     from ultralytics.cfg import get_cfg
+
     from ultralytics.utils import nms, ops
     from ultralytics.utils.instance import Instances
 
@@ -16,6 +15,26 @@ try:
 
     from ultralytics.nn.tasks import DetectionModel
     from ultralytics.models.yolo.detect import DetectionTrainer
+
+    from ultralytics.utils.checks import check_amp
+    from ultralytics.engine import trainer as _trainer
+
+
+    settings['runs_dir'] = Path(".") / "results" / "runs"
+    cache_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
+    cache_dir.mkdir(exist_ok=True)
+
+
+    def new_check_amp(*args, **kwargs):
+        original_dir = Path.cwd()
+        try:
+            os.chdir(cache_dir)
+            check_amp(*args, **kwargs)
+        finally:
+            os.chdir(original_dir)
+
+
+    _trainer.check_amp = new_check_amp
 except ImportError:
     class DummyDetectionModel:
         """Dummy model that provides helpful installation instructions."""

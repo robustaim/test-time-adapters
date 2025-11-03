@@ -106,6 +106,8 @@ class YOLOTrainer(DetectionTrainer):
         # Initialize parent DetectionTrainer
         super().__init__(overrides=overrides)
         self.model = model
+        if not self.data:
+            self.data = self.args.data
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         return self.train_dataset if mode == 'train' else self.eval_dataset
@@ -124,14 +126,22 @@ class YOLOTrainer(DetectionTrainer):
             shuffle=(mode == 'train')
         )
 
-    def _setup_train(self):
-        super()._setup_train()
+    def setup_model(self):
+        if self.resume:
+            ckpt = torch.load(self.args.resume, weights_only=False, map_location="cpu")
+            self.model.load(ckpt['model'] if ckpt['model'] else ckpt['ema'])
+            return ckpt
+        else:
+            return None
 
     def resume_from_checkpoint(self):
         self.args.resume = True
-        self.check_resume([])
+        try:
+            self.check_resume(self.args.__dict__)
+        except FileNotFoundError as e:
+            logger.warning(str(e))
         if self.resume:  # if check_resume changed self.resume to True
-            self.ckpt = torch.load(self.args.resume, weights_only=False)
+            print(f"Resuming configuration is now set to checkpoint {self.args.resume}")
 
     def evaluate(self):
         metrics = self.validate()
