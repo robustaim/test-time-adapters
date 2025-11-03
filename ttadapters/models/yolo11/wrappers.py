@@ -29,7 +29,7 @@ try:
         original_dir = Path.cwd()
         try:
             os.chdir(cache_dir)
-            check_amp(*args, **kwargs)
+            return check_amp(*args, **kwargs)
         finally:
             os.chdir(original_dir)
 
