@@ -261,7 +261,7 @@ class YOLODataPreparation(DataPreparation):
 
         # Convert to numpy for YOLO transforms (YOLO uses OpenCV/numpy internally)
         if isinstance(image, torch.Tensor):
-            image = image.permute(1, 2, 0).numpy()  # CHW -> HWC
+            image = image.permute(1, 2, 0).mul(255).byte().numpy()  # CHW -> HWC
 
         # Convert bbox to numpy and ensure XYXY format
         if isinstance(bbox, BoundingBoxes):
