@@ -10,6 +10,8 @@ try:
     from ultralytics.cfg import get_cfg
     from ultralytics.utils import nms, ops
     from ultralytics.utils.instance import Instances
+
+    from ultralytics.data import build_dataloader
     from ultralytics.data.augment import Compose, v8_transforms, LetterBox, Format
 
     from ultralytics.nn.tasks import DetectionModel
@@ -18,17 +20,16 @@ except ImportError:
     class DummyDetectionModel:
         """Dummy model that provides helpful installation instructions."""
 
-        def __init__(self, model_name: str = "yolo11n"):
-            self.model_name = model_name
-            self._show_install_message()
-
-        def _show_install_message(self):
+        def __init__(self, cfg="yolo11n.yaml", *args, **kwargs):
+            self.model_name = cfg.replace(".yaml", "")
             msg = (
                 f"\n{'='*70}\n"
                 f"YOLO model '{self.model_name}' requires Ultralytics library.\n"
                 f"{'='*70}\n\n"
                 f"To use YOLO models, install Ultralytics:\n"
-                f"    pip install ultralytics\n\n"
+                f"    pip install ultralytics"
+                f"or"
+                f"    uv pip install ultralytics\n\n"
                 f"Note: Ultralytics is licensed under AGPL-3.0.\n"
                 f"By installing it, you agree to comply with AGPL-3.0 terms.\n"
                 f"See: https://github.com/ultralytics/ultralytics\n"
@@ -49,15 +50,15 @@ except ImportError:
             )
 
         def __repr__(self):
-            return f"DummyYOLO(model_name='{self.model_name}', installed=False)"
+            return f"DummyDetectionModel(model_name='{self.model_name}', installed=False)"
 
 
     class DummyDetectionTrainer:
         pass
 
 
-    get_cfg = None
-    nms, ops, Instances, Compose, v8_transforms, LetterBox, Format = [None] * 7
+    nms, ops = None, None
+    get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format = [lambda: None] * 7
     
     DetectionModel = DummyDetectionModel
     DetectionTrainer = DummyDetectionModel

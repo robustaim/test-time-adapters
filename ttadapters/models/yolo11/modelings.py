@@ -4,7 +4,6 @@ from typing import Optional
 from copy import copy
 
 import torch
-from torch.utils.data import DataLoader
 from torchvision.transforms.v2 import Resize
 from torchvision.tv_tensors import BoundingBoxFormat, BoundingBoxes
 from torchvision.transforms.v2.functional import convert_bounding_box_format
@@ -14,8 +13,8 @@ import numpy as np
 from ..base import BaseModel, ModelProvider, WeightsInfo
 from ...datasets import BaseDataset, DataPreparation
 
-from .wrapper import (
-    get_cfg, nms, ops, Instances, Compose, v8_transforms, LetterBox, Format,
+from .wrappers import (
+    get_cfg, nms, ops, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format,
     DetectionTrainer, DetectionModel
 )
 
@@ -90,6 +89,7 @@ class YOLOTrainer(DetectionTrainer):
         overrides = {k: v for k, v in vars(self.custom_args).items()}
         overrides['model'] = ""  # placeholder for model path
         overrides['resume'] = False
+        overrides['data'] = self.train_dataset.data if self.train_dataset is not None else self.eval_dataset.data
         if eval_dataset is not None:
             overrides['conf'] = eval_dataset.confidence_threshold
             overrides['iou'] = eval_dataset.iou_threshold
@@ -106,7 +106,6 @@ class YOLOTrainer(DetectionTrainer):
         # Initialize parent DetectionTrainer
         super().__init__(overrides=overrides)
         self.model = model
-        self.data = self.train_dataset.data if self.train_dataset is not None else self.eval_dataset.data
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         return self.train_dataset if mode == 'train' else self.eval_dataset
@@ -118,12 +117,11 @@ class YOLOTrainer(DetectionTrainer):
         dataset = self.train_dataset if mode == 'train' else self.eval_dataset
         _batch_size = self.train_batch if mode == 'train' else self.eval_batch
 
-        return DataLoader(
+        return build_dataloader(
             dataset,
-            batch_size=batch_size if _batch_size == -1 else _batch_size,
-            shuffle=(mode == 'train'),
-            collate_fn=dataset.collate_fn,
-            num_workers=self.custom_args.workers
+            batch=batch_size if _batch_size == -1 else _batch_size,
+            workers=self.custom_args.workers,
+            shuffle=(mode == 'train')
         )
 
     def _setup_train(self):
@@ -132,6 +130,8 @@ class YOLOTrainer(DetectionTrainer):
     def resume_from_checkpoint(self):
         self.args.resume = True
         self.check_resume([])
+        if self.resume:  # if check_resume changed self.resume to True
+            self.ckpt = torch.load(self.args.resume)
 
     def evaluate(self):
         metrics = self.validate()
