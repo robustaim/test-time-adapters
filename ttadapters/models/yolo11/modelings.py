@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from logging import getLogger
 from typing import Optional
 from copy import copy
 
@@ -14,12 +13,11 @@ from ..base import BaseModel, ModelProvider, WeightsInfo
 from ...datasets import BaseDataset, DataPreparation
 
 from .wrappers import (
-    get_cfg, nms, ops, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format,
+    get_cfg, nms, ops, LOGGER,
+    build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format,
     DetectionTrainer, DetectionModel
 )
 
-
-logger = getLogger(__name__)
 
 Default = None
 
@@ -139,7 +137,7 @@ class YOLOTrainer(DetectionTrainer):
         try:
             self.check_resume(self.args.__dict__)
         except FileNotFoundError as e:
-            logger.warning(str(e))
+            LOGGER.warning(str(e))
         if self.resume:  # if check_resume changed self.resume to True
             print(f"Resuming configuration is now set to checkpoint {self.args.resume}")
 
@@ -227,7 +225,7 @@ class YOLODataPreparation(DataPreparation):
 
     @property
     def labels(self):
-        logger.warning("YOLO Trainer tries to access labels property probably for plotting. If label loading takes too long, you can disable it by setting plots=False in the training arguments.")
+        LOGGER.warning("YOLO Trainer tries to access labels property probably for plotting. If label loading takes too long, you can disable it by setting plots=False in the training arguments.")
         if not hasattr(self, "_labels") or self._labels is None:
             self._labels = []
             for idx in range(len(self.dataset)):
@@ -271,7 +269,7 @@ class YOLODataPreparation(DataPreparation):
                 bbox = convert_bounding_box_format(bbox, new_format=BoundingBoxFormat.XYXY)
             bbox = bbox.data.numpy() if isinstance(bbox.data, torch.Tensor) else bbox.data
         elif isinstance(bbox, torch.Tensor):
-            logger.warning_once("Assume the bbox is in Pascal VOC format (x1, y1, x2, y2) since it's not a BoundingBoxes instance. Please ensure this is correct.")
+            LOGGER.warning_once("Assume the bbox is in Pascal VOC format (x1, y1, x2, y2) since it's not a BoundingBoxes instance. Please ensure this is correct.")
             bbox = bbox.numpy()
 
         # Convert bbox_classes to numpy

@@ -7,7 +7,7 @@ try:
     from ultralytics import settings
     from ultralytics.cfg import get_cfg
 
-    from ultralytics.utils import nms, ops
+    from ultralytics.utils import nms, ops, LOGGER
     from ultralytics.utils.instance import Instances
 
     from ultralytics.data import build_dataloader
@@ -76,7 +76,7 @@ except ImportError:
         pass
 
 
-    nms, ops = None, None
+    nms, ops, LOGGER = None, None, None
     get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format = [lambda: None] * 7
     
     DetectionModel = DummyDetectionModel
