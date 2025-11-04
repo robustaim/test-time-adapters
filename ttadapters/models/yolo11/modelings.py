@@ -105,6 +105,13 @@ class YOLOTrainer(DetectionTrainer):
         self.model = model
         if not self.data:
             self.data = self.args.data
+        if eval_dataset is not None:
+            self.test_loader = self.get_dataloader(mode="val")
+            self.validator = self.get_validator()
+
+    @property
+    def names(self):
+        return self.classes
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         return self.train_dataset if mode == 'train' else self.eval_dataset
