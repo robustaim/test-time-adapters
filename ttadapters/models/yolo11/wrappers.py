@@ -56,6 +56,10 @@ except ImportError:
             )
             warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
+        def load_from(self, *args, **kwargs):
+            """Silently skip loading when Ultralytics is not installed."""
+            return {"missing_keys": [], "unexpected_keys": []}
+
         def __call__(self, *args, **kwargs):
             raise RuntimeError(
                 f"Cannot run YOLO model '{self.model_name}'. "
