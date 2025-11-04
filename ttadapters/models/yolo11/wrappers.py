@@ -24,7 +24,7 @@ try:
 
     settings['runs_dir'] = str(Path(".") / "results" / "runs")
     cache_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
-    cache_dir.mkdir(exist_ok=True)
+    cache_dir.mkdir(exist_ok=True, parents=True)
 
 
     def new_check_amp(*args, **kwargs):
