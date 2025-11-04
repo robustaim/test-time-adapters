@@ -167,7 +167,8 @@ class YOLODataPreparation(DataPreparation):
     ):
         self.dataset_name = dataset.dataset_name
         self.classes = dataset.classes
-        self.data = dict(nc=len(self.classes), names=self.classes, channels=3, train="")  # yolo trainer compatibility
+        self.names = {i: name for i, name in enumerate(dataset.classes)}
+        self.data = dict(nc=len(self.classes), names=self.names, channels=3, train="")  # yolo trainer compatibility
         self.buffer = []  # yolo trainer compatibility
 
         self.dataset = dataset
