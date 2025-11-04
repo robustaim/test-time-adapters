@@ -3,7 +3,6 @@ from typing import Optional
 from copy import copy
 
 import torch
-from torchvision.transforms.v2 import Resize
 from torchvision.tv_tensors import BoundingBoxFormat, BoundingBoxes
 from torchvision.transforms.v2.functional import convert_bounding_box_format
 
@@ -248,17 +247,6 @@ class YOLODataPreparation(DataPreparation):
         bbox_classes = target[self.dataset_key['classes']]
         original_height, original_width = target[self.dataset_key['original_size']]
 
-        # Resize Image
-        if original_width < original_height:
-            resized_height = self.img_size
-            resize_ratio = resized_height / original_height
-            resized_width = int(original_width * resize_ratio)
-        else:
-            resized_width = self.img_size
-            resize_ratio = resized_width / original_width
-            resized_height = int(original_height * resize_ratio)
-        image, bbox = Resize((resized_height, resized_width))(image, bbox)
-
         # Convert to numpy for YOLO transforms (YOLO uses OpenCV/numpy internally)
         if isinstance(image, torch.Tensor):
             # CHW (RGB) -> CHW (BGR)
@@ -289,8 +277,8 @@ class YOLODataPreparation(DataPreparation):
             'batch_idx': np.array([idx if idx is not None else 0]),
             'im_file': str(idx),
             'ori_shape': (original_height, original_width),
-            'resized_shape': (resized_height, resized_width),
-            'ratio_pad': (resize_ratio, resize_ratio)
+            'resized_shape': (original_height, original_width),
+            'ratio_pad': (1.0, (0.0, 0.0))
         }
 
     def transforms(self, *args, idx=None):
