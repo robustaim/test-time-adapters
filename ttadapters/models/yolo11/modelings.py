@@ -101,13 +101,12 @@ class YOLOTrainer(DetectionTrainer):
             overrides['val'] = True
 
         # Initialize parent DetectionTrainer
+        self.epoch = 0
+        self.loss_items = None
         super().__init__(overrides=overrides)
         self.model = model
         if not self.data:
             self.data = self.args.data
-        if eval_dataset is not None:
-            self.test_loader = self.get_dataloader(mode="val")
-            self.validator = self.get_validator()
 
     @property
     def names(self):
@@ -146,6 +145,12 @@ class YOLOTrainer(DetectionTrainer):
             LOGGER.warning(str(e))
         if self.resume:  # if check_resume changed self.resume to True
             print(f"Resuming configuration is now set to checkpoint {self.args.resume}")
+
+    def validate(self):
+        if not self.loss_items:
+            self._setup_train()
+            self.loss_items = torch.zeros(len(self.loss_names), device=self.device)
+        return super().validate()
 
 
 class YOLODataPreparation(DataPreparation):
