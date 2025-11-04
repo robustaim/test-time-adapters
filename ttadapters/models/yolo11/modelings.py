@@ -220,13 +220,13 @@ class YOLODataPreparation(DataPreparation):
     def labels(self):
         LOGGER.warning("YOLO Trainer tries to access labels property probably for plotting. If label loading takes too long, you can disable it by setting plots=False in the training arguments.")
         if not hasattr(self, "_labels") or self._labels is None:
-            self._labels = []
+            self._labels = {}
             for idx in range(len(self.dataset)):
                 yolo_data = self.convert_to_yolo_label_format(idx, *self.dataset[idx])
-                self._labels.append({
+                self._labels[idx] = {
                     'bboxes': yolo_data['instances'].bboxes,  # Instances -> numpy array
                     'cls': yolo_data['cls']
-                })
+                }
         return self._labels
 
     @property
