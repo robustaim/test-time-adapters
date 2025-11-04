@@ -1,6 +1,9 @@
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+from torchvision import ops
+from scipy.optimize import linear_sum_assignment
 
 
 class StateTransitionGate(nn.Module):
@@ -53,9 +56,9 @@ class DetectionCovarianceGate(nn.Module):
             self.register_buffer('std_weight_size', torch.tensor(std_weight_size))
 
     def forward(
-            self,
-            bbox: torch.Tensor,  # [batch, 4] or [4] - [cx, cy, w, h]
-            confidence: Optional[torch.Tensor] = None
+        self,
+        bbox: torch.Tensor,  # [batch, 4] or [4] - [cx, cy, w, h]
+        confidence: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Args:
@@ -260,38 +263,26 @@ class KalmanFilteredLoss(nn.Module):
     def __init__(self, learnable_uncertainty: bool = True):
         super().__init__()
         self.kalman_filter = AdaptiveKalmanFilterCXCYWH(learnable_uncertainty=learnable_uncertainty)
+        self.g_iou_threshold = 0.2
 
     def forward(
         self,
-        pred_boxes: torch.Tensor,   # [batch, num_queries, 4] normalized [cx, cy, w, h]
-        pred_logits: torch.Tensor,  # [batch, num_queries, num_classes]
-        gt_boxes: torch.Tensor,
-        gt_labels: torch.Tensor,
-        track_states: Optional[dict] = None,
-        image_sizes: Optional[torch.Tensor] = None  # [batch, 2] for denormalization
+        prev_boxes: torch.Tensor,   # [batch, num_queries, 4] normalized [cx, cy, w, h]
+        prev_logits: torch.Tensor,  # [batch, num_queries, num_classes]
+        curr_boxes: torch.Tensor,
+        image_sizes: torch.Tensor  # [batch, 2] for denormalization
     ):
         """
         Args:
-            pred_boxes: [batch, num_queries, 4] normalized [cx, cy, w, h] in [0, 1]
-            pred_logits: [batch, num_queries, num_classes]
-            gt_boxes: ground truth boxes
-            gt_labels: ground truth labels
-            track_states: dict of {query_idx: (mean, covariance)}
+            prev_boxes: [batch, num_queries, 4] normalized [cx, cy, w, h] in [0, 1]
+            prev_logits: [batch, num_queries, num_classes]
+            curr_boxes: ground truth boxes
             image_sizes: [batch, 2] tensor of [height, width] for denormalization
         """
-        batch_size, num_queries = pred_boxes.shape[:2]
-        device = pred_boxes.device
-
-        if track_states is None:
-            track_states = {}
-
-        if image_sizes is None:
-            # Default to 640x640 if not provided
-            image_sizes = torch.tensor([[640, 640]] * batch_size, device=device)
+        batch_size, num_queries = prev_boxes.shape[:2]
 
         # Apply Kalman filter to each prediction
         filtered_boxes = []
-        new_track_states = {}
 
         for b in range(batch_size):
             batch_filtered = []
@@ -299,7 +290,7 @@ class KalmanFilteredLoss(nn.Module):
 
             for q in range(num_queries):
                 # Get prediction (normalized)
-                pred_box_norm = pred_boxes[b, q]  # [4] [cx, cy, w, h] in [0, 1]
+                pred_box_norm = prev_boxes[b, q]  # [4] [cx, cy, w, h] in [0, 1]
 
                 # Denormalize
                 cx = pred_box_norm[0] * w
@@ -309,20 +300,19 @@ class KalmanFilteredLoss(nn.Module):
                 pred_box_abs = torch.stack([cx, cy, box_w, box_h])
 
                 # Get confidence
-                pred_logit = pred_logits[b, q]  # [num_classes]
-                confidence = pred_logit.softmax(-1).max()
+                pred_logit = prev_logits[b, q]  # [num_classes]
+                pred_softmax = pred_logit.softmax(-1)
+                confidence = pred_softmax.max()
 
-                # Get or initialize track state
-                track_key = f"{b}_{q}"
-                if track_key not in track_states:
-                    mean, cov = initialize_state_cxcywh(pred_box_abs)
-                else:
-                    mean, cov = track_states[track_key]
+                # Suppress none existing objects
+                if len(pred_logit) - 1 == pred_softmax.argmax():
+                    pass
 
                 # Prepare measurement
                 measurement = pred_box_abs.unsqueeze(-1)  # [4, 1]
 
                 # Apply Kalman filter
+                mean, cov = initialize_state_cxcywh(pred_box_abs)
                 mean_new, cov_new = self.kalman_filter(
                     mean, cov, measurement, confidence
                 )
@@ -338,24 +328,29 @@ class KalmanFilteredLoss(nn.Module):
                 bbox_filtered_norm = torch.stack([cx_norm, cy_norm, w_norm, h_norm])
 
                 batch_filtered.append(bbox_filtered_norm)
-                new_track_states[track_key] = (mean_new.detach(), cov_new.detach())
 
             filtered_boxes.append(torch.stack(batch_filtered))
 
         filtered_boxes = torch.stack(filtered_boxes)  # [batch, num_queries, 4]
+        return self.compute_loss(curr_boxes, filtered_boxes)
 
-        # Now compute loss with filtered boxes
-        # You need to implement Hungarian matching + loss computation here
-        # This is a placeholder
-        loss = self.compute_detr_loss(filtered_boxes, pred_logits, gt_boxes, gt_labels)
+    def compute_loss(self, pred_boxes, target_boxes):
+        matched_preds, matched_targets = [], []
 
-        return loss, new_track_states
+        for pred, target in zip(pred_boxes, target_boxes):  # [num_queries, 4], [num_queries, 4]
+            if len(pred) == 0 or len(target) == 0:
+                continue
 
-    def compute_detr_loss(self, pred_boxes, pred_logits, gt_boxes, gt_labels):
-        """
-        Placeholder for DETR-style loss computation
-        You should use RT-DETR's actual loss function here
-        """
-        # Hungarian matching + L1 + GIoU loss
-        # This is where you'd call the actual RT-DETR loss
-        pass
+            with torch.no_grad():
+                cost_matrix = ops.generalized_box_iou_loss(pred, target, reduction="mean")
+                cost_matrix = cost_matrix < self.g_iou_threshold
+                row_indices, col_indices = linear_sum_assignment(cost_matrix.cpu().numpy())
+
+            # Matched costs
+            matched_preds.append(pred[col_indices])
+            matched_targets.append(target[row_indices])
+
+        matched_preds, matched_targets = torch.stack(matched_preds), torch.stack(matched_targets)
+        matched_costs = ops.complete_box_iou_loss(matched_preds, matched_targets, reduction="mean")
+
+        return matched_costs
