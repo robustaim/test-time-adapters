@@ -81,6 +81,9 @@ class DetectionEvaluator:
                             for k, v in label.items()
                         } for label in batch['labels']]
                         total_images += len(batch['labels'])
+                    elif model.model_provider == ModelProvider.Ultralytics:
+                        batch['img'] = batch['img'].to(device)
+                        total_images += len(batch['img'])
                     else:
                         total_images += len(batch)
 
@@ -130,10 +133,10 @@ class DetectionEvaluator:
                                         class_id=gt_instances.gt_classes.detach().cpu().numpy()
                                     ))
                             case ModelProvider.Ultralytics:
-                                output = data_preparation.post_process(
-                                    outputs, ori_shape=batch['ori_shape'], ratio_pad=batch['ratio_pad']
+                                outputs = data_preparation.post_process(
+                                    outputs, ori_shape=batch['ori_shape'], ratio_pad=batch['ratio_pad'], names=model.names
                                 )
-                                predictions_list.extend([Detections.from_ultralytics(result) for result in output])
+                                predictions_list.extend([Detections.from_ultralytics(output) for output in outputs])
                                 targets_list.extend([Detections(
                                     xyxy=(box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])).detach().cpu().numpy(),
                                     class_id=batch['cls'][batch['batch_idx'] == i].squeeze(-1).detach().cpu().long().numpy()

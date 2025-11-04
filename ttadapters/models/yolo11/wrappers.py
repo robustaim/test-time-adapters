@@ -16,6 +16,8 @@ try:
     from ultralytics.nn.tasks import DetectionModel
     from ultralytics.models.yolo.detect import DetectionTrainer
 
+    from ultralytics.engine.results import Results
+
     from ultralytics.utils.checks import check_amp
     from ultralytics.engine import trainer as _trainer
 
@@ -87,7 +89,7 @@ except ImportError:
 
 
     nms, ops, LOGGER = None, None, None
-    get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format = [lambda: None] * 7
+    get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results = [lambda: None] * 7
     
     DetectionModel = DummyDetectionModel
     DetectionTrainer = DummyDetectionModel

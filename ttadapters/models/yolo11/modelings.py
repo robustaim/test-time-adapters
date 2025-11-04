@@ -13,7 +13,7 @@ from ...datasets import BaseDataset, DataPreparation
 
 from .wrappers import (
     get_cfg, nms, ops, LOGGER,
-    build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format,
+    build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results,
     DetectionTrainer, DetectionModel
 )
 
@@ -300,6 +300,8 @@ class YOLODataPreparation(DataPreparation):
         if isinstance(batch[0], tuple):
             batch = [b[1] for b in batch]
 
+        batch = self.pre_process(batch)
+
         new_batch = {}
         keys = batch[0].keys()
 
@@ -318,20 +320,27 @@ class YOLODataPreparation(DataPreparation):
         new_batch["batch_idx"] = torch.cat(batch_idx, 0)
         return new_batch
 
-    def pre_process(self, batch):
+    def pre_process(self, batch: list[dict]) -> list[dict]:
+        for b in batch:
+            if isinstance(b['img'], torch.ByteTensor):
+                b['img'] = b['img'].float().div(255.0)
         return batch
 
-    def post_process(self, outputs: dict, ori_shape: tuple[int, int], ratio_pad: tuple[float, float], xywh: bool = False):
+    def post_process(
+        self, outputs: torch.Tensor, ori_shape: tuple[int, int],
+        ratio_pad: tuple[float, float], names: dict[int, str], xywh: bool = False
+    ) -> list[Results]:
         """ Apply nms and rescale bounding boxes to original image size
 
         Args:
-            outputs (dict): YOLO model outputs with bbox format (N, 4).
+            outputs (torch.Tensor): YOLO model outputs with bbox format (N, 4).
             ori_shape (tuple): Shape of the target image (height, width).
             ratio_pad (tuple, optional): Tuple of (ratio, pad) for scaling. If None, calculated from image shapes.
+            names (dict): Dictionary of class names.
             xywh (bool): Whether box format is xywh (True) or xyxy (False).
 
         Returns:
-            (torch.Tensor): Rescaled bounding boxes in the same format as input.
+            (list[Results]): Rescaled bounding boxes in the same format as input.
         """
         filtered = nms.non_max_suppression(
             outputs,
@@ -340,16 +349,19 @@ class YOLODataPreparation(DataPreparation):
             multi_label=False,
             max_det=self.max_detection
         )
-        return {
-            **filtered,
-            "bboxes": ops.scale_boxes(
-                img1_shape=(self.img_size, self.img_size),
-                boxes=filtered["bboxes"].clone(),
-                img0_shape=ori_shape,
-                ratio_pad=ratio_pad,
-                xywh=xywh
-            ),
-        }
+        orig_img = np.ndarray(0)
+        results = [Results(orig_img=orig_img, path="", names=names, boxes=(
+            dets if dets.shape[0] == 0 else torch.cat((
+                ops.scale_boxes(
+                    img1_shape=(self.img_size, self.img_size), boxes=dets[:, :4].clone(),
+                    img0_shape=ori_shape[i], ratio_pad=ratio_pad[i], xywh=xywh
+                ), dets[:, 4:]
+            ), dim=1)
+        )) for i, dets in enumerate(filtered)]
+        for r in results:
+            r.orig_img = None
+            r.orig_shape = ori_shape
+        return results
 
 
 class YOLO11ForObjectDetection(DetectionModel, BaseModel):
