@@ -26,6 +26,7 @@ class AdaptationEngine(BaseModel):
         pass
 
     def __init__(self, base_model: BaseModel, config: AdaptationConfig):
+        super(BaseModel, self).__init__()
         self.config = config
         self.dataset_name = config.dataset_name
 
@@ -53,8 +54,14 @@ class AdaptationEngine(BaseModel):
 
     def to(self, *args, **kwargs):
         result = super().to(*args, **kwargs)
-        self._device = torch.device(*args, **kwargs)
-        self._dtype = torch.dtype(*args, **kwargs)
+        try:
+            self._device = torch.device(*args, **kwargs)
+        except TypeError:
+            pass
+        try:
+            self._dtype = torch.dtype(*args, **kwargs)
+        except TypeError:
+            pass
         return result
 
     @property
