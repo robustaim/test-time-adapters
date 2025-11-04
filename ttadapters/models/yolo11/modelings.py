@@ -108,6 +108,10 @@ class YOLOTrainer(DetectionTrainer):
         if not self.data:
             self.data = self.args.data
 
+    @property
+    def names(self):
+        return self.args.data['names']
+
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         return self.train_dataset if mode == 'train' else self.eval_dataset
 
@@ -276,14 +280,14 @@ class YOLODataPreparation(DataPreparation):
             'ratio_pad': (1.0, (0.0, 0.0))
         }
 
-    def transforms(self, *args, idx=None):
-        image, target = args[0] if len(args) == 1 else args
+    def transforms(self, *data, idx=None):
+        image, target = data[0] if len(data) == 1 else data
         yolo_data = self.convert_to_yolo_label_format(idx, image, target)
 
         # Apply YOLO augmentation
         transformed = self.augmentation(yolo_data)
 
-        if len(args) == 1:
+        if len(data) == 1:
             return transformed
         else:
             return transformed['img'], transformed
@@ -291,7 +295,10 @@ class YOLODataPreparation(DataPreparation):
     def __getitem__(self, idx):
         return self.transforms(self.dataset[idx], idx=idx)
 
-    def collate_fn(self, batch: list[dict]) -> dict:
+    def collate_fn(self, batch: list[dict] | list[tuple[torch.Tensor, dict]]) -> dict:
+        if isinstance(batch[0], tuple):
+            batch = [b[1] for b in batch]
+
         new_batch = {}
         keys = batch[0].keys()
 
