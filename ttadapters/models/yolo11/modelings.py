@@ -143,7 +143,7 @@ class YOLOTrainer(DetectionTrainer):
             print(f"Resuming configuration is now set to checkpoint {self.args.resume}")
 
     def validate(self):
-        if not self.loss_items:
+        if self.loss_items is None:
             self._setup_train()
             self.loss_items = torch.zeros(len(self.loss_names), device=self.device)
         if not hasattr(self, "loss") or self.loss is None:
