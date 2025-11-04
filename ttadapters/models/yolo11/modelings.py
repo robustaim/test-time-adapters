@@ -108,10 +108,6 @@ class YOLOTrainer(DetectionTrainer):
         if not self.data:
             self.data = self.args.data
 
-    @property
-    def names(self):
-        return self.classes
-
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         return self.train_dataset if mode == 'train' else self.eval_dataset
 
@@ -150,6 +146,8 @@ class YOLOTrainer(DetectionTrainer):
         if not self.loss_items:
             self._setup_train()
             self.loss_items = torch.zeros(len(self.loss_names), device=self.device)
+        if not hasattr(self, "loss"):
+            self.loss = torch.tensor(0, requires_grad=True, device=self.device)
         return super().validate()
 
 
@@ -365,3 +363,4 @@ class YOLO11ForObjectDetection(DetectionModel, BaseModel):
 
         self.dataset_name = dataset.dataset_name
         self.num_classes = nc
+        self.names = {i: name for i, name in enumerate(dataset.classes)}
