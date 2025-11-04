@@ -130,13 +130,14 @@ class DetectionEvaluator:
                                         class_id=gt_instances.gt_classes.detach().cpu().numpy()
                                     ))
                             case ModelProvider.Ultralytics:
-                                output = data_preparation.post_process(output)
-                                pred_detection = Detections.from_ultralytics(output)
-                                target_detection = Detections(
-                                    xyxy=input_data['bboxes'].detach().cpu().numpy(),
-                                    class_id=input_data['cls'].detach().cpu().numpy()
+                                output = data_preparation.post_process(
+                                    outputs, ori_shape=batch['ori_shape'], ratio_pad=batch['ratio_pad']
                                 )
-                                raise NotImplementedError("Ultralytics post_process is not implemented yet.")
+                                predictions_list.extend([Detections.from_ultralytics(result) for result in output])
+                                targets_list.extend([Detections(
+                                    xyxy=(box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])).detach().cpu().numpy(),
+                                    class_id=batch['cls'][batch['batch_idx'] == i].squeeze(-1).detach().cpu().long().numpy()
+                                ) for i, (h, w) in enumerate(batch['ori_shape'])])
                             case ModelProvider.HuggingFace:
                                 sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
                                 outputs = data_preparation.post_process(outputs, target_sizes=sizes)
