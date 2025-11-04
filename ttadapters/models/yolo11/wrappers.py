@@ -60,6 +60,12 @@ except ImportError:
             """Silently skip loading when Ultralytics is not installed."""
             return {"missing_keys": [], "unexpected_keys": []}
 
+        def to(self, *args, **kwargs):
+            raise RuntimeError(
+                f"Cannot run YOLO model '{self.model_name}'. "
+                f"Install ultralytics first: pip install ultralytics"
+            )
+
         def __call__(self, *args, **kwargs):
             raise RuntimeError(
                 f"Cannot run YOLO model '{self.model_name}'. "
