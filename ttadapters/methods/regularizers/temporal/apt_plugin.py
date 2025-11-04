@@ -112,6 +112,12 @@ class APTPlugin(AdaptationEngine):
                 for module in self.base_model.modules():
                     if isinstance(module, nn.BatchNorm2d):
                         params.extend(module.parameters())
+                    if "FrozenBatchNorm2d" in module.__class__.__name__:
+                        if hasattr(module, 'weight'):
+                            module.weight = nn.Parameter(module.weight)
+                        if hasattr(module, 'bias'):
+                            module.bias = nn.Parameter(module.bias)
+                        params.extend(module.parameters())
         else:
             # For other models, update all parameters
             params = self.base_model.parameters()
@@ -229,7 +235,7 @@ class APTPlugin(AdaptationEngine):
                 losses = []
 
                 for output in outputs:
-                    boxes, scores, classes = self.extract_detections({'instances': output})
+                    boxes, scores, classes = self.extract_detections(output)
 
                     # Get temporal predictions from tracker
                     if len(boxes) > 0:
@@ -241,13 +247,12 @@ class APTPlugin(AdaptationEngine):
 
                     # Compute temporal consistency loss if we have predictions
                     if len(predicted_boxes) > 0:
-                        # Get high-confidence current detections for loss
-                        current_boxes = output.pred_boxes.tensor
-                        current_classes = output.pred_classes
-                        current_scores = output.scores
+                        current_boxes = output['instances'].pred_boxes.tensor
+                        current_classes = output['instances'].pred_classes
+                        current_scores = output['instances'].scores
 
-                        # Filter current detections
                         conf_mask = current_scores >= self.config.conf_threshold
+
                         if conf_mask.any():
                             loss = self.compute_temporal_loss(
                                 current_boxes[conf_mask],
