@@ -152,6 +152,7 @@ class YOLOTrainer(DetectionTrainer):
             self.loss_items = torch.zeros(len(self.loss_names), device=self.device)
         if not hasattr(self, "loss") or self.loss is None:
             self.loss = torch.tensor(0.0, requires_grad=True, device=self.device)
+        self.validator.args.verbose = True
         return super().validate()
 
 
