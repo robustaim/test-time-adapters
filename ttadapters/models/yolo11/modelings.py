@@ -140,22 +140,6 @@ class YOLOTrainer(DetectionTrainer):
         if self.resume:  # if check_resume changed self.resume to True
             print(f"Resuming configuration is now set to checkpoint {self.args.resume}")
 
-    def evaluate(self):
-        metrics = self.validate()
-        results = {
-            'mAP@0.50:0.95': metrics.box.map,
-            'mAP@0.50': metrics.box.map50,
-            'mAP@0.75': metrics.box.map75,
-        }
-
-        # Add per-class mAP if available
-        if hasattr(metrics.box, 'maps'):
-            for i, class_name in enumerate(self.classes):
-                if i < len(metrics.box.maps):
-                    results[f'{class_name}_mAP@0.50:0.95'] = metrics.box.maps[i]
-
-        return results
-
 
 class YOLODataPreparation(DataPreparation):
     def __init__(
