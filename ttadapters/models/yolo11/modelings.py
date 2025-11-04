@@ -257,7 +257,7 @@ class YOLODataPreparation(DataPreparation):
             resized_width = self.img_size
             resize_ratio = resized_width / original_width
             resized_height = int(original_height * resize_ratio)
-        image = Resize((resized_height, resized_width))(image)
+        image, bbox = Resize((resized_height, resized_width))(image, bbox)
 
         # Convert to numpy for YOLO transforms (YOLO uses OpenCV/numpy internally)
         if isinstance(image, torch.Tensor):
