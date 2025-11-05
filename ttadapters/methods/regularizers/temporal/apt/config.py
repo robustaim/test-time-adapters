@@ -22,6 +22,8 @@ class APTConfig(AdaptationConfig):
     adapt_lr: float = 1e-5
     backbone_lr: float = 1e-6  # Learning rate for backbone (if updated)
     head_lr: float = 1e-6  # Learning rate for head (if updated)
+    momentum: float = 0.9  # Momentum for SGD
+    weight_decay: float = 0.0  # Weight decay for regularization (use with AdamW)
 
     # Temporal consistency settings
     max_age: int = 3  # Maximum frames to keep track without detection
@@ -49,3 +51,7 @@ class APTConfig(AdaptationConfig):
 
     # Loss stabilization
     loss_ema_decay: float = 0.9  # EMA decay for loss scale normalization
+
+    # Domain change detection (based on loss, NOT mAP)
+    enable_domain_change_reset: bool = False  # Reset optimizer on domain change
+    domain_change_loss_threshold: float = 0.5  # Loss spike threshold (50% increase)

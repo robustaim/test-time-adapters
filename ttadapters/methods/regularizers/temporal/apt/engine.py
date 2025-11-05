@@ -59,6 +59,10 @@ class APTEngine(AdaptationEngine):
         self.total_loss = 0.0
         self.loss_scale_ema = 1.0  # For loss normalization
 
+        # Domain change detection (based on loss, not mAP)
+        self.loss_history_ema = None  # EMA of recent losses
+        self.domain_change_detected_count = 0
+
     @property
     def loss_function(self):
         """Return appropriate loss function based on config."""
@@ -94,13 +98,20 @@ class APTEngine(AdaptationEngine):
 
             if self.config.optim == "SGD":
                 optimizer_class = optim.SGD
-                optimizer_kwargs = {"momentum": 0.9}
+                optimizer_kwargs = {
+                    "momentum": self.config.momentum,
+                    "weight_decay": self.config.weight_decay
+                }
             elif self.config.optim == "Adam":
                 optimizer_class = optim.Adam
-                optimizer_kwargs = {}
+                optimizer_kwargs = {
+                    "weight_decay": self.config.weight_decay
+                }
             elif self.config.optim == "AdamW":
                 optimizer_class = optim.AdamW
-                optimizer_kwargs = {}
+                optimizer_kwargs = {
+                    "weight_decay": self.config.weight_decay
+                }
             else:
                 raise ValueError(f"Unknown optimizer: {self.config.optim}")
 
@@ -122,8 +133,6 @@ class APTEngine(AdaptationEngine):
 
     def _get_parameter_groups(self):
         """Get parameter groups with different learning rates."""
-        param_groups = []
-
         # Detectron2 models
         if self.base_model.model_provider == ModelProvider.Detectron2:
             bn_params = []
@@ -165,14 +174,14 @@ class APTEngine(AdaptationEngine):
                 # Backbone
                 if self.config.update_backbone and 'backbone' in name:
                     if not any(isinstance(module, t) for t in [nn.BatchNorm2d]):
-                        backbone_params.extend([p for p in module.parameters()
-                                                if p not in bn_params])
+                        backbone_params.extend([p for p in module.parameters() if p not in bn_params])
 
                 # RoI Heads
                 if self.config.update_head and 'roi_heads' in name:
                     if not any(isinstance(module, t) for t in [nn.BatchNorm2d]):
-                        head_params.extend([p for p in module.parameters()
-                                            if p not in bn_params and p not in box_reg_last_params])
+                        head_params.extend([
+                            p for p in module.parameters() if p not in bn_params and p not in box_reg_last_params
+                        ])
 
             # Remove duplicates while preserving order
             bn_params = list(dict.fromkeys(bn_params))
@@ -200,6 +209,47 @@ class APTEngine(AdaptationEngine):
         for _, param_list, _ in self._get_parameter_groups():
             params.extend(param_list)
         return params
+
+    def detect_domain_change(self, current_loss_value: float) -> bool:
+        """Detect domain change based on loss spike (NOT mAP).
+
+        Args:
+            current_loss_value: Current loss value (scalar)
+
+        Returns:
+            True if domain change detected, False otherwise
+        """
+        if not self.config.enable_domain_change_reset:
+            return False
+
+        # Initialize loss history on first call
+        if self.loss_history_ema is None:
+            self.loss_history_ema = current_loss_value
+            return False
+
+        # Calculate relative loss change
+        if self.loss_history_ema > 1e-6:  # Avoid division by zero
+            loss_change_ratio = abs(current_loss_value - self.loss_history_ema) / self.loss_history_ema
+
+            # Detect spike
+            if loss_change_ratio > self.config.domain_change_loss_threshold:
+                return True
+
+        # Update EMA
+        self.loss_history_ema = 0.9 * self.loss_history_ema + 0.1 * current_loss_value
+        return False
+
+    def reset_optimizer_state(self):
+        """Reset optimizer momentum/state but keep model parameters.
+
+        This is useful when domain changes - we want to forget the momentum
+        from previous domain but keep the adapted parameters.
+        """
+        # Force optimizer recreation
+        self._optimizer = None
+        # Next call to self.optimizer will create a new one
+        self.domain_change_detected_count += 1
+        print(f"[APT] Domain change detected! Resetting optimizer (count: {self.domain_change_detected_count})")
 
     def extract_detections(self, outputs, conf_threshold=None):
         """Extract detections from model outputs.
@@ -231,8 +281,8 @@ class APTEngine(AdaptationEngine):
             raise NotImplementedError(f"Unsupported model provider: {self.base_model.model_provider}")
 
     def compute_temporal_consistency_loss(
-        self, current_boxes, current_scores, current_classes,
-        motion_predictions, predicted_classes
+            self, current_boxes, current_scores, current_classes,
+            motion_predictions, predicted_classes
     ):
         """Compute temporal consistency loss with confidence weighting.
 
@@ -386,6 +436,10 @@ class APTEngine(AdaptationEngine):
                 if len(losses) > 0:
                     total_loss = torch.stack(losses).mean()
 
+                    # Check for domain change based on loss spike
+                    if self.detect_domain_change(total_loss.item()):
+                        self.reset_optimizer_state()
+
                     self.optimizer.zero_grad()
                     total_loss.backward()
 
@@ -411,6 +465,8 @@ class APTEngine(AdaptationEngine):
         self.adaptation_steps = 0
         self.total_loss = 0.0
         self.loss_scale_ema = 1.0
+        self.loss_history_ema = None
+        self.domain_change_detected_count = 0
 
         # Reset model to base state
         super().reset()
@@ -422,5 +478,7 @@ class APTEngine(AdaptationEngine):
             'avg_loss': self.total_loss / max(1, self.adaptation_steps),
             'total_loss': self.total_loss,
             'num_tracks': len(self.tracker.trackers),
-            'loss_scale_ema': self.loss_scale_ema
+            'loss_scale_ema': self.loss_scale_ema,
+            'domain_changes': self.domain_change_detected_count,
+            'loss_ema': self.loss_history_ema if self.loss_history_ema else 0.0
         }
