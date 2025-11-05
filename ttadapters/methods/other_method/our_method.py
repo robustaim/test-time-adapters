@@ -100,7 +100,7 @@ class Track:
         self.hits = 1
         self.time_since_update = 0
 
-    def predict(self) -> torch.Tensor:
+    def predict(self) -> Tuple[torch.Tensor, float]:
         """
         Propagate the state distribution to the current time step using Kalman filter prediction.
 
@@ -108,6 +108,8 @@ class Track:
         -------
         predicted_bbox : torch.Tensor (4,)
             Predicted bounding box [x1, y1, x2, y2]
+        uncertainty : float
+            Prediction uncertainty (trace of bbox covariance)
         """
         self.mean, self.covariance = self.kf.predict(self.mean, self.covariance)
         self.age += 1
@@ -117,7 +119,15 @@ class Track:
         predicted_cxcywh = self.mean[:4, 0]  # [cx, cy, w, h]
         predicted_bbox = bbox_cxcywh_to_xyxy(predicted_cxcywh)
 
-        return predicted_bbox
+        # Compute uncertainty (trace of bbox covariance)
+        # Covariance is [8, 8], we only need bbox part [cx, cy, w, h]
+        bbox_covariance = self.covariance[:4, :4]
+        uncertainty = torch.trace(bbox_covariance).item()
+
+        # Store for later use
+        self.uncertainty = uncertainty
+
+        return predicted_bbox, uncertainty
 
     def update(self, bbox: torch.Tensor, confidence: torch.Tensor):
         """
@@ -177,6 +187,15 @@ class OursConfig:
     bbox_loss_weight: float = 1.0
     smooth_l1_beta: float = 1.0
 
+    # Innovation weighting parameters (inverse weighting)
+    use_covariance_weighting: bool = False  # Use covariance-based confidence (DISABLED - not helpful)
+    use_innovation_weighting: bool = True  # Use innovation-based weighting (match quality)
+    max_innovation: float = 100.0  # Innovation threshold for capping (beyond this = tracking failure)
+    min_innovation_weight: float = 0.2  # Minimum weight when innovation is 0 (already aligned)
+
+    # Detection confidence gating (exponential penalty for low-confidence detections)
+    confidence_penalty_exponent: float = 2.0  # Apply detection_confidence ** exponent (2.0 or 3.0)
+
 
 class Ours(nn.Module):
     """
@@ -208,6 +227,7 @@ class Ours(nn.Module):
 
         # Store predictions from Kalman filter for next frame
         self.kalman_predictions: Dict[int, torch.Tensor] = {}  # track_id -> bbox (tensor)
+        self.kalman_uncertainties: Dict[int, float] = {}  # track_id -> uncertainty
 
         self._setup()
 
@@ -416,15 +436,19 @@ class Ours(nn.Module):
     def _predict_next_frame(self):
         """
         Use Kalman filter to predict bboxes for next frame.
+        Also stores uncertainty for each prediction.
         """
         self.kalman_predictions = {}
+        self.kalman_uncertainties = {}
         for track in self.tracks:
-            predicted_bbox = track.predict()
+            predicted_bbox, uncertainty = track.predict()
             self.kalman_predictions[track.track_id] = predicted_bbox
+            self.kalman_uncertainties[track.track_id] = uncertainty
 
     def _compute_tracking_loss(self, matches, detections, outputs):
         """
         Compute loss between Kalman predictions and model predictions for matched tracks.
+        Uses Covariance-based confidence and Innovation-based weighting.
         CRITICAL: Model bbox must retain gradient for backprop!
 
         Parameters
@@ -445,15 +469,101 @@ class Ours(nn.Module):
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         losses = []
+        weights = []
 
         for track_idx, det_idx in matches:
             track = self.tracks[track_idx]
 
             # Get Kalman prediction (target - detach, no gradient needed)
             kalman_bbox = self.kalman_predictions[track.track_id].detach()
+            kalman_bbox_cxcywh = bbox_xyxy_to_cxcywh(kalman_bbox)
 
             # Get model prediction (KEEP GRADIENT!)
             model_bbox = detections[det_idx]['bbox']  # torch.Tensor with gradient!
+
+            # === Component 1: Covariance-based Confidence (Adaptive) ===
+            covariance_confidence = 1.0  # Default (no weighting)
+            base_confidence = 1.0  # For debugging
+            uncertainty_clipped = 0.0  # For debugging
+
+            if self.cfg.use_covariance_weighting:
+                uncertainty = self.kalman_uncertainties[track.track_id]
+
+                # Clip uncertainty to reasonable range
+                # Max uncertainty = 20 → base min confidence = 0.048
+                uncertainty_clipped = min(uncertainty, 20.0)
+
+                # Base confidence from uncertainty
+                base_confidence = 1.0 / (1.0 + uncertainty_clipped)
+
+                # Adaptive weighting based on track maturity (hits count)
+                track_hits = track.hits
+
+                if track_hits < 3:
+                    # New track (1-2 matches): needs learning but don't trust too much
+                    min_weight = 0.3
+                    max_weight = 0.5
+                    covariance_confidence = max(min_weight, min(base_confidence, max_weight))
+
+                elif track_hits < 10:
+                    # Intermediate track (3-9 matches): progressive trust
+                    min_weight = 0.1
+                    covariance_confidence = max(min_weight, base_confidence)
+
+                else:
+                    # Mature track (10+ matches): full uncertainty-based weighting
+                    covariance_confidence = base_confidence
+
+            # === Component 2: Innovation-based Weight (Match Quality) ===
+            innovation_weight = 1.0  # Default
+            innovation_norm = 0.0  # For debugging
+
+            # Compute innovation (prediction error)
+            measured_bbox_cxcywh = bbox_xyxy_to_cxcywh(detections[det_idx]['bbox'].detach())
+            innovation = measured_bbox_cxcywh - kalman_bbox_cxcywh
+            innovation_norm = torch.norm(innovation).item()
+
+            if self.cfg.use_innovation_weighting:
+                # INVERSE weighting: Higher innovation = Higher weight (need more adaptation)
+                # Rationale:
+                #   - Small innovation (0~20) = already aligned → minimal learning
+                #   - Medium innovation (20~80) = adaptation needed → learn!
+                #   - Large innovation (80~100) = strong adaptation needed → learn aggressively!
+                #   - Very large (>100) = tracking failure → ignore
+
+                if innovation_norm > self.cfg.max_innovation:
+                    # Beyond threshold = likely tracking failure or outlier
+                    innovation_weight = 0.1  # Almost ignore
+                else:
+                    # Linear increase: 0 → min_weight, 100 → 1.0
+                    # innovation=0   → weight=0.2 (already aligned)
+                    # innovation=50  → weight=0.6 (moderate adaptation)
+                    # innovation=100 → weight=1.0 (strong adaptation)
+                    min_w = self.cfg.min_innovation_weight
+                    innovation_weight = min_w + (1.0 - min_w) * (innovation_norm / self.cfg.max_innovation)
+
+            # === Component 3: Detection Confidence with Exponential Penalty ===
+            detection_confidence_raw = detections[det_idx]['score'].item()
+
+            # Apply exponential penalty to heavily penalize low-confidence detections
+            # This prevents learning from unreliable detections (especially in night/challenging domains)
+            detection_confidence_gated = detection_confidence_raw ** self.cfg.confidence_penalty_exponent
+
+            # === Combined Weight ===
+            # covariance_confidence is always 1.0 (disabled), so effectively:
+            # total_weight = innovation_weight * (detection_confidence ** exponent)
+            total_weight = covariance_confidence * innovation_weight * detection_confidence_gated
+
+            # === Debug: Print weight distribution ===
+            if self.frame_count % 10 == 0 and track_idx == matches[0][0]:  # Print every 10 frames, first match only
+                innov_status = "CAPPED" if innovation_norm > self.cfg.max_innovation else "OK"
+                print(f"[Frame {self.frame_count}] Weight breakdown (INVERSE weighting + Confidence Gating):")
+                print(f"  Track: hits={track.hits}, age={track.age}")
+                print(f"  Innovation: norm={innovation_norm:.1f} ({innov_status}) → weight={innovation_weight:.4f}")
+                print(f"    Logic: innovation ↑ = weight ↑ (higher mismatch = more adaptation needed)")
+                print(f"  Detection conf: {detection_confidence_raw:.4f} → gated={detection_confidence_gated:.4f} (exp={self.cfg.confidence_penalty_exponent})")
+                print(f"    Penalty: {detection_confidence_raw:.4f}^{self.cfg.confidence_penalty_exponent} = {detection_confidence_gated:.4f} ({(detection_confidence_gated/detection_confidence_raw - 1)*100:+.1f}%)")
+                print(f"  → Total weight: {total_weight:.6f}")
 
             # Smooth L1 loss between bboxes
             # model_bbox has gradient -> loss will have gradient -> backprop works!
@@ -462,11 +572,20 @@ class Ours(nn.Module):
                 kalman_bbox,  # Target without gradient
                 beta=self.cfg.smooth_l1_beta
             )
+
+            # Store weighted loss
             losses.append(loss)
+            weights.append(total_weight)
 
         if len(losses) > 0:
-            total_loss = torch.stack(losses).mean()
-            return self.cfg.bbox_loss_weight * total_loss
+            # Convert weights to tensor
+            weights_tensor = torch.tensor(weights, device=self.device, dtype=torch.float32)
+
+            # Weighted average of losses
+            losses_tensor = torch.stack(losses)
+            weighted_loss = (losses_tensor * weights_tensor).sum() / (weights_tensor.sum() + 1e-8)
+
+            return self.cfg.bbox_loss_weight * weighted_loss
         else:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
