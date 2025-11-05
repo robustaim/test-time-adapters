@@ -155,6 +155,34 @@ class YOLOTrainer(DetectionTrainer):
         self.validator.args.verbose = True
         return super().validate()
 
+    def final_eval(self):
+        """Override final_eval to use trainer-based validation instead of model path"""
+        if not self.args.save or not self.best.exists():
+            return
+
+        # Load the best checkpoint into current model
+        try:
+            from ultralytics.utils import LOGGER
+            LOGGER.info(f"\nValidating {self.best}...")
+
+            ckpt = torch.load(self.best, weights_only=False, map_location="cpu")
+            self.model.load(ckpt.get('model') or ckpt.get('ema'))
+
+            # Use trainer-based validation (not model path validation)
+            self.validator.args.plots = self.args.plots
+            self.validator.args.compile = False
+
+            # Call validator with trainer (self), not model path
+            metrics = self.validator(self)
+
+            if metrics:
+                self.metrics = metrics
+                self.metrics.pop("fitness", None)
+                self.run_callbacks("on_fit_epoch_end")
+
+        except Exception as e:
+            LOGGER.warning(f"Final evaluation failed: {e}")
+
 
 class YOLODataPreparation(DataPreparation):
     def __init__(
