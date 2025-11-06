@@ -99,6 +99,7 @@ class YOLOTrainer(DetectionTrainer):
             overrides['project'] = None
             overrides['name'] = None
             overrides['val'] = True
+            overrides['batch'] = 1  # prevent exception cased from auto_batch
 
         # Initialize parent DetectionTrainer
         self.epoch = 0
