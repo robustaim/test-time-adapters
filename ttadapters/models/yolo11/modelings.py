@@ -223,7 +223,7 @@ class YOLODataPreparation(DataPreparation):
         else:
             # For compatibility with YOLO v8_transforms
             dataset = copy(dataset)  # copy temporary dataset
-            dataset.get_image_and_label = lambda idx: self.convert_to_yolo_label_format(idx, *dataset.__getitem__(idx))
+            dataset.get_image_and_label = lambda idx: self._convert_to_yolo_label_format(idx, *dataset.__getitem__(idx))
             dataset.cache = "ram"
             dataset.buffer = self.buffer
             dataset.data = dict(flip_idx=[], kpt_shape=None)  # disable keypoint
@@ -249,7 +249,7 @@ class YOLODataPreparation(DataPreparation):
         return len(self.dataset)
 
     def close_mosaic(self, *args, **kwargs):
-        LOGGER.info(f"Closing mosaic augmentation...")
+        LOGGER.info("Closing mosaic augmentation...")
         self.enable_strong_augment = False
 
     @property
@@ -258,7 +258,7 @@ class YOLODataPreparation(DataPreparation):
         if not hasattr(self, "_labels") or self._labels is None:
             self._labels = []
             for idx in range(len(self.dataset)):
-                yolo_data = self.convert_to_yolo_label_format(idx, *self.dataset[idx])
+                yolo_data = self._convert_to_yolo_label_format(idx, *self.dataset[idx])
                 self._labels.append({
                     'bboxes': yolo_data['instances'].bboxes,  # Instances -> numpy array
                     'cls': yolo_data['cls']
@@ -266,13 +266,13 @@ class YOLODataPreparation(DataPreparation):
         return self._labels
 
     @property
-    def augmentation(self):
+    def _augmentation(self):
         if self.enable_strong_augment:
             return self.strong_transforms
         else:
             return self.default_transforms
 
-    def convert_to_yolo_label_format(self, idx: int, image: torch.Tensor, target: dict) -> dict:
+    def _convert_to_yolo_label_format(self, idx: int, image: torch.Tensor, target: dict) -> dict:
         bbox = target[self.dataset_key['bboxes']]
         bbox_classes = target[self.dataset_key['classes']]
         original_height, original_width = target[self.dataset_key['original_size']]
@@ -308,15 +308,26 @@ class YOLODataPreparation(DataPreparation):
             'im_file': str(idx),
             'ori_shape': (original_height, original_width),
             'resized_shape': (original_height, original_width),
-            'ratio_pad': None
+            'ratio_pad': ((1.0, 1.0), (0.0, 0.0))
         }
 
     def transforms(self, *data, idx=None):
         image, target = data[0] if len(data) == 1 else data
-        yolo_data = self.convert_to_yolo_label_format(idx, image, target)
+        yolo_data = self._convert_to_yolo_label_format(idx, image, target)
 
         # Apply YOLO augmentation
-        transformed = self.augmentation(yolo_data)
+        transformed = self._augmentation(yolo_data)
+
+        # Correct ratio_pad
+        if 'ratio_pad' in transformed and transformed['ratio_pad'] is not None:
+            ori_h, ori_w = transformed['ori_shape']
+            res_h, res_w = transformed['resized_shape']
+            r = min(res_h / ori_h, res_w / ori_w)
+
+            left = round((res_w - ori_w * r) / 2 - 0.1)
+            top = round((res_h - ori_h * r) / 2 - 0.1)
+
+            transformed['ratio_pad'] = ((r, r), (left, top))  # ((ratio, ratio), (pad_x, pad_y))
 
         if len(data) == 1:
             return transformed
@@ -356,6 +367,10 @@ class YOLODataPreparation(DataPreparation):
                 b['img'] = b['img'].float().div(255.0)
         return batch
 
+    @staticmethod
+    def rescale_boxes(shape_from: tuple[int, int], boxes: torch.Tensor, shape_to: tuple[int, int], xywh: bool = False):
+        return ops.scale_boxes(img1_shape=shape_from, boxes=boxes, img0_shape=shape_to, xywh=xywh)
+
     def post_process(
         self, outputs: torch.Tensor, ori_shape: list[tuple[int, int]], resized_shape: list[tuple[int, int]],
         names: dict[int, str], xywh: bool = False
@@ -382,9 +397,9 @@ class YOLODataPreparation(DataPreparation):
         orig_img = np.ndarray(0)
         results = [Results(orig_img=orig_img, path="", names=names, boxes=(
             dets if dets.shape[0] == 0 else torch.cat((
-                ops.scale_boxes(
-                    img1_shape=resized_shape[i], boxes=dets[:, :4].clone(),
-                    img0_shape=ori_shape[i], xywh=xywh
+                self.rescale_boxes(
+                    shape_from=resized_shape[i], boxes=dets[:, :4].clone(),
+                    shape_to=ori_shape[i], xywh=xywh
                 ), dets[:, 4:]
             ), dim=1)
         )) for i, dets in enumerate(filtered)]

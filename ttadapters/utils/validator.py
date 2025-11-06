@@ -138,9 +138,12 @@ class DetectionEvaluator:
                                 )
                                 predictions_list.extend([Detections.from_ultralytics(output) for output in outputs])
                                 targets_list.extend([Detections(
-                                    xyxy=(box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])).detach().cpu().numpy(),
+                                    xyxy=data_preparation.rescale_boxes(
+                                        shape_to=ori_shape, shape_from=(h, w), xywh=False,
+                                        boxes=box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])
+                                    ).detach().cpu().numpy(),
                                     class_id=batch['cls'][batch['batch_idx'] == i].squeeze(-1).detach().cpu().long().numpy()
-                                ) for i, (h, w) in enumerate(batch['ori_shape'])])
+                                ) for i, (ori_shape, (h, w)) in enumerate(zip(batch['ori_shape'], batch['resized_shape']))])
                             case ModelProvider.HuggingFace:
                                 sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
                                 outputs = data_preparation.post_process(outputs, target_sizes=sizes)
