@@ -307,7 +307,7 @@ class YOLODataPreparation(DataPreparation):
             'im_file': str(idx),
             'ori_shape': (original_height, original_width),
             'resized_shape': (original_height, original_width),
-            'ratio_pad': (1.0, (0.0, 0.0))
+            'ratio_pad': None
         }
 
     def transforms(self, *data, idx=None):
@@ -356,15 +356,13 @@ class YOLODataPreparation(DataPreparation):
         return batch
 
     def post_process(
-        self, outputs: torch.Tensor, ori_shape: tuple[int, int],
-        ratio_pad: tuple[float, float], names: dict[int, str], xywh: bool = False
+        self, outputs: torch.Tensor, ori_shape: tuple[int, int], names: dict[int, str], xywh: bool = False
     ) -> list[Results]:
         """ Apply nms and rescale bounding boxes to original image size
 
         Args:
             outputs (torch.Tensor): YOLO model outputs with bbox format (N, 4).
             ori_shape (tuple): Shape of the target image (height, width).
-            ratio_pad (tuple, optional): Tuple of (ratio, pad) for scaling. If None, calculated from image shapes.
             names (dict): Dictionary of class names.
             xywh (bool): Whether box format is xywh (True) or xyxy (False).
 
@@ -383,7 +381,7 @@ class YOLODataPreparation(DataPreparation):
             dets if dets.shape[0] == 0 else torch.cat((
                 ops.scale_boxes(
                     img1_shape=(self.img_size, self.img_size), boxes=dets[:, :4].clone(),
-                    img0_shape=ori_shape[i], ratio_pad=ratio_pad[i], xywh=xywh
+                    img0_shape=ori_shape[i], xywh=xywh
                 ), dets[:, 4:]
             ), dim=1)
         )) for i, dets in enumerate(filtered)]

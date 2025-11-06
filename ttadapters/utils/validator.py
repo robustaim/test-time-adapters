@@ -133,9 +133,7 @@ class DetectionEvaluator:
                                         class_id=gt_instances.gt_classes.detach().cpu().numpy()
                                     ))
                             case ModelProvider.Ultralytics:
-                                outputs = data_preparation.post_process(
-                                    outputs, ori_shape=batch['ori_shape'], ratio_pad=batch['ratio_pad'], names=model.names
-                                )
+                                outputs = data_preparation.post_process(outputs, ori_shape=batch['ori_shape'], names=model.names)
                                 predictions_list.extend([Detections.from_ultralytics(output) for output in outputs])
                                 targets_list.extend([Detections(
                                     xyxy=(box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])).detach().cpu().numpy(),
