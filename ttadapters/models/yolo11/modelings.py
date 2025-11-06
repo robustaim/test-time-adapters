@@ -249,6 +249,7 @@ class YOLODataPreparation(DataPreparation):
         return len(self.dataset)
 
     def close_mosaic(self, *args, **kwargs):
+        LOGGER.info(f"Closing mosaic augmentation...")
         self.enable_strong_augment = False
 
     @property
