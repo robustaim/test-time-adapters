@@ -405,6 +405,7 @@ class YOLODataPreparation(DataPreparation):
         for r, s in zip(results, ori_shape):
             r.orig_img = None
             r.orig_shape = s
+            r.boxes.orig_shape = s
         return results
 
 
