@@ -402,9 +402,9 @@ class YOLODataPreparation(DataPreparation):
                 ), dets[:, 4:]
             ), dim=1)
         )) for i, dets in enumerate(filtered)]
-        for r in results:
+        for r, s in zip(results, ori_shape):
             r.orig_img = None
-            r.orig_shape = ori_shape
+            r.orig_shape = s
         return results
 
 
