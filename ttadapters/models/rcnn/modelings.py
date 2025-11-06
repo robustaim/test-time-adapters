@@ -291,7 +291,7 @@ class DetectronDataPreparation(DataPreparation):
                 raise ValueError(f"ResizeShortestEdge is not set to {img_size} for valid_transforms")
 
         self.pre_process: Callable = lambda batch: batch
-        self.post_process: Callable = lambda batch, *args, **kwargs: batch
+        self.post_process: Callable = lambda batch, *args, **kwargs: batch  # do nothing - detectron do resize in model.forward() while eval mode
 
     def transforms(self, *data):
         image, metadata = data[0] if len(data) == 1 else data

@@ -117,7 +117,7 @@ class DetectionEvaluator:
                                 from detectron2.structures import Instances
 
                                 for output, input_data in zip(outputs, batch):
-                                    output = data_preparation.post_process(output)
+                                    output = data_preparation.post_process(output)  # do nothing - detectron do resize in model.forward() while eval mode
                                     predictions_list.append(Detections.from_detectron2(output))
 
                                     gt_instances = Instances(image_size=input_data['instances'].image_size)
