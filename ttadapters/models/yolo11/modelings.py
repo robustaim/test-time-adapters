@@ -356,13 +356,15 @@ class YOLODataPreparation(DataPreparation):
         return batch
 
     def post_process(
-        self, outputs: torch.Tensor, ori_shape: tuple[int, int], names: dict[int, str], xywh: bool = False
+        self, outputs: torch.Tensor, ori_shape: list[tuple[int, int]], resized_shape: list[tuple[int, int]],
+        names: dict[int, str], xywh: bool = False
     ) -> list[Results]:
         """ Apply nms and rescale bounding boxes to original image size
 
         Args:
             outputs (torch.Tensor): YOLO model outputs with bbox format (N, 4).
-            ori_shape (tuple): Shape of the target image (height, width).
+            ori_shape (list[tuple[int, int]]): Shape of the target image (height, width).
+            resized_shape (list[tuple[int, int]]): Actual resized shape after LetterBox (height, width).
             names (dict): Dictionary of class names.
             xywh (bool): Whether box format is xywh (True) or xyxy (False).
 
@@ -380,7 +382,7 @@ class YOLODataPreparation(DataPreparation):
         results = [Results(orig_img=orig_img, path="", names=names, boxes=(
             dets if dets.shape[0] == 0 else torch.cat((
                 ops.scale_boxes(
-                    img1_shape=(self.img_size, self.img_size), boxes=dets[:, :4].clone(),
+                    img1_shape=resized_shape[i], boxes=dets[:, :4].clone(),
                     img0_shape=ori_shape[i], xywh=xywh
                 ), dets[:, 4:]
             ), dim=1)
