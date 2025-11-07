@@ -14,6 +14,7 @@ Usage:
 from typing import Optional, Callable, List, Tuple
 from os import makedirs
 from pathlib import Path
+from enum import Enum
 import json
 import shutil
 
@@ -201,7 +202,7 @@ class CityScapesDataset(BaseDataset):
         raise NotImplementedError("Subclass must implement __getitem__")
 
 
-class CityScapesForObjectDetection(CityScapesDataset):
+class CityScapesDatasetForObjectDetection(CityScapesDataset):
     """CityScapes dataset for Object Detection"""
 
     def __init__(
@@ -341,3 +342,37 @@ class CityScapesForObjectDetection(CityScapesDataset):
             image_tv, target = self.transforms(image_tv, target)
 
         return image_tv, target
+
+
+class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDetection):
+    REQUIRED_PACKAGES = [
+        "leftImg8bit_trainvaltest.zip",  # Train/val/test images
+        "gtFine_trainvaltest.zip",       # Fine annotations
+    ]
+
+    IMAGE_PACKAGE_PREFIX = "leftImg8bit"
+    ANNOTATION_PACKAGE_PREFIX = "gtFine"
+    IMAGE_FILE_SUFFIX = "leftImg8bit"
+    ANNOTATION_FILE_SUFFIX = "gtFine_polygons"
+
+    class ContinuousSubsetType(Enum):
+        DAYTIME_TO_NIGHT = "daytime_to_night"
+        CLEAR_TO_FOGGY = "clear_to_foggy"
+        CLEAR_TO_RAINY = "clear_to_rainy"
+
+    def __init__(
+        self, root: str, force_download: bool = False, train: bool = True, valid: bool = False, min_area: int = 0,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None,
+    ):
+        super().__init__(
+            root=root, force_download=force_download, train=train, valid=valid, min_area=min_area,
+            transform=transform, target_transform=target_transform, transforms=transforms
+        )
+
+
+class CityScapesCorruptedDatasetForObjectDetection(CityScapesDiscreteDatasetForObjectDetection):
+    pass
+
+
+class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetForObjectDetection):
+    pass
