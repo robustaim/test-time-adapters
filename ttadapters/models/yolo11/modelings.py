@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from dataclasses import dataclass
 from typing import Optional
 from copy import copy
@@ -12,9 +13,9 @@ from ..base import BaseModel, ModelProvider, WeightsInfo
 from ...datasets import BaseDataset, DataPreparation
 
 from .wrappers import (
-    get_cfg, nms, ops, LOGGER,
+    get_cfg, LOGGER,
     build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results,
-    DetectionTrainer, DetectionModel
+    DetectionTrainer, DetectionValidator, DetectionModel, YOLODataset
 )
 
 
@@ -214,6 +215,7 @@ class YOLODataPreparation(DataPreparation):
         self.enable_strong_augment = False
         self.max_detection = max_detection
 
+        self._do_label_normalize = True
         if evaluation_mode:
             self.strong_transforms = None
             if valid_transforms is Default:
@@ -236,14 +238,14 @@ class YOLODataPreparation(DataPreparation):
                 self.strong_transforms = v8_transforms(dataset=dataset, imgsz=img_size, hyp=hyp, stretch=False)
             else:
                 self.strong_transforms = train_strong_transforms
-            self.strong_transforms.append(Format(bbox_format="xywh", normalize=True, batch_idx=True))
+            self.strong_transforms.append(Format(bbox_format="xywh", normalize=self._do_label_normalize, batch_idx=True))
             if train_weak_transforms is Default:
                 hyp = get_cfg()
                 hyp.__dict__.update(dict(mosaic=0.0, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4, fliplr=0.5, translate=0.1, scale=0.5))
                 self.default_transforms = v8_transforms(dataset=dataset, imgsz=img_size, hyp=hyp, stretch=False)
             else:
                 self.default_transforms = train_weak_transforms
-        self.default_transforms.append(Format(bbox_format="xywh", normalize=True, batch_idx=True))
+        self.default_transforms.append(Format(bbox_format="xywh", normalize=self._do_label_normalize, batch_idx=True))
 
     def __len__(self):
         return len(self.dataset)
@@ -328,6 +330,9 @@ class YOLODataPreparation(DataPreparation):
 
             transformed['ratio_pad'] = ((r, r), (left, top))  # ((ratio, ratio), (pad_x, pad_y))
 
+        # Flag normalized
+        transformed['normalized'] = self._do_label_normalize
+
         if len(data) == 1:
             return transformed
         else:
@@ -340,73 +345,54 @@ class YOLODataPreparation(DataPreparation):
         if isinstance(batch[0], tuple):
             batch = [b[1] for b in batch]
 
-        batch = self.pre_process(batch)
+        if hasattr(self, "_preprocess_namespace"):
+            namespace = self._preprocess_namespace
+        else:
+            namespace = self._preprocess_namespace = SimpleNamespace()
+            namespace.device = torch.device("cpu")
+            namespace.args = SimpleNamespace()
+            namespace.args.half = False
+        batch = [DetectionValidator.preprocess(namespace, b) for b in batch]
+        return YOLODataset.collate_fn(batch)
 
-        new_batch = {}
-        keys = batch[0].keys()
+    def post_process(self, outputs: torch.Tensor, batch: dict, names: dict[int, str]) -> tuple[list[Results], list[dict]]:
+        if hasattr(self, "_postprocess_namespace"):
+            namespace = self._postprocess_namespace
+        else:
+            namespace = self._postprocess_namespace = SimpleNamespace()
+            namespace.args = SimpleNamespace()
+            namespace.args.conf = self.confidence_threshold
+            namespace.args.iou = self.iou_threshold
+            namespace.args.max_det = self.max_detection
+            namespace.args.nc = len(self.classes)
+            namespace.args.single_cls = len(self.classes) == 1
+            namespace.args.agnostic_nms = False
+            namespace.args.task = "detect"
+            namespace.end2end = False
+            namespace.device = torch.device("cpu")
 
-        for key in keys:
-            values = [b[key] for b in batch]
+        results = []
+        processed_batch = []
+        preds = DetectionValidator.postprocess(namespace, outputs)
+        for si, pred in enumerate(preds):
+            pbatch = DetectionValidator._prepare_batch(namespace, si, batch)
+            predn = DetectionValidator._prepare_pred(namespace, pred)
 
-            if key == "img":
-                new_batch[key] = torch.stack(values, 0)
-            elif key in {"bboxes", "cls"}:
-                new_batch[key] = torch.cat(values, 0)
-            else:
-                new_batch[key] = values
+            no_pred = predn['cls'].shape[0] == 0
+            if no_pred:
+                continue
 
-        # Add batch index for each sample
-        batch_idx = [idx + i for i, idx in enumerate(new_batch["batch_idx"])]
-        new_batch["batch_idx"] = torch.cat(batch_idx, 0)
-        return new_batch
+            predn_scaled = DetectionValidator.scale_preds(namespace, predn, pbatch)
+            pbatch_scaled = DetectionValidator.scale_preds(namespace, pbatch, pbatch)
 
-    def pre_process(self, batch: list[dict]) -> list[dict]:
-        for b in batch:
-            if isinstance(b['img'], torch.ByteTensor):
-                b['img'] = b['img'].float().div(255.0)
-        return batch
-
-    @staticmethod
-    def rescale_boxes(shape_from: tuple[int, int], boxes: torch.Tensor, shape_to: tuple[int, int], xywh: bool = False):
-        return ops.scale_boxes(img1_shape=shape_from, boxes=boxes, img0_shape=shape_to, xywh=xywh)
-
-    def post_process(
-        self, outputs: torch.Tensor, ori_shape: list[tuple[int, int]], resized_shape: list[tuple[int, int]],
-        names: dict[int, str], xywh: bool = False
-    ) -> list[Results]:
-        """ Apply nms and rescale bounding boxes to original image size
-
-        Args:
-            outputs (torch.Tensor): YOLO model outputs with bbox format (N, 4).
-            ori_shape (list[tuple[int, int]]): Shape of the target image (height, width).
-            resized_shape (list[tuple[int, int]]): Actual resized shape after LetterBox (height, width).
-            names (dict): Dictionary of class names.
-            xywh (bool): Whether box format is xywh (True) or xyxy (False).
-
-        Returns:
-            (list[Results]): Rescaled bounding boxes in the same format as input.
-        """
-        filtered = nms.non_max_suppression(
-            outputs,
-            conf_thres=self.confidence_threshold,
-            iou_thres=self.iou_threshold,
-            multi_label=False,
-            max_det=self.max_detection
-        )
-        orig_img = np.ndarray(0)
-        results = [Results(orig_img=orig_img, path="", names=names, boxes=(
-            dets if dets.shape[0] == 0 else torch.cat((
-                self.rescale_boxes(
-                    shape_from=resized_shape[i], boxes=dets[:, :4].clone(),
-                    shape_to=ori_shape[i], xywh=xywh
-                ), dets[:, 4:]
-            ), dim=1)
-        )) for i, dets in enumerate(filtered)]
-        for r, s in zip(results, ori_shape):
-            r.orig_img = None
-            r.orig_shape = s
-            r.boxes.orig_shape = s
-        return results
+            results.append(Results(
+                np.zeros(pbatch['imgsz'], dtype=np.uint8),
+                path=None,
+                names=names,
+                boxes=torch.cat([predn_scaled['bboxes'], predn_scaled['conf'].unsqueeze(-1), predn_scaled['cls'].unsqueeze(-1)], dim=1),
+            ))
+            processed_batch.append(pbatch_scaled)
+        return results, processed_batch
 
 
 class YOLO11ForObjectDetection(DetectionModel, BaseModel):

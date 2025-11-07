@@ -133,17 +133,12 @@ class DetectionEvaluator:
                                         class_id=gt_instances.gt_classes.detach().cpu().numpy()
                                     ))
                             case ModelProvider.Ultralytics:
-                                outputs = data_preparation.post_process(
-                                    outputs, ori_shape=batch['ori_shape'], resized_shape=batch['resized_shape'], names=model.names
-                                )
-                                predictions_list.extend([Detections.from_ultralytics(output) for output in outputs])
+                                processed_outputs, processed_batch = data_preparation.post_process(outputs, batch, model.names)
+                                predictions_list.extend([Detections.from_ultralytics(output) for output in processed_outputs])
                                 targets_list.extend([Detections(
-                                    xyxy=data_preparation.rescale_boxes(
-                                        shape_to=ori_shape, shape_from=(h, w), xywh=False,
-                                        boxes=box_convert(batch['bboxes'][batch['batch_idx'] == i], in_fmt="cxcywh", out_fmt="xyxy") * torch.tensor([w, h, w, h])
-                                    ).detach().cpu().numpy(),
-                                    class_id=batch['cls'][batch['batch_idx'] == i].squeeze(-1).detach().cpu().long().numpy()
-                                ) for i, (ori_shape, (h, w)) in enumerate(zip(batch['ori_shape'], batch['resized_shape']))])
+                                    xyxy=pbatch['bboxes'].cpu().numpy(),
+                                    class_id=pbatch['cls'].cpu().long().numpy()
+                                ) for pbatch in processed_batch])
                             case ModelProvider.HuggingFace:
                                 sizes = [label['orig_size'].cpu().tolist() for label in batch['labels']]
                                 outputs = data_preparation.post_process(outputs, target_sizes=sizes)

@@ -7,14 +7,14 @@ try:
     from ultralytics import settings
     from ultralytics.cfg import get_cfg
 
-    from ultralytics.utils import nms, ops, LOGGER
+    from ultralytics.utils import LOGGER
     from ultralytics.utils.instance import Instances
 
-    from ultralytics.data import build_dataloader
+    from ultralytics.data import build_dataloader, YOLODataset
     from ultralytics.data.augment import Compose, v8_transforms, LetterBox, Format
 
     from ultralytics.nn.tasks import DetectionModel
-    from ultralytics.models.yolo.detect import DetectionTrainer
+    from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 
     from ultralytics.engine.results import Results
 
@@ -84,12 +84,14 @@ except ImportError:
             return f"DummyDetectionModel(model_name='{self.model_name}', installed=False)"
 
 
-    class DummyDetectionTrainer:
+    class DummyDummy:
         pass
 
 
-    nms, ops, LOGGER = None, None, None
+    LOGGER = None
     get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results = [lambda: None] * 7
-    
+
+    YOLODataset = DummyDummy
     DetectionModel = DummyDetectionModel
-    DetectionTrainer = DummyDetectionModel
+    DetectionTrainer = DummyDummy
+    DetectionValidator = DummyDummy
