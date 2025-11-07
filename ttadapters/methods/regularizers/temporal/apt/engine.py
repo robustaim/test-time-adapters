@@ -1,13 +1,11 @@
 """
-APT: Adaptive Plugin for Test-Time Adaptation via Temporal Consistency
+APT: Enhanced with Detection Quality Awareness
 
-This module implements test-time adaptation for object detection models
-using temporal consistency between consecutive frames via Kalman filter tracking.
-
-Key differences from standard approaches:
-- Uses motion predictions (NOT pseudo-labels) as self-supervised signals
-- Implements proper temporal delay (predict frame t, compare with frame t detections)
-- Confidence-weighted loss for stability
+Key improvements:
+1. Detection-quality-aware domain change detection
+2. Adaptive thresholds based on detection quality
+3. Separate handling for high/low detection scenarios
+4. Confidence-based loss normalization
 """
 import torch
 from torch import nn, optim
@@ -24,12 +22,10 @@ from .tracker import TemporalTracker
 class APTEngine(AdaptationEngine):
     """
     APT: Adaptive Plugin using Temporal Consistency
-
-    Uses Kalman filter tracking to predict temporally consistent bounding boxes
-    and adapts the model using the consistency loss between current frame detections
-    and motion-based predictions from previous frame.
+    
+    Enhanced with detection quality awareness.
     """
-    model_name = "APT"
+    model_name = "APT_Enhanced"
 
     def __init__(self, base_model: BaseModel, config: APTConfig):
         super().__init__(base_model, config)
@@ -57,11 +53,84 @@ class APTEngine(AdaptationEngine):
         # Statistics
         self.adaptation_steps = 0
         self.total_loss = 0.0
-        self.loss_scale_ema = 1.0  # For loss normalization
+        self.loss_scale_ema = 1.0
 
-        # Domain change detection (based on loss, not mAP)
-        self.loss_history_ema = None  # EMA of recent losses
+        # Idea A: Loss history for spike detection
+        self.loss_history = deque(maxlen=config.loss_history_size) if config.enable_loss_history else None
         self.domain_change_detected_count = 0
+        self.skipped_updates_count = 0
+
+        # NEW: Detection quality tracking
+        self.detection_count_history = deque(maxlen=50)
+        self.avg_detection_count = 0.0
+        self.detection_quality_mode = "unknown"  # "high", "medium", "low"
+
+        # Idea D: Track BN modules for statistics update
+        self.bn_modules = []
+        self._setup_bn_modules()
+
+    def _setup_bn_modules(self):
+        """Idea D: Setup BN modules for statistics tracking and update."""
+        if not self.config.update_bn_stats:
+            return
+            
+        for module in self.base_model.modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+                self.bn_modules.append(module)
+                module.track_running_stats = True
+                if hasattr(module, 'running_mean') and module.running_mean is not None:
+                    module.running_mean.requires_grad = False
+                if hasattr(module, 'running_var') and module.running_var is not None:
+                    module.running_var.requires_grad = False
+
+    def update_detection_quality_mode(self, num_detections: int):
+        """Track detection count and determine quality mode."""
+        self.detection_count_history.append(num_detections)
+        
+        if len(self.detection_count_history) >= 20:
+            self.avg_detection_count = np.mean(list(self.detection_count_history))
+            
+            # Determine quality mode based on average detection count
+            if self.avg_detection_count > 20:
+                self.detection_quality_mode = "high"
+            elif self.avg_detection_count > 10:
+                self.detection_quality_mode = "medium"
+            else:
+                self.detection_quality_mode = "low"
+
+    def get_adaptive_threshold(self) -> float:
+        """Get domain change threshold adapted to detection quality."""
+        base_threshold = self.config.domain_change_loss_spike_threshold
+        
+        # Adjust threshold based on detection quality
+        if self.detection_quality_mode == "high":
+            # High quality: MORE CONSERVATIVE (higher threshold)
+            # More detections = naturally higher loss
+            return base_threshold * 1.5
+        elif self.detection_quality_mode == "low":
+            # Low quality: MORE SENSITIVE (lower threshold)
+            # Few detections = need to catch actual changes
+            return base_threshold * 0.7
+        else:
+            # Medium quality: use base threshold
+            return base_threshold
+
+    def normalize_loss_by_detection_quality(self, loss: torch.Tensor, n_matched: int) -> torch.Tensor:
+        """Normalize loss considering detection quality."""
+        # Base normalization
+        normalized = loss / (1.0 + n_matched)
+        
+        # Additional scaling based on detection quality
+        if self.detection_quality_mode == "high":
+            # High detection count: scale down to prevent over-reaction
+            scale_factor = 0.7
+        elif self.detection_quality_mode == "low":
+            # Low detection count: scale up to maintain learning signal
+            scale_factor = 1.5
+        else:
+            scale_factor = 1.0
+        
+        return normalized * scale_factor
 
     @property
     def loss_function(self):
@@ -93,7 +162,6 @@ class APTEngine(AdaptationEngine):
     @property
     def optimizer(self):
         if self._optimizer is None:
-            # Group parameters by learning rate
             param_groups = []
 
             if self.config.optim == "SGD":
@@ -115,7 +183,6 @@ class APTEngine(AdaptationEngine):
             else:
                 raise ValueError(f"Unknown optimizer: {self.config.optim}")
 
-            # Collect parameters with different learning rates
             for name, param_list, lr in self._get_parameter_groups():
                 if len(param_list) > 0:
                     param_groups.append({
@@ -132,22 +199,31 @@ class APTEngine(AdaptationEngine):
         return self._optimizer
 
     def _get_parameter_groups(self):
-        """Get parameter groups with different learning rates."""
-        # Detectron2 models
+        """Idea B: Get parameter groups including Conv before BN and MLP after norm."""
         if self.base_model.model_provider == ModelProvider.Detectron2:
             bn_params = []
+            conv_before_bn_params = []
+            mlp_after_norm_params = []
             backbone_params = []
             head_params = []
             fpn_last_params = []
             box_reg_last_params = []
 
-            for name, module in self.base_model.named_modules():
-                # Batch Normalization
+            module_list = list(self.base_model.named_modules())
+            
+            for idx, (name, module) in enumerate(module_list):
                 if self.config.update_bn:
                     if isinstance(module, nn.BatchNorm2d):
                         bn_params.extend(module.parameters())
+                        
+                        if self.config.update_conv_before_bn and idx > 0:
+                            for prev_idx in range(idx - 1, max(0, idx - 5), -1):
+                                prev_name, prev_module = module_list[prev_idx]
+                                if isinstance(prev_module, nn.Conv2d):
+                                    conv_before_bn_params.extend(prev_module.parameters())
+                                    break
+                                    
                     elif "FrozenBatchNorm2d" in module.__class__.__name__:
-                        # Unfreeze FrozenBatchNorm2d parameters
                         if hasattr(module, 'weight') and not isinstance(module.weight, nn.Parameter):
                             module.weight = nn.Parameter(module.weight.clone())
                         if hasattr(module, 'bias') and not isinstance(module.bias, nn.Parameter):
@@ -156,49 +232,70 @@ class APTEngine(AdaptationEngine):
                             bn_params.append(module.weight)
                         if hasattr(module, 'bias'):
                             bn_params.append(module.bias)
+    
+                        if self.config.update_conv_before_bn and idx > 0:
+                            for prev_idx in range(idx - 1, max(0, idx - 5), -1):
+                                prev_name, prev_module = module_list[prev_idx]
+                                if isinstance(prev_module, nn.Conv2d):
+                                    conv_before_bn_params.extend(prev_module.parameters())
+                                    break
 
-                # FPN last layer
+                if self.config.update_mlp_after_norm:
+                    if isinstance(module, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)):
+                        if idx < len(module_list) - 1:
+                            for next_idx in range(idx + 1, min(len(module_list), idx + 5)):
+                                next_name, next_module = module_list[next_idx]
+                                if isinstance(next_module, nn.Linear):
+                                    mlp_after_norm_params.extend(next_module.parameters())
+                                    break
+
                 if self.config.update_fpn_last_layer:
                     if 'fpn_output' in name or 'fpn_lateral' in name:
-                        # Check if it's the last layer
                         if any(x in name for x in ['fpn_output5', 'fpn_lateral5', 'top_block']):
                             fpn_last_params.extend(module.parameters())
 
-                # Box regressor last layer
                 if self.config.update_box_regressor_last_layer:
                     if 'box_predictor.bbox_pred' in name:
-                        # Get the last linear layer
                         if isinstance(module, nn.Linear):
                             box_reg_last_params.extend(module.parameters())
 
-                # Backbone
                 if self.config.update_backbone and 'backbone' in name:
-                    if not any(isinstance(module, t) for t in [nn.BatchNorm2d]):
+                    if not any(isinstance(module, t) for t in [nn.BatchNorm2d, nn.Conv2d, nn.Linear]):
                         backbone_params.extend([p for p in module.parameters() if p not in bn_params])
 
-                # RoI Heads
                 if self.config.update_head and 'roi_heads' in name:
-                    if not any(isinstance(module, t) for t in [nn.BatchNorm2d]):
+                    if not any(isinstance(module, t) for t in [nn.BatchNorm2d, nn.Conv2d, nn.Linear]):
                         head_params.extend([
-                            p for p in module.parameters() if p not in bn_params and p not in box_reg_last_params
+                            p for p in module.parameters() 
+                            if p not in bn_params and p not in box_reg_last_params
                         ])
 
             # Remove duplicates while preserving order
-            bn_params = list(dict.fromkeys(bn_params))
-            fpn_last_params = list(dict.fromkeys(fpn_last_params))
-            box_reg_last_params = list(dict.fromkeys(box_reg_last_params))
-            backbone_params = list(dict.fromkeys(backbone_params))
-            head_params = list(dict.fromkeys(head_params))
+            def global_deduplicate(param_groups):
+                seen = set()
+                result_groups = []
+                
+                for group_name, params, lr in param_groups:
+                    unique_params = []
+                    for p in params:
+                        if id(p) not in seen:
+                            seen.add(id(p))
+                            unique_params.append(p)
+                    result_groups.append((group_name, unique_params, lr))
+                
+                return result_groups
 
             param_groups = [
                 ("BatchNorm", bn_params, self.config.adapt_lr),
+                ("Conv_before_BN", conv_before_bn_params, self.config.adapt_lr * 0.5),
+                ("MLP_after_norm", mlp_after_norm_params, self.config.adapt_lr * 0.5),
                 ("FPN_last", fpn_last_params, self.config.head_lr),
                 ("BoxReg_last", box_reg_last_params, self.config.head_lr),
                 ("Backbone", backbone_params, self.config.backbone_lr),
                 ("Head", head_params, self.config.head_lr),
             ]
+            param_groups = global_deduplicate(param_groups)
         else:
-            # For other models, update all parameters
             param_groups = [("All", list(self.base_model.parameters()), self.config.adapt_lr)]
 
         return param_groups
@@ -211,72 +308,143 @@ class APTEngine(AdaptationEngine):
         return params
 
     def detect_domain_change(self, current_loss_value: float) -> bool:
-        """Detect domain change based on loss spike (NOT mAP).
-
-        Args:
-            current_loss_value: Current loss value (scalar)
-
-        Returns:
-            True if domain change detected, False otherwise
-        """
-        if not self.config.enable_domain_change_reset:
+        """Idea A: Detection-quality-aware domain change detection."""
+        if not self.config.enable_domain_change_reset or self.loss_history is None:
             return False
 
-        # Initialize loss history on first call
-        if self.loss_history_ema is None:
-            self.loss_history_ema = current_loss_value
+        if len(self.loss_history) < self.config.min_history_for_spike_detection:
             return False
 
-        # Calculate relative loss change
-        if self.loss_history_ema > 1e-6:  # Avoid division by zero
-            loss_change_ratio = abs(current_loss_value - self.loss_history_ema) / self.loss_history_ema
+        if self.adaptation_steps < self.config.min_history_for_spike_detection * 2:
+            return False
 
-            # Detect spike
-            if loss_change_ratio > self.config.domain_change_loss_threshold:
+        loss_array = np.array(list(self.loss_history))
+        loss_mean = loss_array.mean()
+        loss_std = loss_array.std()
+
+        # Check if loss is decreasing (good adaptation)
+        recent_losses = list(self.loss_history)[-10:]
+        if len(recent_losses) >= 5:
+            recent_mean = np.mean(recent_losses)
+            if current_loss_value < recent_mean * 0.8:
+                return False
+
+        # Get adaptive threshold based on detection quality
+        adaptive_threshold = self.get_adaptive_threshold()
+
+        # Spike detection method 1: Relative to mean (with adaptive threshold)
+        if loss_mean > 1e-6:
+            relative_spike = current_loss_value / loss_mean
+            if relative_spike > adaptive_threshold:
+                print(f"[APT] Domain change detected! Loss spike: {current_loss_value:.4f} vs mean {loss_mean:.4f} ({relative_spike:.2f}x) [Quality: {self.detection_quality_mode}, Threshold: {adaptive_threshold:.1f}x]")
                 return True
 
-        # Update EMA
-        self.loss_history_ema = 0.9 * self.loss_history_ema + 0.1 * current_loss_value
+        # Spike detection method 2: Std-based (with adaptive threshold)
+        if loss_std > 1e-6:
+            z_score = abs(current_loss_value - loss_mean) / loss_std
+            adaptive_std_threshold = self.config.domain_change_loss_spike_std_multiplier
+            if self.detection_quality_mode == "high":
+                adaptive_std_threshold *= 1.3
+            elif self.detection_quality_mode == "low":
+                adaptive_std_threshold *= 0.8
+                
+            if z_score > adaptive_std_threshold:
+                print(f"[APT] Domain change detected! Loss outlier: z-score {z_score:.2f} [Quality: {self.detection_quality_mode}]")
+                return True
+
         return False
 
-    def reset_optimizer_state(self):
-        """Reset optimizer momentum/state but keep model parameters.
+    def should_skip_update(self, current_loss_value: float) -> bool:
+        """Idea A: Determine if update should be skipped."""
+        if not self.config.enable_loss_threshold_skip:
+            return False
 
-        This is useful when domain changes - we want to forget the momentum
-        from previous domain but keep the adapted parameters.
-        """
-        # Force optimizer recreation
+        # Absolute threshold
+        if current_loss_value > self.config.loss_threshold_skip_value:
+            print(f"[APT] Skipping update: loss {current_loss_value:.4f} exceeds absolute threshold {self.config.loss_threshold_skip_value}")
+            return True
+
+        # Relative threshold (to EMA)
+        if self.loss_scale_ema > 1e-6:
+            relative_loss = current_loss_value / self.loss_scale_ema
+            if relative_loss > self.config.loss_threshold_skip_relative:
+                print(f"[APT] Skipping update: loss {current_loss_value:.4f} is {relative_loss:.2f}x EMA {self.loss_scale_ema:.4f}")
+                return True
+
+        return False
+
+    def compute_gradient_scaling_factor(self, loss_value: float) -> float:
+        """Idea C: Compute gradient scaling factor based on loss magnitude."""
+        if not self.config.enable_gradient_scaling:
+            return 1.0
+
+        base = self.config.gradient_scaling_base_loss
+        
+        if self.config.gradient_scaling_mode == "inverse_loss":
+            if loss_value > 1e-6:
+                scale = base / loss_value
+            else:
+                scale = self.config.gradient_scaling_max
+                
+        elif self.config.gradient_scaling_mode == "inverse_sqrt":
+            if loss_value > 1e-6:
+                scale = base / np.sqrt(loss_value)
+            else:
+                scale = self.config.gradient_scaling_max
+                
+        elif self.config.gradient_scaling_mode == "adaptive":
+            if self.loss_scale_ema > 1e-6:
+                loss_ratio = loss_value / self.loss_scale_ema
+                scale = base / max(loss_ratio, 0.1)
+            else:
+                scale = 1.0
+        else:
+            scale = 1.0
+
+        scale = np.clip(scale, self.config.gradient_scaling_min, self.config.gradient_scaling_max)
+        
+        return scale
+
+    def reset_optimizer_state(self):
+        """Reset optimizer momentum/state but keep model parameters."""
         self._optimizer = None
-        # Next call to self.optimizer will create a new one
+        if self.loss_history is not None:
+            self.loss_history.clear()
         self.domain_change_detected_count += 1
-        print(f"[APT] Domain change detected! Resetting optimizer (count: {self.domain_change_detected_count})")
+        print(f"[APT] Optimizer reset complete (count: {self.domain_change_detected_count})")
+
+    def update_bn_statistics(self, running_mean_grad: torch.Tensor, running_var_grad: torch.Tensor, module: nn.Module):
+        """Idea D: Update BN statistics using gradient information."""
+        if not self.config.update_bn_stats:
+            return
+            
+        momentum = 0.1
+        
+        with torch.no_grad():
+            if running_mean_grad is not None and module.running_mean is not None:
+                module.running_mean -= momentum * running_mean_grad
+                
+            if running_var_grad is not None and module.running_var is not None:
+                module.running_var -= momentum * running_var_grad
+                module.running_var.clamp_(min=1e-5)
 
     def extract_detections(self, outputs, conf_threshold=None):
-        """Extract detections from model outputs.
-
-        Returns:
-            boxes: (N, 4) numpy array in [x1, y1, x2, y2] format
-            scores: (N,) numpy array of confidence scores
-            classes: (N,) numpy array of class labels
-        """
+        """Extract detections from model outputs."""
         if conf_threshold is None:
             conf_threshold = self.config.min_confidence_for_update
 
         if self.base_model.model_provider == ModelProvider.Detectron2:
-            # Detectron2 format
             instances = outputs['instances']
             scores = instances.scores.detach().cpu().numpy()
             boxes = instances.pred_boxes.tensor.detach().cpu().numpy()
             classes = instances.pred_classes.detach().cpu().numpy()
 
-            # Filter by confidence
             mask = scores >= conf_threshold
             boxes = boxes[mask]
             scores = scores[mask]
             classes = classes[mask]
 
             return boxes, scores, classes
-
         else:
             raise NotImplementedError(f"Unsupported model provider: {self.base_model.model_provider}")
 
@@ -284,36 +452,21 @@ class APTEngine(AdaptationEngine):
             self, current_boxes, current_scores, current_classes,
             motion_predictions, predicted_classes
     ):
-        """Compute temporal consistency loss with confidence weighting.
-
-        Args:
-            current_boxes: (N, 4) tensor of current frame detections
-            current_scores: (N,) tensor of detection confidence scores
-            current_classes: (N,) tensor of current frame class labels
-            motion_predictions: (M, 4) tensor of motion-based predictions (from tracker)
-            predicted_classes: (M,) tensor of predicted class labels
-
-        Returns:
-            loss: scalar tensor
-            n_matched: number of matched boxes
-        """
+        """Compute temporal consistency loss with confidence weighting."""
         if len(motion_predictions) == 0 or len(current_boxes) == 0:
             return torch.tensor(0.0, device=self.device, requires_grad=True), 0
 
-        # Convert to tensors if needed
         if isinstance(motion_predictions, np.ndarray):
             motion_predictions = torch.from_numpy(motion_predictions).float().to(self.device)
         if isinstance(predicted_classes, np.ndarray):
             predicted_classes = torch.from_numpy(predicted_classes).long().to(self.device)
 
-        # Match current detections with motion predictions by class and IOU
         from torchvision.ops import box_iou
 
         total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         n_matched = 0
 
         for cls_id in torch.unique(predicted_classes):
-            # Get boxes for this class
             pred_mask = predicted_classes == cls_id
             curr_mask = current_classes == cls_id
 
@@ -324,14 +477,10 @@ class APTEngine(AdaptationEngine):
             curr_cls_boxes = current_boxes[curr_mask]
             curr_cls_scores = current_scores[curr_mask]
 
-            # Compute IOU matrix
             iou_matrix = box_iou(curr_cls_boxes, pred_cls_boxes)
 
-            # For each motion prediction, find best matching current detection
             if iou_matrix.numel() > 0:
                 max_ious, max_indices = iou_matrix.max(dim=0)
-
-                # Only use matches with sufficient IOU
                 valid_matches = max_ious > self.config.iou_threshold
 
                 if valid_matches.any():
@@ -339,16 +488,12 @@ class APTEngine(AdaptationEngine):
                     matched_pred = pred_cls_boxes[valid_matches]
                     matched_scores = curr_cls_scores[max_indices[valid_matches]]
 
-                    # Compute loss for matched boxes
                     if self.config.loss_type == "giou":
                         box_losses = self._giou_loss(matched_curr, matched_pred, reduction='none')
                     else:
-                        # For L1/L2/SmoothL1, compute per-box loss
                         box_losses = self.loss_function(matched_curr, matched_pred).mean(dim=1)
 
-                    # Apply confidence weighting if enabled
                     if self.config.use_confidence_weighting:
-                        # Higher confidence = higher weight
                         weights = matched_scores
                         weighted_loss = (box_losses * weights).sum()
                         total_loss = total_loss + weighted_loss
@@ -360,31 +505,26 @@ class APTEngine(AdaptationEngine):
         return total_loss, n_matched
 
     def forward(self, *args, **kwargs):
-        """Forward pass with optional adaptation using temporal delay."""
-        # Get base model predictions
+        """Forward pass with detection-quality-aware adaptation."""
         outputs = self.base_model(*args, **kwargs)
 
-        # If not in adaptation mode, return predictions directly
         if not self.adapting:
             return outputs
 
-        # Extract detections from current frame
         if self.base_model.model_provider == ModelProvider.Detectron2:
-            # For Detectron2, we get list of outputs for each image
             if isinstance(outputs, list):
                 losses = []
 
                 for output in outputs:
-                    # Extract current frame detections
                     boxes, scores, classes = self.extract_detections(
                         output,
                         conf_threshold=self.config.min_confidence_for_update
                     )
 
-                    # === TEMPORAL DELAY: Use predictions from PREVIOUS frame ===
-                    # If we have motion predictions from previous frame
+                    # Update detection quality tracking
+                    self.update_detection_quality_mode(len(boxes))
+
                     if self.current_motion_predictions is not None and len(self.current_motion_predictions) > 0:
-                        # Get high-confidence detections for loss computation
                         current_boxes = output['instances'].pred_boxes.tensor
                         current_classes = output['instances'].pred_classes
                         current_scores = output['instances'].scores
@@ -392,7 +532,6 @@ class APTEngine(AdaptationEngine):
                         conf_mask = current_scores >= self.config.conf_threshold
 
                         if conf_mask.any():
-                            # Compute temporal consistency loss
                             loss, n_matched = self.compute_temporal_consistency_loss(
                                 current_boxes[conf_mask],
                                 current_scores[conf_mask],
@@ -402,10 +541,9 @@ class APTEngine(AdaptationEngine):
                             )
 
                             if n_matched > 0 and loss.item() > 0:
-                                # Normalize loss with EMA-based scaling
-                                normalized_loss = loss / (1.0 + n_matched)
-
-                                # Update EMA of loss scale
+                                # Apply detection-quality-aware normalization
+                                normalized_loss = self.normalize_loss_by_detection_quality(loss, n_matched)
+                                
                                 with torch.no_grad():
                                     current_scale = loss.item() / max(1.0, n_matched)
                                     self.loss_scale_ema = (
@@ -413,12 +551,9 @@ class APTEngine(AdaptationEngine):
                                             (1 - self.config.loss_ema_decay) * current_scale
                                     )
 
-                                # Apply loss weight
                                 final_loss = normalized_loss * self.config.loss_weight
                                 losses.append(final_loss)
 
-                    # === Update tracker with CURRENT frame detections ===
-                    # Use lower threshold for tracker update
                     if len(boxes) > 0:
                         motion_predictions, predicted_classes, _ = self.tracker.update(
                             boxes, classes
@@ -428,33 +563,64 @@ class APTEngine(AdaptationEngine):
                             np.empty((0, 4)), np.empty(0)
                         )
 
-                    # Store motion predictions for NEXT frame
                     self.current_motion_predictions = motion_predictions
                     self.current_predicted_classes = predicted_classes
 
-                # Backpropagate if we have valid losses
                 if len(losses) > 0:
                     total_loss = torch.stack(losses).mean()
+                    loss_value = total_loss.item()
 
-                    # Check for domain change based on loss spike
-                    if self.detect_domain_change(total_loss.item()):
+                    if self.loss_history is not None:
+                        self.loss_history.append(loss_value)
+
+                    if self.should_skip_update(loss_value):
+                        self.skipped_updates_count += 1
+                        return outputs
+
+                    if self.detect_domain_change(loss_value):
                         self.reset_optimizer_state()
+
+                    if self.config.update_bn_stats:
+                        bn_running_means_before = []
+                        bn_running_vars_before = []
+                        for module in self.bn_modules:
+                            if module.running_mean is not None:
+                                bn_running_means_before.append(module.running_mean.clone())
+                            if module.running_var is not None:
+                                bn_running_vars_before.append(module.running_var.clone())
 
                     self.optimizer.zero_grad()
                     total_loss.backward()
 
-                    # Optional: Gradient clipping for stability
+                    if self.config.enable_gradient_scaling:
+                        scale_factor = self.compute_gradient_scaling_factor(loss_value)
+                        if scale_factor != 1.0:
+                            for param in self.online_parameters():
+                                if param.grad is not None:
+                                    param.grad *= scale_factor
+
                     torch.nn.utils.clip_grad_norm_(self.online_parameters(), max_norm=1.0)
 
                     self.optimizer.step()
 
+                    if self.config.update_bn_stats:
+                        for idx, module in enumerate(self.bn_modules):
+                            if hasattr(module, 'running_mean') and module.running_mean is not None:
+                                if idx < len(bn_running_means_before):
+                                    mean_grad = module.running_mean - bn_running_means_before[idx]
+                                    var_grad = None
+                                    if hasattr(module, 'running_var') and module.running_var is not None:
+                                        if idx < len(bn_running_vars_before):
+                                            var_grad = module.running_var - bn_running_vars_before[idx]
+                                    self.update_bn_statistics(mean_grad, var_grad, module)
+
                     self.adaptation_steps += 1
-                    self.total_loss += total_loss.item()
+                    self.total_loss += loss_value
 
         return outputs
 
     def reset(self):
-        """Reset adaptation state including tracker."""
+        """Reset adaptation state including tracker and detection quality tracking."""
         self.tracker.reset()
         self.frame_buffer.clear()
         self.prev_detections = None
@@ -465,20 +631,40 @@ class APTEngine(AdaptationEngine):
         self.adaptation_steps = 0
         self.total_loss = 0.0
         self.loss_scale_ema = 1.0
-        self.loss_history_ema = None
         self.domain_change_detected_count = 0
+        self.skipped_updates_count = 0
+        
+        # Reset detection quality tracking
+        self.detection_count_history.clear()
+        self.avg_detection_count = 0.0
+        self.detection_quality_mode = "unknown"
+        
+        if self.loss_history is not None:
+            self.loss_history.clear()
 
-        # Reset model to base state
         super().reset()
 
     def get_adaptation_stats(self):
-        """Get adaptation statistics."""
-        return {
+        """Get comprehensive adaptation statistics."""
+        stats = {
             'adaptation_steps': self.adaptation_steps,
             'avg_loss': self.total_loss / max(1, self.adaptation_steps),
             'total_loss': self.total_loss,
             'num_tracks': len(self.tracker.trackers),
             'loss_scale_ema': self.loss_scale_ema,
             'domain_changes': self.domain_change_detected_count,
-            'loss_ema': self.loss_history_ema if self.loss_history_ema else 0.0
+            'skipped_updates': self.skipped_updates_count,
+            'avg_detection_count': self.avg_detection_count,
+            'detection_quality_mode': self.detection_quality_mode,
         }
+        
+        if self.loss_history is not None and len(self.loss_history) > 0:
+            loss_array = np.array(list(self.loss_history))
+            stats.update({
+                'loss_history_mean': loss_array.mean(),
+                'loss_history_std': loss_array.std(),
+                'loss_history_min': loss_array.min(),
+                'loss_history_max': loss_array.max(),
+            })
+        
+        return stats
