@@ -52,6 +52,6 @@ class APTConfig(AdaptationConfig):
     # Loss stabilization
     loss_ema_decay: float = 0.9  # EMA decay for loss scale normalization
 
-    # Domain change detection (based on loss, NOT mAP)
+    # Domain change detection (based on loss)
     enable_domain_change_reset: bool = False  # Reset optimizer on domain change
     domain_change_loss_threshold: float = 0.5  # Loss spike threshold (50% increase)
