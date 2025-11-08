@@ -7,6 +7,22 @@ from torch import nn, optim
 from ..models.base import BaseModel, ModelProvider, DataPreparation
 
 
+class MethodContainer(dict):
+    def __init__(self, *args, suffix: str = "Round", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_round = 0
+        self.suffix = suffix
+
+    def names(self, round: int = None):
+        if round is None:
+            self.current_round += 1
+            round = self.current_round
+        return tuple(f"{name} {self.suffix} {round}" for name in self.keys())
+
+    def methods(self):
+        return tuple(self.values())
+
+
 @dataclass
 class AdaptationConfig:
     adaptation_name: str = "AdaptationEngine"

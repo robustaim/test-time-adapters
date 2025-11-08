@@ -1,4 +1,4 @@
-from .base import AdaptationConfig, AdaptationEngine
+from .base import AdaptationConfig, AdaptationEngine, MethodContainer
 
 from .auxtasks import *
 from .batchnorms import *
