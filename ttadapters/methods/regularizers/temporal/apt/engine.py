@@ -409,8 +409,7 @@ class APTEngine(AdaptationEngine):
                                 with torch.no_grad():
                                     current_scale = loss.item() / max(1.0, n_matched)
                                     self.loss_scale_ema = (
-                                            self.config.loss_ema_decay * self.loss_scale_ema +
-                                            (1 - self.config.loss_ema_decay) * current_scale
+                                        self.config.loss_ema_decay * self.loss_scale_ema + (1 - self.config.loss_ema_decay) * current_scale
                                     )
 
                                 # Apply loss weight
