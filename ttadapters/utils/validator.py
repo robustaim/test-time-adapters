@@ -24,7 +24,7 @@ class DetectionEvaluator:
         self, model: BaseModel | list[BaseModel], classes: list[str], data_preparation: DataPreparation, required_reset: bool = False,
         dtype=torch.float32, device=torch.device("cuda"), synchronize: bool = True, no_grad: bool = True
     ):
-        self.do_parallel = isinstance(model, list)
+        self.do_parallel = isinstance(model, list) or isinstance(model, tuple)
         self.model = [m.to(device).to(dtype) for m in model] if self.do_parallel else model.to(device).to(dtype)
         self.data_preparation = data_preparation
         self.classes = classes
@@ -194,7 +194,7 @@ class DetectionEvaluator:
     async def evaluate_recursively(
         self, module: BaseModel | list[BaseModel], stream: torch.cuda.Stream | None | list[torch.cuda.Stream | None], *args, **kwargs
     ):
-        if isinstance(module, list):
+        if isinstance(module, list) or isinstance(module, tuple):
             try:  # run all
                 return await asyncio.gather(*[
                     self.evaluate_recursively(m, s, *args, **kwargs) for m, s in zip(module, stream)
