@@ -406,7 +406,7 @@ class YOLO11ForObjectDetection(DetectionModel, BaseModel):
 
     class Weights:
         COCO_OFFICIAL = WeightsInfo("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt", weight_key="model")
-        SHIFT_CLEAR = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/YOLO11_C3k2_m_SHIFT.pt")
+        SHIFT_CLEAR = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/YOLO11_C3k2_m_SHIFT.pt", weight_key="model")
         CITYSCAPES = WeightsInfo("")
 
     def __init__(self, dataset: BaseDataset):
