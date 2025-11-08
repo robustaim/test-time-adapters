@@ -213,7 +213,7 @@ class DetectionEvaluator:
 
                 for sub_module, sub_stream in zip(sub_modules, sub_streams):
                     result = await self.evaluate_recursively(sub_module, sub_stream, *args, **kwargs)
-                    if isinstance(result, list):
+                    if isinstance(result, list) or isinstance(result, tuple):
                         results.extend(result)
                     else:
                         results.append(result)
