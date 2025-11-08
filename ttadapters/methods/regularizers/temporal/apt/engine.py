@@ -281,8 +281,8 @@ class APTEngine(AdaptationEngine):
             raise NotImplementedError(f"Unsupported model provider: {self.base_model.model_provider}")
 
     def compute_temporal_consistency_loss(
-            self, current_boxes, current_scores, current_classes,
-            motion_predictions, predicted_classes
+        self, current_boxes, current_scores, current_classes,
+        motion_predictions, predicted_classes
     ):
         """Compute temporal consistency loss with confidence weighting.
 
