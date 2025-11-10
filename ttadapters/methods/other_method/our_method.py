@@ -62,6 +62,40 @@ def bbox_cxcywh_to_xyxy(bbox: torch.Tensor) -> torch.Tensor:
     return torch.stack([x1, y1, x2, y2], dim=-1)
 
 
+def encode_bbox_delta(bbox: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """
+    Encode bbox as delta (offset) relative to reference box.
+    This is similar to Faster R-CNN's bbox regression target encoding.
+
+    Args:
+        bbox: [..., 4] target box [x1, y1, x2, y2]
+        reference: [..., 4] reference box [x1, y1, x2, y2]
+    Returns:
+        delta: [..., 4] encoded as [tx, ty, tw, th]
+    """
+    # Reference box
+    rx1, ry1, rx2, ry2 = reference.unbind(-1)
+    rw = (rx2 - rx1).clamp(min=1e-6)
+    rh = (ry2 - ry1).clamp(min=1e-6)
+    rcx = rx1 + rw * 0.5
+    rcy = ry1 + rh * 0.5
+
+    # Target box
+    x1, y1, x2, y2 = bbox.unbind(-1)
+    w = (x2 - x1).clamp(min=1e-6)
+    h = (y2 - y1).clamp(min=1e-6)
+    cx = x1 + w * 0.5
+    cy = y1 + h * 0.5
+
+    # Encode
+    tx = (cx - rcx) / rw
+    ty = (cy - rcy) / rh
+    tw = torch.log(w / rw)
+    th = torch.log(h / rh)
+
+    return torch.stack([tx, ty, tw, th], dim=-1)
+
+
 class Track:
     """
     Represents a single tracked object with tensor-based Kalman filter.
@@ -178,6 +212,11 @@ class OursConfig:
     weight_decay: float = 1e-4
     optimizer_option: str = "SGD"  # AdamW
 
+    # Adaptation parameters
+    adapt_bn: bool = True  # Adapt BatchNorm/LayerNorm layers
+    adapt_conv: bool = False  # Adapt Conv2d layers
+    adapt_linear: bool = False  # Adapt Linear layers
+
     # Tracking parameters
     iou_threshold: float = 0.3  # IoU threshold for matching
     min_confidence: float = 0.5  # Minimum detection confidence
@@ -186,6 +225,7 @@ class OursConfig:
     # Loss weights
     bbox_loss_weight: float = 1.0
     smooth_l1_beta: float = 1.0
+    use_delta_loss: bool = True  # Use delta encoding (tx,ty,tw,th) instead of absolute coords
 
     # Innovation weighting parameters (inverse weighting)
     use_covariance_weighting: bool = False  # Use covariance-based confidence (DISABLED - not helpful)
@@ -195,6 +235,29 @@ class OursConfig:
 
     # Detection confidence gating (exponential penalty for low-confidence detections)
     confidence_penalty_exponent: float = 2.0  # Apply detection_confidence ** exponent (2.0 or 3.0)
+
+    # Kalman filter update strategy
+    use_model_for_kalman_update: bool = True  # CRITICAL: Use detection as measurement (not prediction!)
+    kalman_detection_blend: float = 1.0  # Blend ratio: 0=pure Kalman, 1=pure detection
+
+    # Batch aggregation for stable learning
+    batch_accumulation_steps: int = 1  # Accumulate gradients over N frames before update (1=no accumulation)
+
+    # Scene change detection and tracker reset
+    shift_detection_window: int = 10  # Number of frames to track for average matches
+    shift_detection_threshold: float = 0.3  # Reset if matches < threshold * avg_matches
+    shift_detection_min_matches: int = 2  # Or reset if matches <= this absolute value
+    reset_tracker_on_shift: bool = True  # Reset tracker when scene change detected
+
+    # Quality-based loss filtering (adaptive learning control)
+    enable_quality_filter: bool = True  # Enable loss quality filtering
+    min_matches: int = 4  # Minimum number of matches required for loss computation (4-8 recommended)
+    min_track_hits: float = 3.0  # Minimum average track maturity
+    min_match_iou: float = 0.4  # Minimum average IoU for reliable matching
+    max_innovation_cv: float = 0.8  # Maximum CV for consistency
+    min_avg_innovation: float = 5.0  # Skip if already adapted
+    max_avg_innovation: float = 80.0  # Skip if too large (likely failure)
+    max_outlier_ratio: float = 3.0  # Max innovation / Avg innovation threshold
 
 
 class Ours(nn.Module):
@@ -229,6 +292,22 @@ class Ours(nn.Module):
         self.kalman_predictions: Dict[int, torch.Tensor] = {}  # track_id -> bbox (tensor)
         self.kalman_uncertainties: Dict[int, float] = {}  # track_id -> uncertainty
 
+        # Scene change detection
+        self.current_scene = None  # Track current scene/video
+        self.prev_innovations = []  # Store recent innovations (for stats)
+        self.prev_matches = []  # Store recent match counts (for stats)
+        self.matches_history = []  # Rolling window for shift detection
+
+        # Adaptation statistics tracking
+        self.total_frames = 0  # Total frames processed
+        self.adapted_frames = 0  # Frames where adaptation occurred
+        self.scene_total_frames = 0  # Frames in current scene
+        self.scene_adapted_frames = 0  # Adapted frames in current scene
+
+        # Batch accumulation for gradient smoothing
+        self.accumulated_loss = None  # Accumulated loss over multiple frames
+        self.accumulation_count = 0  # Number of frames accumulated
+
         self._setup()
 
     def _setup(self):
@@ -243,7 +322,7 @@ class Ours(nn.Module):
             if hasattr(self.model, 'backbone') and hasattr(self.model.backbone, 'bottom_up'):
                 for m_name, m in self.model.backbone.bottom_up.named_modules():
                     # BatchNorm and LayerNorm layers
-                    if isinstance(m, (nn.BatchNorm2d, nn.LayerNorm, FrozenBatchNorm2d)):
+                    if self.cfg.adapt_bn and isinstance(m, (nn.BatchNorm2d, nn.LayerNorm, FrozenBatchNorm2d)):
                         if hasattr(m, 'weight') and m.weight is not None:
                             m.weight.requires_grad = True
                             params.append(m.weight)
@@ -251,8 +330,8 @@ class Ours(nn.Module):
                             m.bias.requires_grad = True
                             params.append(m.bias)
 
-                    # Conv2d and Linear layers
-                    if isinstance(m, (nn.Conv2d, nn.Linear)):
+                    # Conv2d layers
+                    if self.cfg.adapt_conv and isinstance(m, nn.Conv2d):
                         if hasattr(m, 'weight') and m.weight is not None:
                             m.weight.requires_grad = True
                             params.append(m.weight)
@@ -260,7 +339,19 @@ class Ours(nn.Module):
                             m.bias.requires_grad = True
                             params.append(m.bias)
 
-        print(f"Ours: Adapting {len(params)} backbone parameters")
+                    # Linear layers
+                    if self.cfg.adapt_linear and isinstance(m, nn.Linear):
+                        if hasattr(m, 'weight') and m.weight is not None:
+                            m.weight.requires_grad = True
+                            params.append(m.weight)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            m.bias.requires_grad = True
+                            params.append(m.bias)
+
+        # Count total number of parameters (elements)
+        total_params = sum(p.numel() for p in params)
+        print(f"Ours: Adapting {len(params)} parameter tensors ({total_params:,} total elements)")
+        print(f"  BN/LayerNorm: {self.cfg.adapt_bn}, Conv2d: {self.cfg.adapt_conv}, Linear: {self.cfg.adapt_linear}")
 
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
@@ -275,8 +366,25 @@ class Ours(nn.Module):
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay
             )
+        elif self.cfg.optimizer_option == "Adam":
+            self.optimizer = optim.Adam(
+                params,
+                lr=self.cfg.lr,
+                weight_decay=self.cfg.weight_decay
+            )
         else:
             warnings.warn("Unknown optimizer_option.")
+
+    def _set_bn_train_mode(self):
+        """
+        Set BN/LN layers to train mode while keeping other modules in eval mode.
+        This ensures gradient flows through BN parameters during TTA.
+        """
+        self.model.train()
+        for module in self.model.modules():
+            # Keep only BN/LN in train mode
+            if not isinstance(module, (nn.BatchNorm2d, nn.LayerNorm, FrozenBatchNorm2d)):
+                module.eval()
 
     def _get_detections_from_output(self, outputs):
         """
@@ -325,8 +433,8 @@ class Ours(nn.Module):
 
         Returns
         -------
-        matches : List[Tuple[int, int]]
-            List of (track_idx, detection_idx) pairs
+        matches : List[Tuple[int, int, float]]
+            List of (track_idx, detection_idx, iou) tuples
         unmatched_tracks : List[int]
             Indices of unmatched tracks
         unmatched_detections : List[int]
@@ -384,7 +492,7 @@ class Ours(nn.Module):
 
             if best_det_idx != -1:
                 track_idx = track_indices[track_local_idx]
-                matches.append((track_idx, best_det_idx))
+                matches.append((track_idx, best_det_idx, best_iou))
                 unmatched_tracks.remove(track_local_idx)
                 unmatched_detections.remove(best_det_idx)
 
@@ -401,18 +509,33 @@ class Ours(nn.Module):
         ----------
         detections : List[Dict]
             Current frame detections (with tensor bboxes)
-        matches : List[Tuple[int, int]]
-            Matched (track_idx, detection_idx) pairs
+        matches : List[Tuple[int, int, float]]
+            Matched (track_idx, detection_idx, iou) tuples
         unmatched_tracks : List[int]
             Unmatched track indices
         unmatched_detections : List[int]
             Unmatched detection indices
         """
         # Update matched tracks (detach for tracking - no gradient needed)
-        for track_idx, det_idx in matches:
+        for track_idx, det_idx, iou in matches:
+            track = self.tracks[track_idx]
             det = detections[det_idx]
-            self.tracks[track_idx].update(
-                det['bbox'].detach(),  # Detach for tracking update
+
+            # CRITICAL: Always use detection as measurement (Kalman filter principle)
+            # Kalman filter requires NEW measurement to update belief
+            det_bbox = det['bbox'].detach()
+
+            if self.cfg.use_model_for_kalman_update and self.cfg.kalman_detection_blend < 1.0:
+                # Optional: Blend with Kalman prediction for robustness
+                kalman_bbox = self.kalman_predictions[track.track_id].detach()
+                blend_ratio = self.cfg.kalman_detection_blend
+                update_bbox = blend_ratio * det_bbox + (1 - blend_ratio) * kalman_bbox
+            else:
+                # Default: Use pure detection (standard Kalman update)
+                update_bbox = det_bbox
+
+            track.update(
+                update_bbox,
                 det['score'].detach()
             )
 
@@ -464,15 +587,27 @@ class Ours(nn.Module):
         -------
         loss : torch.Tensor
             Tracking loss with gradient
+        adapted : bool
+            Whether adaptation occurred (loss > 0)
         """
-        if len(matches) == 0:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        # Skip loss computation if too few matches (unreliable for adaptation)
+        if len(matches) < self.cfg.min_matches:
+            return torch.tensor(0.0, device=self.device, requires_grad=True), False
 
         losses = []
         weights = []
+        innovations_list = []  # Track all innovations for logging
+        ious_list = []  # Track IoU for each match
+        track_hits_list = []  # Track maturity
+        conf_list = []  # Detection confidence
 
-        for track_idx, det_idx in matches:
+        for track_idx, det_idx, iou in matches:
             track = self.tracks[track_idx]
+
+            # Collect statistics
+            ious_list.append(iou)
+            track_hits_list.append(track.hits)
+            conf_list.append(detections[det_idx]['score'].item())
 
             # Get Kalman prediction (target - detach, no gradient needed)
             kalman_bbox = self.kalman_predictions[track.track_id].detach()
@@ -522,25 +657,31 @@ class Ours(nn.Module):
             measured_bbox_cxcywh = bbox_xyxy_to_cxcywh(detections[det_idx]['bbox'].detach())
             innovation = measured_bbox_cxcywh - kalman_bbox_cxcywh
             innovation_norm = torch.norm(innovation).item()
+            innovations_list.append(innovation_norm)  # Log for output
 
             if self.cfg.use_innovation_weighting:
                 # INVERSE weighting: Higher innovation = Higher weight (need more adaptation)
-                # Rationale:
-                #   - Small innovation (0~20) = already aligned → minimal learning
-                #   - Medium innovation (20~80) = adaptation needed → learn!
-                #   - Large innovation (80~100) = strong adaptation needed → learn aggressively!
-                #   - Very large (>100) = tracking failure → ignore
+                # Map innovation to weight based on quality filter range
+                # [min_avg_innovation, max_avg_innovation] → [min_innovation_weight, 1.0]
+                #
+                # Example with default settings:
+                #   innovation=5   → weight=0.2 (minimum, already adapted)
+                #   innovation=42.5→ weight=0.6 (medium adaptation)
+                #   innovation=80  → weight=1.0 (maximum, strong adaptation)
+                #   innovation>80  → weight=0.1 (tracking failure, almost ignore)
 
-                if innovation_norm > self.cfg.max_innovation:
-                    # Beyond threshold = likely tracking failure or outlier
-                    innovation_weight = 0.1  # Almost ignore
+                if innovation_norm > self.cfg.max_avg_innovation:
+                    # Beyond max threshold = tracking failure or unreliable
+                    innovation_weight = 0.1  # Almost ignore (will be filtered anyway)
+                elif innovation_norm < self.cfg.min_avg_innovation:
+                    # Below min threshold = already adapted
+                    innovation_weight = self.cfg.min_innovation_weight  # Minimum (will be filtered anyway)
                 else:
-                    # Linear increase: 0 → min_weight, 100 → 1.0
-                    # innovation=0   → weight=0.2 (already aligned)
-                    # innovation=50  → weight=0.6 (moderate adaptation)
-                    # innovation=100 → weight=1.0 (strong adaptation)
+                    # Linear interpolation within valid learning range
                     min_w = self.cfg.min_innovation_weight
-                    innovation_weight = min_w + (1.0 - min_w) * (innovation_norm / self.cfg.max_innovation)
+                    valid_range = self.cfg.max_avg_innovation - self.cfg.min_avg_innovation
+                    normalized = (innovation_norm - self.cfg.min_avg_innovation) / valid_range
+                    innovation_weight = min_w + (1.0 - min_w) * normalized
 
             # === Component 3: Detection Confidence with Exponential Penalty ===
             detection_confidence_raw = detections[det_idx]['score'].item()
@@ -554,28 +695,80 @@ class Ours(nn.Module):
             # total_weight = innovation_weight * (detection_confidence ** exponent)
             total_weight = covariance_confidence * innovation_weight * detection_confidence_gated
 
-            # === Debug: Print weight distribution ===
-            if self.frame_count % 10 == 0 and track_idx == matches[0][0]:  # Print every 10 frames, first match only
-                innov_status = "CAPPED" if innovation_norm > self.cfg.max_innovation else "OK"
-                print(f"[Frame {self.frame_count}] Weight breakdown (INVERSE weighting + Confidence Gating):")
-                print(f"  Track: hits={track.hits}, age={track.age}")
-                print(f"  Innovation: norm={innovation_norm:.1f} ({innov_status}) → weight={innovation_weight:.4f}")
-                print(f"    Logic: innovation ↑ = weight ↑ (higher mismatch = more adaptation needed)")
-                print(f"  Detection conf: {detection_confidence_raw:.4f} → gated={detection_confidence_gated:.4f} (exp={self.cfg.confidence_penalty_exponent})")
-                print(f"    Penalty: {detection_confidence_raw:.4f}^{self.cfg.confidence_penalty_exponent} = {detection_confidence_gated:.4f} ({(detection_confidence_gated/detection_confidence_raw - 1)*100:+.1f}%)")
-                print(f"  → Total weight: {total_weight:.6f}")
-
-            # Smooth L1 loss between bboxes
-            # model_bbox has gradient -> loss will have gradient -> backprop works!
-            loss = F.smooth_l1_loss(
-                model_bbox,  # Source with gradient
-                kalman_bbox,  # Target without gradient
-                beta=self.cfg.smooth_l1_beta
-            )
+            # === Compute Loss ===
+            if self.cfg.use_delta_loss:
+                # Delta-based loss (better for BN adaptation)
+                # Use Kalman prediction as reference for both
+                reference = kalman_bbox.detach()
+                delta_model = encode_bbox_delta(model_bbox, reference)
+                delta_target = encode_bbox_delta(kalman_bbox, reference)
+                loss = F.smooth_l1_loss(
+                    delta_model,
+                    delta_target,
+                    beta=self.cfg.smooth_l1_beta
+                )
+            else:
+                # Absolute coordinate loss (original)
+                loss = F.smooth_l1_loss(
+                    model_bbox,
+                    kalman_bbox,
+                    beta=self.cfg.smooth_l1_beta
+                )
 
             # Store weighted loss
             losses.append(loss)
             weights.append(total_weight)
+
+        # === Calculate Innovation Statistics ===
+        if len(innovations_list) > 0:
+            avg_innovation = sum(innovations_list) / len(innovations_list)
+            min_innovation = min(innovations_list)
+            max_innovation = max(innovations_list)
+            std_innovation = (sum([(x - avg_innovation)**2 for x in innovations_list]) / len(innovations_list)) ** 0.5
+            cv_innovation = std_innovation / avg_innovation if avg_innovation > 0 else 0.0
+
+            # Calculate additional statistics
+            avg_iou = sum(ious_list) / len(ious_list)
+            avg_hits = sum(track_hits_list) / len(track_hits_list)
+            avg_conf = sum(conf_list) / len(conf_list)
+
+            # === Quality-based Loss Filtering ===
+            if self.cfg.enable_quality_filter:
+                skip_reasons = []
+
+                # Criterion 1: Track maturity
+                if avg_hits < self.cfg.min_track_hits:
+                    skip_reasons.append(f"Immature tracks (avg_hits={avg_hits:.1f} < {self.cfg.min_track_hits})")
+
+                # Criterion 2: Match quality (IoU)
+                if avg_iou < self.cfg.min_match_iou:
+                    skip_reasons.append(f"Poor matching (avg_IoU={avg_iou:.3f} < {self.cfg.min_match_iou})")
+
+                # Criterion 3: Consistency (CV)
+                if cv_innovation > self.cfg.max_innovation_cv:
+                    skip_reasons.append(f"Inconsistent (CV={cv_innovation:.2f} > {self.cfg.max_innovation_cv})")
+
+                # Criterion 4: Already adapted (too small)
+                if avg_innovation < self.cfg.min_avg_innovation:
+                    skip_reasons.append(f"Already adapted (avg={avg_innovation:.2f} < {self.cfg.min_avg_innovation})")
+
+                # Criterion 5: Too large (tracking failure)
+                if avg_innovation > self.cfg.max_avg_innovation:
+                    skip_reasons.append(f"Too large (avg={avg_innovation:.2f} > {self.cfg.max_avg_innovation})")
+
+                # Criterion 6: Extreme outliers
+                if max_innovation > self.cfg.max_outlier_ratio * avg_innovation:
+                    skip_reasons.append(f"Outlier detected (max={max_innovation:.2f} > {self.cfg.max_outlier_ratio}*avg)")
+
+                # If any criterion fails, skip loss
+                if len(skip_reasons) > 0:
+                    return torch.tensor(0.0, device=self.device, requires_grad=True), False
+
+            # Store for scene statistics
+            self.prev_innovations.append(avg_innovation)
+            self.prev_matches.append(len(matches))
+        else:
+            self.prev_matches.append(len(matches))
 
         if len(losses) > 0:
             # Convert weights to tensor
@@ -585,9 +778,9 @@ class Ours(nn.Module):
             losses_tensor = torch.stack(losses)
             weighted_loss = (losses_tensor * weights_tensor).sum() / (weights_tensor.sum() + 1e-8)
 
-            return self.cfg.bbox_loss_weight * weighted_loss
+            return self.cfg.bbox_loss_weight * weighted_loss, True
         else:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+            return torch.tensor(0.0, device=self.device, requires_grad=True), False
 
     def forward(self, x):
         """
@@ -605,7 +798,45 @@ class Ours(nn.Module):
         """
         assert len(x) == 1, "Batch size must be 1 for tracking"
 
+        # Detect scene change (based on videoName or file_name)
+        scene_name = None
+        if 'videoName' in x[0]:
+            scene_name = x[0]['videoName']
+        elif 'file_name' in x[0]:
+            # Extract scene from file path (e.g., "cloudy", "overcast", etc.)
+            file_name = x[0]['file_name']
+            for corruption in ['clear', 'cloudy', 'overcast', 'rainy', 'foggy', 'night']:
+                if corruption in file_name.lower():
+                    scene_name = corruption
+                    break
+
+        scene_changed = (self.current_scene is not None and scene_name != self.current_scene)
+
+        if scene_changed:
+            # Print previous scene statistics before reset
+            if self.scene_total_frames > 0:
+                scene_adapt_ratio = (self.scene_adapted_frames / self.scene_total_frames) * 100
+                print(f"\n{'='*80}")
+                print(f"Scene [{self.current_scene}] Adaptation Statistics:")
+                print(f"  Total frames: {self.scene_total_frames}")
+                print(f"  Adapted frames: {self.scene_adapted_frames}")
+                print(f"  Adaptation ratio: {scene_adapt_ratio:.2f}%")
+                print(f"{'='*80}\n")
+
+            # Reset statistics for new scene
+            self.prev_innovations = []
+            self.prev_matches = []
+            self.scene_total_frames = 0
+            self.scene_adapted_frames = 0
+
+            # Reset batch accumulation (discard incomplete batch)
+            self.accumulated_loss = None
+            self.accumulation_count = 0
+
+        self.current_scene = scene_name
         self.frame_count += 1
+        self.total_frames += 1
+        self.scene_total_frames += 1
 
         # First frame: just detect and initialize tracks
         if self.frame_count == 1:
@@ -633,9 +864,8 @@ class Ours(nn.Module):
             return outputs
 
         # Subsequent frames: use tracking for adaptation
-        # Get model predictions
-        self.model.eval()
-        self.optimizer.zero_grad()
+        # CRITICAL: Set BN to train mode for gradient flow
+        self._set_bn_train_mode()
 
         outputs = self.model(x)
         detections = self._get_detections_from_output(outputs)
@@ -644,14 +874,30 @@ class Ours(nn.Module):
         matches, unmatched_tracks, unmatched_detections = \
             self._match_tracks_to_detections(detections)
 
-        # Compute tracking loss
-        tracking_loss = self._compute_tracking_loss(matches, detections, outputs)
+        # Compute tracking loss and check if adaptation occurred
+        tracking_loss, adapted = self._compute_tracking_loss(matches, detections, outputs)
 
-        # Update model if we have valid loss
+        # === Batch Accumulation for Gradient Smoothing ===
         if tracking_loss > 0:
-            tracking_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            # Clear gradients only at the start of accumulation batch
+            if self.accumulation_count == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+
+            # Compute and accumulate gradients
+            (tracking_loss / self.cfg.batch_accumulation_steps).backward()
+            self.accumulation_count += 1
+
+            # Update model when accumulation is complete
+            if self.accumulation_count >= self.cfg.batch_accumulation_steps:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)  # Clear for next batch
+                self.accumulation_count = 0
+
+        # Track adaptation statistics
+        if adapted:
+            self.adapted_frames += 1
+            self.scene_adapted_frames += 1
 
         # Update tracks
         self._update_tracks(detections, matches, unmatched_tracks, unmatched_detections)
@@ -659,9 +905,57 @@ class Ours(nn.Module):
         # Predict for next frame
         self._predict_next_frame()
 
-        # Return predictions (run model again in eval mode for clean output)
-        self.model.eval()
-        with torch.no_grad():
-            final_outputs = self.model(x)
+        # Print periodic adaptation statistics
+        if self.frame_count % 100 == 0:
+            overall_ratio = (self.adapted_frames / self.total_frames) * 100 if self.total_frames > 0 else 0
+            scene_ratio = (self.scene_adapted_frames / self.scene_total_frames) * 100 if self.scene_total_frames > 0 else 0
+            print(f"\n[Frame {self.frame_count}] Adaptation Statistics:")
+            print(f"  Overall: {self.adapted_frames}/{self.total_frames} ({overall_ratio:.2f}%)")
+            print(f"  Current scene [{self.current_scene}]: {self.scene_adapted_frames}/{self.scene_total_frames} ({scene_ratio:.2f}%)\n")
 
-        return final_outputs
+        # Return predictions from the first forward pass (before adaptation)
+        return outputs
+
+    def get_adaptation_stats(self):
+        """
+        Get overall adaptation statistics.
+
+        Returns
+        -------
+        stats : dict
+            Dictionary containing adaptation statistics
+        """
+        overall_ratio = (self.adapted_frames / self.total_frames) * 100 if self.total_frames > 0 else 0
+        scene_ratio = (self.scene_adapted_frames / self.scene_total_frames) * 100 if self.scene_total_frames > 0 else 0
+
+        return {
+            'total_frames': self.total_frames,
+            'adapted_frames': self.adapted_frames,
+            'overall_ratio': overall_ratio,
+            'current_scene': self.current_scene,
+            'scene_total_frames': self.scene_total_frames,
+            'scene_adapted_frames': self.scene_adapted_frames,
+            'scene_ratio': scene_ratio
+        }
+
+    def print_final_stats(self):
+        """Print final adaptation statistics."""
+        # Print current scene stats
+        if self.scene_total_frames > 0:
+            scene_adapt_ratio = (self.scene_adapted_frames / self.scene_total_frames) * 100
+            print(f"\n{'='*80}")
+            print(f"Scene [{self.current_scene}] Final Adaptation Statistics:")
+            print(f"  Total frames: {self.scene_total_frames}")
+            print(f"  Adapted frames: {self.scene_adapted_frames}")
+            print(f"  Adaptation ratio: {scene_adapt_ratio:.2f}%")
+            print(f"{'='*80}\n")
+
+        # Print overall stats
+        if self.total_frames > 0:
+            overall_ratio = (self.adapted_frames / self.total_frames) * 100
+            print(f"\n{'='*80}")
+            print(f"Overall Adaptation Statistics:")
+            print(f"  Total frames: {self.total_frames}")
+            print(f"  Adapted frames: {self.adapted_frames}")
+            print(f"  Adaptation ratio: {overall_ratio:.2f}%")
+            print(f"{'='*80}\n")

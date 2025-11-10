@@ -83,50 +83,13 @@ class ActMAD(nn.Module):
         self.model = copy.deepcopy(self.model)
         self.model.to(self.cfg.device)
 
-        params = []
+        # ActMAD: Enable gradients for all model parameters
         for k, v in self.model.named_parameters():
-            v.requires_grad = False
-
-        if self.cfg.model_type == "rtdetr":
-            for name, m in self.model.named_modules():
-                if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, RTDetrFrozenBatchNorm2d)):
-                    should_adapt = False
-                    if self.adaptation_layers == "backbone":
-                        if ('model.backbone' in name and isinstance(m, RTDetrFrozenBatchNorm2d)) or \
-                           ('backbone' in name.lower() and isinstance(m, RTDetrFrozenBatchNorm2d)):
-                            should_adapt = True
-                    elif self.adaptation_layers == "encoder":
-                        if ('encoder' in name.lower() and not 'decoder' in name.lower()) and \
-                           isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
-                            should_adapt = True
-                    elif self.adaptation_layers == "backbone+encoder":
-                        if 'decoder' not in name.lower():
-                            should_adapt = True
-                    else:
-                        if 'decoder' not in name.lower():
-                            should_adapt = True
-
-                    if should_adapt:
-                        if hasattr(m, 'weight') and m.weight is not None and isinstance(m.weight, nn.Parameter):
-                            m.weight.requires_grad = True
-                            params.append(m.weight)
-                        if hasattr(m, 'bias') and m.bias is not None and isinstance(m.bias, nn.Parameter):
-                            m.bias.requires_grad = True
-                            params.append(m.bias)
-
-        elif self.cfg.model_type in ("rcnn", "swinrcnn"):
-            for name, m in self.model.named_modules():
-                if isinstance(m, FrozenBatchNorm2d):
-                    if hasattr(m, 'weight') and m.weight is not None:
-                        m.weight.requires_grad = True
-                        params.append(m.weight)
-                    if hasattr(m, 'bias') and m.bias is not None:
-                        m.bias.requires_grad = True
-                        params.append(m.bias)
+            v.requires_grad = True
 
         if self.cfg.optimizer_option == "SGD":
             self.optimizer = optim.SGD(
-                params,
+                self.model.parameters(),
                 lr=self.cfg.lr,
                 momentum=self.cfg.momentum,
                 weight_decay=self.cfg.weight_decay
@@ -134,7 +97,7 @@ class ActMAD(nn.Module):
 
         elif self.cfg.optimizer_option == "AdamW":
             self.optimizer = optim.AdamW(
-                params,
+                self.model.parameters(),
                 lr=self.cfg.lr,
                 weight_decay=self.cfg.weight_decay
             )
@@ -307,21 +270,20 @@ class ActMAD(nn.Module):
         batch_mean_tta = [save_outputs_tta[x].get_out_mean() for x in range(n_chosen_layers)]
         batch_var_tta = [save_outputs_tta[x].get_out_var() for x in range(n_chosen_layers)]
 
-        # Compute ActMAD loss
-        loss_mean = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
-        loss_var = torch.tensor(0, requires_grad=True, dtype=torch.float).float().to(self.device)
+        # Compute ActMAD loss (accumulate in list to preserve gradient graph)
+        loss_terms = []
 
         for i in range(n_chosen_layers):
-            loss_mean += self.loss(
+            loss_terms.append(self.loss(
                 batch_mean_tta[i].to(self.device),
                 self.clean_mean_list_final[i].to(self.device)
-            )
-            loss_var += self.loss(
+            ))
+            loss_terms.append(self.loss(
                 batch_var_tta[i].to(self.device),
                 self.clean_var_list_final[i].to(self.device)
-            )
+            ))
 
-        loss = loss_mean + loss_var
+        loss = sum(loss_terms) if loss_terms else torch.tensor(0.0, device=self.device)
 
         # Backward and update
         loss.backward()
@@ -1492,13 +1454,6 @@ class WHW(nn.Module):
             self.s_div = {k: 1.0 for k in range(self.num_classes)}
     
     def _setup_parallel_adapters(self):
-        """
-        Setup parallel adapters for test-time adaptation
-
-        two types of adapters to ResNet blocks:
-        1. Block-level adapter: Applied to conv2 output(ParallelAdapterWithProjection)
-        2. Conv1 wrapper: Wraps conv1 with ConvTaskWrapper
-        """
         if self.cfg.model_type == "rcnn":
             # Add first adapter type: block-level adapters on conv2 output
             self._add_block_adapters()
@@ -1960,6 +1915,10 @@ class WHW(nn.Module):
         div_thr = 2 * sum(self.s_div.values()) * self.skip_tau if self.skip_redundant is not None else 2 * sum(self.s_div.values())
 
         cur_used = False
+
+        # Skip if skip_redundant is not configured
+        if self.skip_redundant is None:
+            return True
 
         # Period-based skipping
         if 'period' in self.skip_redundant and self.adaptation_steps % self.skip_period == 0:
