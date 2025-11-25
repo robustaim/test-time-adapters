@@ -76,7 +76,7 @@ class YOLOTrainer(DetectionTrainer):
         **kwargs
     ):
         self.classes = classes
-        self.train_dataset = train_dataset
+        self.train_dataset = train_dataset if train_dataset is not None else tuple([0])
         self.eval_dataset = eval_dataset
         self.custom_args = args if args is not None else YOLOTrainerArguments()
         self.train_batch = self.custom_args.batch
@@ -87,7 +87,7 @@ class YOLOTrainer(DetectionTrainer):
         overrides = {k: v for k, v in vars(self.custom_args).items()}
         overrides['model'] = ""  # placeholder for model path
         overrides['resume'] = False
-        overrides['data'] = self.train_dataset.data if self.train_dataset is not None else self.eval_dataset.data
+        overrides['data'] = self.train_dataset.data if train_dataset is not None else self.eval_dataset.data
         if eval_dataset is not None:
             overrides['conf'] = eval_dataset.confidence_threshold
             overrides['iou'] = eval_dataset.iou_threshold
