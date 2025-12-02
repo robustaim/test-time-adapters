@@ -148,7 +148,7 @@ class DetectionEvaluator:
                                 ])
                                 targets_list.extend([Detections(
                                     xyxy=(box_convert(label['boxes'], "cxcywh", "xyxy") * label['orig_size'].flip(0).repeat(2)).cpu().float().numpy(),
-                                    class_id=label['class_labels'].cpu().float().numpy(),
+                                    class_id=label['class_labels'].cpu().long().numpy(),
                                 ) for label in batch['labels']])
                             case _:
                                 raise ValueError(f"Unsupported model provider: {model.model_provider}")
