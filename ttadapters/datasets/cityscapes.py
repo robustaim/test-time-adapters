@@ -88,7 +88,7 @@ class CityScapesDataset(BaseDataset):
 
     @classmethod
     def download(cls, root: str, force: bool = False, silent: bool = False):
-        """Automatically download CityScapes dataset"""
+        """Automatic download for CityScapes dataset"""
         root_path = Path(root)
 
         if force:
@@ -144,6 +144,11 @@ class CityScapesDataset(BaseDataset):
                     package_names=[package],
                     destination_path=str(root_path),
                     resume=True
+                )
+                utils.extract_archive(
+                    from_path=str(root_path / package),
+                    to_path=str(root_path),
+                    remove_finished=True
                 )
             except Exception as e:
                 raise RuntimeError(
