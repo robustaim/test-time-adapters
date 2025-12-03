@@ -89,7 +89,7 @@ except ImportError:
 
 
     LOGGER = None
-    get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results = [lambda: None] * 7
+    get_cfg, build_dataloader, Instances, Compose, v8_transforms, LetterBox, Format, Results = [lambda: None] * 8
 
     YOLODataset = DummyDummy
     DetectionModel = DummyDetectionModel
