@@ -52,7 +52,7 @@ class DetectionEvaluator:
         if reset:
             try:
                 model.reset_adaptation()
-            except NotImplementedError:
+            except (NotImplementedError, AttributeError):
                 print("WARNING: reset_adaptation() is not implemented for this model. Assuming the evaluation is running with deep-copy mode.")
                 model = copy.deepcopy(model)
 
