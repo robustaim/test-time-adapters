@@ -283,7 +283,7 @@ class YOLODataPreparation(DataPreparation):
             # CHW (RGB) -> CHW (BGR)
             image = image[[2, 1, 0], :, :]  # R(0), G(1), B(2) -> B(2), G(1), R(0)
             # CHW (BGR) -> HWC (BGR)
-            image = image.permute(1, 2, 0).mul(255).byte().numpy()
+            image = image.permute(1, 2, 0).mul(255).byte().numpy()  # (0~255)
 
         # Convert bbox to numpy and ensure XYXY format
         if isinstance(bbox, BoundingBoxes):
@@ -319,6 +319,9 @@ class YOLODataPreparation(DataPreparation):
         # Apply YOLO augmentation
         transformed = self._augmentation(yolo_data)
 
+        # Normalize image (convert from OpenCV format to float tensor)
+        transformed['img'] = transformed['img'].to(torch.float32) / 255.0
+
         # Correct ratio_pad
         if 'ratio_pad' in transformed and transformed['ratio_pad'] is not None:
             ori_h, ori_w = transformed['ori_shape']
@@ -330,7 +333,7 @@ class YOLODataPreparation(DataPreparation):
 
             transformed['ratio_pad'] = ((r, r), (left, top))  # ((ratio, ratio), (pad_x, pad_y))
 
-        # Flag normalized
+        # Flag label is normalized
         transformed['normalized'] = self._do_label_normalize
 
         if len(data) == 1:
