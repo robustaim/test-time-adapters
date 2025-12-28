@@ -83,6 +83,11 @@ class YOLOTrainer(DetectionTrainer):
         self.eval_batch = self.custom_args.val_batch
         del self.custom_args.val_batch  # yolo does not accept val_batch
 
+        # Block rect=True usage as it is incompatible with DataPreparation (fixed Square padding)
+        if self.custom_args.rect:
+            LOGGER.warning("YOLOTrainer: 'rect=True' is ignored/blocked because DataPreparation enforces Square padding. Setting rect=False.")
+            self.custom_args.rect = False
+
         # Convert args to YOLO cfg format
         overrides = {k: v for k, v in vars(self.custom_args).items()}
         overrides['model'] = ""  # placeholder for model path
