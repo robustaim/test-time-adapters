@@ -96,7 +96,7 @@ class DetectionEvaluator:
                                 case ModelProvider.Detectron2:
                                     outputs = model(batch)
                                 case ModelProvider.Ultralytics:
-                                    outputs = model(batch['img'])
+                                    outputs = model(batch['img'])[0]  # Extract predictions from (predictions, aux_outputs)
                                 case ModelProvider.HuggingFace:
                                     outputs = model(**batch)
                                 case _:
