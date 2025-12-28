@@ -356,20 +356,17 @@ class YOLODataPreparation(DataPreparation):
         return YOLODataset.collate_fn(batch)
 
     def post_process(self, outputs: torch.Tensor, batch: dict, names: dict[int, str]) -> tuple[list[Results], list[dict]]:
-        if hasattr(self, "_postprocess_namespace"):
-            namespace = self._postprocess_namespace
-        else:
-            namespace = self._postprocess_namespace = SimpleNamespace()
-            namespace.args = SimpleNamespace()
-            namespace.args.conf = self.confidence_threshold
-            namespace.args.iou = self.iou_threshold
-            namespace.args.max_det = self.max_detection
-            namespace.args.nc = len(self.classes)
-            namespace.args.single_cls = len(self.classes) == 1
-            namespace.args.agnostic_nms = False
-            namespace.args.task = "detect"
-            namespace.end2end = False
-            namespace.device = torch.device("cpu")
+        namespace = SimpleNamespace()
+        namespace.args = SimpleNamespace()
+        namespace.args.conf = self.confidence_threshold
+        namespace.args.iou = self.iou_threshold
+        namespace.args.max_det = self.max_detection
+        namespace.args.nc = len(self.classes)
+        namespace.args.single_cls = len(self.classes) == 1
+        namespace.args.agnostic_nms = False
+        namespace.args.task = "detect"
+        namespace.end2end = False
+        namespace.device = torch.device("cpu")
 
         results = []
         processed_batch = []
@@ -379,18 +376,22 @@ class YOLODataPreparation(DataPreparation):
             predn = DetectionValidator._prepare_pred(namespace, pred)
 
             no_pred = predn['cls'].shape[0] == 0
-            if no_pred:
-                continue
-
-            predn_scaled = DetectionValidator.scale_preds(namespace, predn, pbatch)
             pbatch_scaled = DetectionValidator.scale_preds(namespace, pbatch, pbatch)
 
-            results.append(Results(
-                np.zeros(pbatch['imgsz'], dtype=np.uint8),
+            if no_pred:
+                boxes_tensor = torch.empty((0, 6))
+            else:
+                predn_scaled = DetectionValidator.scale_preds(namespace, predn, pbatch)
+                boxes_tensor = torch.cat([predn_scaled['bboxes'], predn_scaled['conf'].unsqueeze(-1), predn_scaled['cls'].unsqueeze(-1)], dim=1)
+
+            result = Results(
+                np.zeros(tuple(pbatch['ori_shape'][::-1]) + (3,), dtype=np.uint8),  # (W, H, C)
                 path=None,
                 names=names,
-                boxes=torch.cat([predn_scaled['bboxes'], predn_scaled['conf'].unsqueeze(-1), predn_scaled['cls'].unsqueeze(-1)], dim=1),
-            ))
+                boxes=boxes_tensor,
+            )
+
+            results.append(result)
             processed_batch.append(pbatch_scaled)
         return results, processed_batch
 
