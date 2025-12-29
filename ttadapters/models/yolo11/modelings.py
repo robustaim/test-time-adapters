@@ -97,6 +97,7 @@ class YOLOTrainer(DetectionTrainer):
             overrides['conf'] = eval_dataset.confidence_threshold
             overrides['iou'] = eval_dataset.iou_threshold
             overrides['imgsz'] = eval_dataset.img_size
+            eval_dataset.collate_fn = YOLODataset.collate_fn
         else:
             overrides['imgsz'] = train_dataset.img_size
         if train_dataset is None:  # disable saving if no training dataset
@@ -106,6 +107,8 @@ class YOLOTrainer(DetectionTrainer):
             overrides['name'] = None
             overrides['val'] = True
             overrides['batch'] = 1  # prevent exception cased from auto_batch
+        else:
+            train_dataset.collate_fn = YOLODataset.collate_fn
 
         # Initialize parent DetectionTrainer
         self.epoch = 0
@@ -323,9 +326,6 @@ class YOLODataPreparation(DataPreparation):
 
         # Apply YOLO augmentation
         transformed = self._augmentation(yolo_data)
-
-        # Normalize image (convert from OpenCV format to float tensor)
-        transformed['img'] = transformed['img'].to(torch.float32) / 255.0
 
         # Correct ratio_pad
         if 'ratio_pad' in transformed and transformed['ratio_pad'] is not None:
