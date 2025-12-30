@@ -13,19 +13,20 @@ dependencies = [
     "numpy>=2.3.1",
     "opencv-python ; platform_system != 'Linux'",
     "opencv-python-headless ; platform_system == 'Linux'",
-    "supervision>=0.25.1",
+    "supervision>=0.27.0",
     "torchinfo>=1.8.0",
     "cityscapesscripts>=2.2.4",
     "imagecorruptions>=1.1.2",
     "shift-dev",
 
-    "notebook>=7.4.4",
-    "jupyterlab>=4.4.4",
-    "ipywidgets>=8.1.7",
+    "notebook>=7.5.1",
+    "jupyterlab>=4.5.1",
+    "ipywidgets>=8.1.8",
     "tqdm>=4.67.1",
-    "wandb>=0.21.0",
+    "wandb>=0.23.1",
     "gdown>=5.2.0",
-    "hf-xet>=1.1.10"
+    "hf-xet>=1.2.0",
+    "filetype>=1.2.0",
 ]
 [project.optional-dependencies]
 torch = [
