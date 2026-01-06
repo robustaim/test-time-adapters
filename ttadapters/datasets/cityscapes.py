@@ -360,7 +360,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
     IMAGE_FILE_SUFFIX = "leftImg8bit"
     ANNOTATION_FILE_SUFFIX = "gtFine_polygons"
 
-    class ContinuousSubsetType(Enum):
+    class CorruptionType(Enum):
         DAYTIME_TO_NIGHT = "daytime_to_night"
         CLEAR_TO_FOGGY = "clear_to_foggy"
         CLEAR_TO_RAINY = "clear_to_rainy"
