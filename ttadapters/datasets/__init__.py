@@ -11,6 +11,10 @@ from .cityscapes import (
     CityScapesDataset, CityScapesDatasetForObjectDetection, CityScapesCorruptedDatasetForObjectDetection,
     CityScapesDiscreteDatasetForObjectDetection, CityScapesContinuousDatasetForObjectDetection
 )
+from .acdc import (
+    ACDCDataset, ACDCDatasetForObjectDetection,
+    ACDCDatasetForPanopticSegmentation, ACDCDatasetForSemanticSegmentation
+)
 
 from .base import BaseDataset, DatasetHolder, DataLoaderHolder, DataPreparation
 from . import scenarios

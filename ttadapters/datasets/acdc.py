@@ -2,46 +2,75 @@ from typing import Callable, Optional
 from collections import defaultdict
 from enum import Enum
 from os import path
+import json
 
 from torchvision import datasets
-import numpy as np
+from torchvision.io import read_image, ImageReadMode
+from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
 
 from .base import BaseDataset
 
 
-class ACDCDataset(datasets.ImageFolder, BaseDataset):
+class ACDCDataset(BaseDataset):
     download_method = datasets.utils.download_and_extract_archive
     extract_method = datasets.utils.extract_archive
     base_url = "https://acdc.vision.ee.ethz.ch/api/getPackageUri/"
     download_urls = dict(
         detection=dict(
-            id="6436eab79880d97633275d1b",
             name="gt_detection_trainval.zip",
             directory="gt_detection",
             description="Ground-truth bounding box annotations for object detection for train and val sets (2006 images)",
         ),
+        detection_ref=dict(
+            name="gt_detection_trainval_ref.zip",
+            directory="gt_detection",
+            description="Ground-truth bounding box annotations for object detection for half of train_ref and val_ref sets (1003 normal-condition images)",
+        ),
         panoptic_segmentation=dict(
-            id="6436ec0f9880d97633275d71",
             name="gt_panoptic_trainval.zip",
             directory="gt_panoptic",
             description="Ground-truth annotations  for panoptic segmentation for train and val sets (2006 images)",
         ),
+        panoptic_segmentation_ref=dict(
+            name="gt_panoptic_trainval_ref.zip",
+            directory="gt_panoptic",
+            description="Ground-truth annotations for panoptic segmentation for half of train_ref and val_ref sets (1003 normal-condition images)",
+        ),
         semantic_segmentation=dict(
-            id="6436eeae9880d97633275dc9",
             name="gt_trainval.zip",
             directory="gt",
             description="Ground-truth annotations for semantic segmentation and uncertainty-aware semantic segmentation for train and val sets (2006 images)",
         ),
+        semantic_segmentation_ref=dict(
+            name="gt_trainval_ref.zip",
+            directory="gt",
+            description="Ground-truth annotations for semantic segmentation for half of train_ref and val_ref sets (1003 normal-condition images)",
+        ),
         images=dict(
-            id="6436f2259880d97633275dfc",
             name="rgb_anon_trainvaltest.zip",
             directory="rgb_anon",
             description="Anonymized adverse-condition images for train, val, and test sets distributed evenly among fog, night, rain, and snow (4006 images) and anonymized corresponding normal-condition images for train, val, and test sets (4006 images)",
         )
     )
+    rgb_load_path = "rgb_anon"
+    target_load_path = "gt_detection"
+    target_json_prefix = "instancesonly"
     dataset_name = "ACDC"
 
-    class SubsetType(Enum):
+    categories = [
+        {'id': 24, 'name': 'person', 'supercategory': 'human'},
+        {'id': 25, 'name': 'rider', 'supercategory': 'human'},
+        {'id': 26, 'name': 'car', 'supercategory': 'vehicle'},
+        {'id': 27, 'name': 'truck', 'supercategory': 'vehicle'},
+        {'id': 28, 'name': 'bus', 'supercategory': 'vehicle'},
+        {'id': 31, 'name': 'train', 'supercategory': 'vehicle'},
+        {'id': 32, 'name': 'motorcycle', 'supercategory': 'vehicle'},
+        {'id': 33, 'name': 'bicycle', 'supercategory': 'vehicle'}
+    ]  # TODO: dddd
+    classes = []
+    class_ids = []
+
+    class CorruptionType(Enum):
         FOG = "fog"
         NIGHT = "night"
         RAIN = "rain"
@@ -50,54 +79,47 @@ class ACDCDataset(datasets.ImageFolder, BaseDataset):
 
     def __init__(
         self, root: str, force_download: bool = False,
-        train: bool = True, valid: bool = False,
-        transform: Optional[Callable] = None,
-        target_transform: Optional[Callable] = None,
-        transforms: Optional[Callable] = None
+        train: bool = True, valid: bool = False, corruption_type: CorruptionType = CorruptionType.FOG,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
+        super().__init__()
         self.root = path.join(root, self.dataset_name)
         self.download(self.root, force=force_download)
         self.train, self.valid = train, valid
 
-        if train:
-            self.root = path.join(self.root, "val") if valid else path.join(self.root, "train")
-        else:
-            self.root = path.join(self.root, "test")
-
-        super().__init__(root=self.root)
         self.transform = transform
         self.target_transform = target_transform
         self.transforms = transforms
-        self._load_data()
 
-    def _load_data(self):
-        sequences = defaultdict(list)
-        for idx, (img_path, _) in enumerate(self.samples):
-            seq_name = path.dirname(img_path)
-            sequences[seq_name].append((idx, img_path))
-
-        for seq_name in sequences:
-            sequences[seq_name].sort(key=lambda x: x[1])
-
-        targets = []
-        for seq_name, frames in sequences.items():
-            gt_path = path.join(seq_name, 'groundtruth.txt')
-            if path.exists(gt_path):
-                targets.extend(np.loadtxt(gt_path, delimiter=','))
-        if self.train:
-            self.samples = [(s[0], t) for s, t in zip(self.samples, targets)]
+        self.loader = lambda path: read_image(path, mode=ImageReadMode.RGB)
+        if train:
+            if valid:
+                self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "val", self.target_load_path])
+            else:
+                self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "train", self.target_load_path])
         else:
-            start = (self.samples[0], targets)
-            follows = [(s[0], [0, 0, 0, 0]) for s in self.samples[1:]]
-            self.samples = [start] + follows
+            self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "test", "image_info"])
+        self.samples, self.raw = self.load_data(self.raw_path)
+
+    def load_data(self, raw_path) -> tuple[list, list]:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            targets = json.load(f)
+
+        samples = []
 
     @classmethod
-    def download(cls, root: str, force: bool = False, download_key=("images", "detection", "panoptic_segmentation", "semantic_segmentation")):
+    def download(
+        cls, root: str, force: bool = False, download_key=(
+            "images", "detection", "detection_ref",
+            "panoptic_segmentation", "panoptic_segmentation_ref",
+            "semantic_segmentation", "semantic_segmentation_ref"
+        )
+    ):
         print(f"INFO: Downloading '{cls.dataset_name}' from https://acdc.vision.ee.ethz.ch to {root}...")
         for key in download_key:
-            file_name = cls.download_urls[key]["name"]
-            download_url = cls.base_url + cls.download_urls[key]["id"]
-            extract_dir = cls.download_urls[key]["directory"]
+            file_name = cls.download_urls[key]['name']
+            download_url = cls.base_url + cls.download_urls[key]['name']
+            extract_dir = cls.download_urls[key]['directory']
             downloaded = path.isfile(path.join(root, file_name))
             extracted = path.isdir(path.join(root, extract_dir))
             if force or not (downloaded or extracted):
@@ -122,12 +144,18 @@ class ACDCDataset(datasets.ImageFolder, BaseDataset):
 
 
 class ACDCDatasetForObjectDetection(ACDCDataset):
-    pass
+    rgb_load_path = "rgb_anon"
+    target_load_path = "gt_detection"
+    target_json_prefix = "instancesonly"
 
 
 class ACDCDatasetForPanopticSegmentation(ACDCDataset):
-    pass
+    rgb_load_path = "rgb_anon"
+    target_load_path = "gt_panoptic"
+    target_json_prefix = "instancesonly"  # TODO: correct this
 
 
 class ACDCDatasetForSemanticSegmentation(ACDCDataset):
-    pass
+    rgb_load_path = "rgb_anon"
+    target_load_path = "gt"
+    target_json_prefix = "instancesonly"  # TODO: correct this
