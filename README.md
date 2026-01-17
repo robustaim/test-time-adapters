@@ -49,26 +49,12 @@ A Ready-to-Go Playground for Test-time Learning Methods
 - [ ] Consistency Regularization
   - [x] Temporal EMA (Mean-Teacher, Self-Training/Semi-Supervised)
   - [ ] Teacher-Student Augmentation Consistency (TeST, Self-Training/Semi-Supervised)
-  - [x] Temporal Consistency Regularization (APT, Self-Supervised)
 - [x] Sample Selection
   - [x] Active Learning (ActMAD)
   - [ ] De-biasing (DeYO)
 - [ ] Parameter-Efficient Adaptation
   - [x] Low-Rank Adaptation (WHW / When, Where, and How to Adapt?)
   - [ ] Sensitivity-Guided Pruning (SGP)
-
-### APT: Adaptive Plugin for Test-time Adaptation via Temporal Dependency under Continual Domain Shift
-Pluggable Test-time Adapter Implementations
-
-> This suggests a pluggable implementation of Test-Time Adaptation module (APT).
-
-> It is designed to be easily integrated into existing Transformer-family models (but not limited to), enhancing their capabilities to adapt during inference time under the distribution shift.
-<img src="./docs/images/apt_structure.svg">
-
-### Performance Metrics
-| Method | Dataset | Metric      | Value |
-|--------|---------|-------------|------|
-| APT    | SHIFT   | mAP (50-95) | ???  |
 
 
 ## Datasets
