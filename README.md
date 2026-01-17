@@ -55,6 +55,36 @@ A Ready-to-Go Playground for Test-time Learning Methods
 - [ ] Parameter-Efficient Adaptation
   - [x] Low-Rank Adaptation (WHW / When, Where, and How to Adapt?)
   - [ ] Sensitivity-Guided Pruning (SGP)
+- [x] Layer-wise Supervision (Cascaded, Not End-to-End)
+  - [x] Cascaded Norm Adaptation (Self-Supervised)
+
+### Methods by Adaptation Level
+- Model-Level Adaptation
+  - Batch Statistics Replacement
+  - Entropy Minimization
+  - Parameter-Efficient Adaptation
+
+- Feature-Level Adaptation
+  - Auxiliary Task
+  - Consistency Regularization
+
+- Input-Level Adaptation
+  - Input Transformation Module (ITM)
+  - Learning to Normalize (Cascaded Norm Adaptation)
+
+- Sample-Level Adaptation
+  - Sample Selection
+
+### Cascaded Norm Adaptation (CascadedNorm)
+
+> This suggests to adapt the input and features of the model to the target domain.
+
+<!-- <img src="./docs/images/apt_structure.svg"> -->
+
+### Performance Metrics
+| Method       | Dataset | Metric      | Value |
+|--------------|---------|-------------|-------|
+| CascadedNorm | SHIFT   | mAP (50-95) | ???   |
 
 
 ## Datasets
