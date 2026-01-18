@@ -3,6 +3,7 @@ from typing import Literal
 
 import torch
 from torch import nn, optim
+from muon import Muon, MuonWithAuxAdam
 
 from ..models.base import BaseModel, ModelProvider, DataPreparation
 
@@ -27,8 +28,10 @@ class MethodContainer(dict):
 class AdaptationConfig:
     adaptation_name: str = "AdaptationEngine"
     dataset_name: str = ""
-    optim: Literal["SGD", "Adam"] = "SGD"
+    optim: Literal["SGD", "Adam", "AdamW", "Muon", "MuonWithAuxAdam"] = "SGD"
     adapt_lr: float = 1e-4
+    momentum: float = 0.9
+    verbose: bool = True
 
 
 class AdaptationEngine(BaseModel):
@@ -53,6 +56,8 @@ class AdaptationEngine(BaseModel):
         self.DataPreparation = base_model.DataPreparation
         self.Trainer = base_model.Trainer
 
+        self._pre_init()
+
         self.base_model = base_model
         self.base_state = {key: value.cpu() for key, value in base_model.state_dict().items()}
         self.base_grad_state = {key: value.requires_grad for key, value in self.base_state.items()}
@@ -63,12 +68,24 @@ class AdaptationEngine(BaseModel):
         self._dtype = first_param.dtype
         self._loss_function = None
         self._optimizer = None
+        self._stats = {}
+        self._reset_stats()
+
+        self._post_init()
+
+    def _pre_init(self):
+        """Required init tasks before base model registration"""
+        pass
+
+    def _post_init(self):
+        """Required init tasks after base model registration"""
+        pass
 
     @property
-    def device(self):
+    def device(self) -> torch.device:
         return self._device
 
-    def to(self, *args, **kwargs):
+    def to(self, *args, **kwargs) -> Self:
         result = super().to(*args, **kwargs)
         try:
             self._device = torch.device(*args, **kwargs)
@@ -81,21 +98,39 @@ class AdaptationEngine(BaseModel):
         return result
 
     @property
-    def loss_function(self):
+    def loss_function(self) -> nn.Module:
         if self._loss_function is None:
             self._loss_function = self.loss_class().to(self.device)
         return self._loss_function
 
-    def online_parameters(self):
+    def online_parameters(self) -> Iterator[nn.Parameter]:
         return self.base_model.parameters()
 
     @property
-    def optimizer(self):
+    def optimizer(self) -> optim.Optimizer:
         if self._optimizer is None:
-            self._optimizer = optim.SGD(self.online_parameters(), lr=self.config.adapt_lr)
+            if self.config.optim == "SDG":
+                self._optimizer = optim.SGD(
+                    self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
+                )
+            if self.config.optim == "Adam":
+                self._optimizer = optim.Adam(self.online_parameters(), lr=self.config.adapt_lr)
+            elif self.config.optim == "AdamW":
+                self._optimizer = optim.AdamW(self.online_parameters(), lr=self.config.adapt_lr)
+            elif self.config.optim == "Muon":
+                self._optimizer = Muon(
+                    self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
+                )
+            elif self.config.optim == "MuonWithAuxAdam":
+                self._optimizer = MuonWithAuxAdam(
+                    self.online_parameters(),
+                    lr=self.config.adapt_lr, adam_lr=self.config.adapt_lr / 10, momentum=self.config.momentum
+                )
+            else:
+                raise NotImplementedError(f"Optimizer {self.config.optim} cannot be recognized or is not implemented yet.")
         return self._optimizer
 
-    def online(self, mode=True):
+    def online(self, mode=True) -> Self:
         """Online learning mode (test-time adaptation)"""
         self.adapting = mode
 
@@ -119,20 +154,42 @@ class AdaptationEngine(BaseModel):
                 module.online(mode)
         return self
 
-    def offline(self):
+    def offline(self) -> Self:
         return self.online(False)
 
+    @property
+    def stats(self) -> dict:
+        return self._stats
+
+    def _reset_stats(self):
+        self._stats = {}
+
     def fit(self, *args, **kwargs):
-        """Fitting adaptation engine to base model"""
+        """
+        Fitting adaptation engine to base model
+        Implement this method if the adaptation method requires few-shot pretraining before adaptation
+        """
         pass
 
-    def reset(self):
-        """Reset model state"""
+    def reset(self, reset_stats=False) -> dict | None:
+        """
+        Reset model state (Return to basemodel state to get new experiment setup)
+        Required for StandardTTA, GradualTTA Scenarios
+        """
         self.base_model.load_state_dict(self.base_state)
         self.online(self.adapting)
         self.to(self.device)
         self.to(self.dtype)
-        self.optimizer.zero_grad()
+        try:
+            self.optimizer.zero_grad()
+        except:
+            pass
+        if reset_stats:
+            current_stats = self._stats
+            self._reset_stats()
+            return current_stats
+        else:
+            return None
 
     def forward(self, *args, **kwargs):
         return self.base_model(*args, **kwargs)
