@@ -1,5 +1,5 @@
+from typing import Literal, Self, Iterator
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 from torch import nn, optim
