@@ -1,418 +1,558 @@
-"""
-CascadedNorm: Input Transformation for BN Statistics Alignment
+""" CascadedNorm: Input Transformation for BN Statistics Alignment """
 
-Test-time adaptation that transforms input images to align with source BN statistics.
-
-Key Innovation:
-    Instead of adapting norm layers, we adapt the INPUT to match what the frozen
-    BN layers expect (their running_mean/var from source domain training).
-
-Mathematical Foundation:
-    1. Transform input: x̃ = T(x; θ)  where T is differentiable histogram stretching
-    2. Forward through model: features pass through BN layers
-    3. Compute batch statistics at each BN: μ_batch, σ²_batch
-    4. Loss: L = Σ_i ||μ_batch^i - μ_source^i||² + ||σ²_batch^i - σ²_source^i||²
-    5. Update θ via backprop (BN layers stay frozen)
-
-Pipeline:
-    [Input] → [Transform T(θ)] → [Frozen Model with BN] → [Output]
-                    ↑
-              Update via BN alignment loss
-
-Advantages:
-    1. Architecture-agnostic (works with any model with BN)
-    2. BN layers stay completely frozen (use running_mean/var)
-    3. Only transform parameters are learned (3 params)
-    4. Single forward pass per step
-    5. No source data needed (BN.running_mean/var contains source info)
-
-Author: CascadedNorm Team
-Date: 2026-01-13
-Version: 2.0 (Input Transform Alignment)
-"""
+from typing import Optional, List, Literal
+from dataclasses import dataclass
 
 import torch
-from torch import nn, optim
+from torch import nn
 import torch.nn.functional as F
-import numpy as np
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple, Literal
 
 from ..base import AdaptationEngine, AdaptationConfig
 from ...models.base import BaseModel
 
 
-# =============================================================================
-# Input Transformation Modules
-# =============================================================================
+@dataclass
+class CascadedNormConfig(AdaptationConfig):
+    """
+    Configuration for CascadedNorm adaptation.
+
+    Adaptation Methods:
+    ------------------
+    1. Gamma Clamp (default)
+        - Standard gamma correction with percentile-based clipping
+        - use_percentile=False: Simple clipping
+        - use_percentile=True: Percentile-adaptive clipping
+
+    2. LUT (Look-Up Table)
+        - LUT-based transformation
+        - lut_monotonic=True: Enforce monotonic constraint
+        - lut_ema=True: Use exponential moving average
+        - lut_reg=True: Add smoothness regularization
+
+    Cascade Modes:
+    -------------
+    1. 'all': Use all Normalization layers (default)
+    2. 'single': Use only last Normalization layer (fastest)
+    3. 'selected': Use specified Normalization layers by indices
+
+    Examples:
+    --------
+    # Basic gamma clamp
+    config = CascadedNormConfig(
+        adaptation_method='gamma_clamp',
+        cascade_mode='single'
+    )
+
+    # Gamma clamp with percentile
+    config = CascadedNormConfig(
+        adaptation_method='gamma_clamp',
+        use_percentile=True,
+        cascade_mode='all'
+    )
+
+    # LUT with all options
+    config = CascadedNormConfig(
+        adaptation_method='lut',
+        lut_monotonic=True,
+        lut_ema=True,
+        lut_reg=True,
+        cascade_mode='selected',
+        cascade_indices=[0, 2, 4]
+    )
+    """
+    adaptation_name: str = "CascadedNormEngine"
+
+    # ==================== Adaptation Method ====================
+    adaptation_method: Literal["gamma_clamp", "lut"] = "gamma_clamp"
+
+    # Gamma Clamp options
+    use_percentile: bool = False
+    percentile_value: float = 95.0
+
+    # LUT options
+    lut_monotonic: bool = False  # Enforce monotonic constraint
+    lut_ema: bool = False        # Use exponential moving average
+    lut_reg: bool = False        # Add regularization loss
+    lut_size: int = 256          # LUT table size (8bit)
+    lut_ema_momentum: float = 0.9
+    lut_reg_weight: float = 0.01
+
+    # ==================== Cascade Mode ====================
+    cascade_mode: Literal["all", "single", "single_last", "selected"] = "all"
+    cascade_indices: Optional[List[int]] = None
+
+    # ==================== Transformation ====================
+    temperature: float = 0.01  # For differentiable percentile
+
 
 class DifferentiableHistogramStretcher(nn.Module):
-    """Differentiable histogram stretching (from FrequencyTTA)."""
+    """
+    Vectorized differentiable histogram stretching for high-precision statistics.
+    Optimized for resolutions like 800x1280 (~1M pixels).
+    """
 
     def __init__(self, temperature: float = 0.01):
         super().__init__()
         self.temperature = temperature
 
     def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        """Differentiable percentile approximation."""
-        x_flat = x.flatten()
-        n = x_flat.shape[0]
-        p = p.to(x.device)
+        """
+        Vectorized differentiable percentile approximation using all pixels.
 
-        idx = (p / 100.0) * (n - 1)
-        indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
+        Args:
+            x (torch.Tensor): Input images of shape (B, C, H, W).
+            p (torch.Tensor): Target percentile value (scalar).
 
-        sorted_x, _ = torch.sort(x_flat)
-        return (weights * sorted_x).sum()
+        Returns:
+            torch.Tensor: Calculated percentiles of shape (B, C).
+        """
+        B, C, H, W = x.shape
+        # Flatten spatial dimensions to (B, C, 1024000)
+        x_flat = x.view(B, C, -1)
+        N = x_flat.shape[-1]
 
-    def stretch_channel(self, channel, clip_low, clip_high, gamma):
-        """Apply stretching to single channel with gamma correction."""
-        low_val = self.soft_percentile(channel, clip_low)
-        high_val = self.soft_percentile(channel, clip_high)
+        # Calculate target index in the sorted array
+        idx = (p / 100.0) * (N - 1)
 
+        # Softmax-based weights around the target index
+        # This handles the differentiability of the percentile selection
+        indices = torch.arange(N, device=x.device, dtype=x.dtype)
+        weights = F.softmax(-(indices - idx).abs() / (self.temperature * N), dim=-1)
+        weights = weights.view(1, 1, -1)
+
+        # Sort all pixels along the flattened spatial dimension
+        # Modern GPUs handle 1M elements efficiently with CUDA sort
+        sorted_x, _ = torch.sort(x_flat, dim=-1)
+
+        # Weighted sum returns the approximate percentile value per channel: (B, C)
+        return (weights * sorted_x).sum(dim=-1)
+
+    def forward(self, image: torch.Tensor, clip_low: torch.Tensor, clip_high: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+        """
+        Apply vectorized stretching and gamma correction to the entire batch.
+        """
+        # Ensure 4D shape (B, C, H, W) even for single image input
+        if image.dim() == 3:
+            image = image.unsqueeze(0)
+
+        B, C, H, W = image.shape
+
+        # 1. Compute precise percentiles for all channels simultaneously
+        low_val = self.soft_percentile(image, clip_low)
+        high_val = self.soft_percentile(image, clip_high)
+
+        # 2. Reshape for broadcasting to the spatial dimensions
+        low_val_bc = low_val.view(B, C, 1, 1)
+        high_val_bc = high_val.view(B, C, 1, 1)
+
+        # 3. Differentiable Clipping using Softplus to keep gradients alive
         scale = 50.0
-        clipped = low_val + F.softplus((channel - low_val) * scale) / scale
-        clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
+        clipped = low_val_bc + F.softplus((image - low_val_bc) * scale) / scale
+        clipped = high_val_bc - F.softplus((high_val_bc - clipped) * scale) / scale
 
-        range_val = high_val - low_val + 1e-6
-        normalized = (clipped - low_val) / range_val
-
-        # Apply gamma correction (nonlinear)
+        # 4. Normalization to [0, 1] and Gamma Correction
+        range_val = high_val_bc - low_val_bc + 1e-6
+        normalized = (clipped - low_val_bc) / range_val
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
 
+        # 5. Scale back to [0, 255]
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image, clip_low, clip_high, gamma):
-        """Apply stretching to image with gamma correction."""
-        C = image.shape[0]
-        stretched = torch.zeros_like(image)
 
-        for c in range(C):
-            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma)
+class GammaTransform(nn.Module):
+    """Learnable gamma parameters for CascadedNorm"""
 
-        return stretched
-
-
-class InputTransformController(nn.Module):
-    """Learnable parameters for histogram stretching with gamma correction."""
-
-    def __init__(self):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__()
+        self.config = config
+
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+
+        # Percentile tracking
+        if self.config.use_percentile:
+            self.register_buffer('percentile_history', torch.zeros(100, 3))  # RGB
+            self.register_buffer('history_idx', torch.tensor(0, dtype=torch.long))
+
+        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self):
-        """Get constrained parameters."""
-        clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
-        clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
+        """Forward for gamma clamp."""
+        clip_low = torch.sigmoid(self.clip_low) * 10
+        clip_high = 90 + torch.sigmoid(self.clip_high) * 10
+        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5
+
+        # Apply percentile
+        if self.config.use_percentile and self.training:
+            gamma = self._apply_percentile_adaptation(gamma)
+
         return clip_low, clip_high, gamma
 
+    def _apply_percentile_adaptation(self, gamma):
+        """Apply percentile-based adaptation."""
+        idx = self.history_idx.item()
+        self.percentile_history[idx] = gamma.detach()
+        self.history_idx.copy_((idx + 1) % 100)
 
-# =============================================================================
-# BN Statistics Management
-# =============================================================================
+        valid_size = min(idx + 1, 100)
+        if valid_size > 10:
+            valid_history = self.percentile_history[:valid_size]
+            gamma = torch.quantile(valid_history,
+                self.config.percentile_value / 100.0, dim=0)
 
-class NormStatisticsExtractor:
-    """Extract and cache BN/LN layer references and source statistics."""
+        return gamma
 
-    def __init__(self, model: nn.Module):
-        self.norm_layers: List[nn.Module] = []
-        self.norm_types: List[str] = []  # 'bn' or 'ln'
+
+class LUTTransform(nn.Module):
+    """Learnable look-up tables for CascadedNorm"""
+
+    def __init__(self, config: CascadedNormConfig):
+        super().__init__()
+        self.config = config
+
+        self.register_buffer('lut_table',
+            torch.linspace(0, 255, self.config.lut_size))
+        self.lut_values = nn.Parameter(
+            torch.linspace(0, 255, self.config.lut_size)
+        )
+
+        # EMA
+        if self.config.lut_ema:
+            self.register_buffer('lut_ema_values',
+                torch.linspace(0, 255, self.config.lut_size))
+
+    def forward(self):
+        """Forward for LUT."""
+        # Enforce monotonic
+        if self.config.lut_monotonic and self.training:
+            self._enforce_monotonic()
+
+        # Return EMA or current values
+        if self.config.lut_ema and self.training:
+            return self.lut_ema_values
+        return self.lut_values
+
+
+class CascadedNorm(nn.Module):
+    """
+    CascadedNorm: Cascaded Input Distribution Normalization
+        by Statistical Norm Layer Alignment
+
+    Learns to normalize input pixel distribution
+    with cascaded layer-wise supervision.
+
+    The term "normalization" refers to distribution alignment
+    between source and target domains.
+    This differs from layer normalization methods (BN, LN)
+    which perform statistical normalization of activations.
+
+    Args:
+        config: CascadedNormConfig with learning parameters
+    """
+
+    def __init__(self, config: CascadedNormConfig):
+        super().__init__()
+
+        self.config = config
+        self.adaptation_method = config.adaptation_method
+
+        if config.adaptation_method == 'gamma_clamp':
+            self.transform_controller = GammaTransform(config)
+        elif config.adaptation_method == 'lut':
+            self.transform_controller = LUTTransform(config)
+
+        self.norm_layers: nn.ModuleList[nn.Module] = nn.ModuleList()
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
-        self._extract_norm_layers(model)
-
-    def _extract_norm_layers(self, model: nn.Module):
-        """Find all BN/LN layers."""
-        for name, module in model.named_modules():
-            if isinstance(module, nn.BatchNorm2d) or "BatchNorm2d" in module.__class__.__name__:
-                self.norm_layers.append(module)
-                self.norm_types.append('bn')
-                # BN: Use running statistics (averaged over channels)
-                self.source_means.append(module.running_mean.mean().clone())
-                self.source_vars.append(module.running_var.mean().clone())
-                print(f"  [BN] Found: {name} ({module.num_features} channels)")
-
-            elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module.__class__.__name__:
-                self.norm_layers.append(module)
-                self.norm_types.append('ln')
-                # LN: Target normalized distribution (mean=0, var=1)
-                self.source_means.append(torch.tensor(0.0))
-                self.source_vars.append(torch.tensor(1.0))
-                print(f"  [LN] Found: {name}")
-
-    def compute_alignment_loss(self) -> torch.Tensor:
-        """Compute alignment loss between batch and source statistics."""
-        total_loss = torch.tensor(0.0, device=self.source_means[0].device)
-
-        for i, (norm_layer, norm_type) in enumerate(zip(self.norm_layers, self.norm_types)):
-            if not hasattr(norm_layer, '_batch_mean') or norm_layer._batch_mean is None:
-                continue
-
-            batch_mean = norm_layer._batch_mean
-            batch_var = norm_layer._batch_var
-
-            source_mean = self.source_means[i].to(batch_mean.device)
-            source_var = self.source_vars[i].to(batch_var.device)
-
-            # For BN with multiple channels, average to scalar
-            if norm_type == 'bn' and batch_mean.ndim > 0:
-                batch_mean = batch_mean.mean()
-                batch_var = batch_var.mean()
-
-            loss_mean = F.mse_loss(batch_mean, source_mean)
-            loss_var = F.mse_loss(batch_var, source_var)
-
-            total_loss = total_loss + loss_mean + loss_var
-
-        return total_loss
 
 
-class NormStatisticsHook:
-    """Hook to collect batch statistics from BN/LN layers."""
+    def hook_fn(module, input, output):
+        # Skip if cache is valid
+        if self._cache_valid and idx in self._stats_cache:
+            self.batch_stats[idx] = self._stats_cache[idx]
+            return
 
-    def __init__(self, norm_types: List[str]):
-        """
-        Args:
-            norm_types: List of 'bn' or 'ln' for each norm layer
-        """
-        self.hooks = []
-        self.norm_types = norm_types
-
-    def register_hooks(self, norm_layers: List[nn.Module]):
-        """Register forward hooks."""
-        for i, norm_layer in enumerate(norm_layers):
-            norm_type = self.norm_types[i]
-            hook = norm_layer.register_forward_hook(
-                lambda module, input, output, nt=norm_type: self._hook_fn(module, input, output, nt)
-            )
-            self.hooks.append(hook)
-
-    def _hook_fn(self, module, input, output, norm_type):
-        """Capture batch statistics."""
         x = input[0]
 
-        if norm_type == 'bn':
-            # BatchNorm: (B, C, H, W) -> channel-wise statistics
-            batch_mean = x.mean(dim=[0, 2, 3])  # [C]
-            batch_var = x.var(dim=[0, 2, 3], unbiased=False)  # [C]
-        else:  # 'ln'
-            # LayerNorm: global statistics
-            batch_mean = x.mean()  # scalar
-            batch_var = x.var(unbiased=False)  # scalar
+        # Compute statistics based on norm type
+        if norm_type in ['bn', 'frozen_bn']:
+            if x.dim() == 4:  # (B, C, H, W)
+                dims = (0, 2, 3)
+            elif x.dim() == 3:  # (B, C, L)
+                dims = (0, 2)
+            else:  # (B, C)
+                dims = (0,)
+            mean = x.mean(dim=dims)
+            var = x.var(dim=dims, unbiased=False)
 
-        module._batch_mean = batch_mean
-        module._batch_var = batch_var
+        elif norm_type == 'ln':
+            if hasattr(module, 'normalized_shape'):
+                dims = tuple(range(-len(module.normalized_shape), 0))
+                mean = x.mean(dim=dims)
+                var = x.var(dim=dims, unbiased=False)
+            else:
+                mean = x.mean()
+                var = x.var(unbiased=False)
 
-    def remove_hooks(self):
-        """Remove all hooks."""
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks = []
+        # Cache and store
+        stats = {'mean': mean, 'var': var}
+        self.batch_stats[idx] = stats
+        self._stats_cache[idx] = stats
 
 
-# =============================================================================
-# Configuration and Engine
-# =============================================================================
 
-@dataclass
-class CascadedNormConfig(AdaptationConfig):
-    """Configuration for CascadedNorm."""
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        if self.config.adaptation_method == 'gamma_clamp':
+            clip_low, clip_high, gamma = self.transform_controller()
+            return self.stretcher(img, clip_low, clip_high, gamma)
+        elif self.config.adaptation_method == 'lut':
+            lut_values = self.transform_controller()
+            # Apply LUT
+            img_normalized = (img / 255.0 * (len(lut_values) - 1))
+            img_int = img_normalized.long().clamp(0, len(lut_values) - 1)
+            return lut_values[img_int]
 
-    adaptation_name: str = "CascadedNorm"
-    temperature: float = 0.01
-    param_regularization: float = 0.01
-    optim: Literal["SGD", "Adam"] = "SGD"
-    adapt_lr: float = 1e-3
+    def _enforce_monotonic(self):
+        """Enforce monotonic constraint on LUT."""
+        with torch.no_grad():
+            for i in range(1, len(self.lut_values)):
+                if self.lut_values[i] < self.lut_values[i-1]:
+                    self.lut_values[i].copy_(self.lut_values[i-1])
+
+    def get_lut_regularization(self):
+        """Compute LUT regularization loss."""
+        if not self.config.lut_reg or self.adaptation_method != 'lut':
+            return torch.tensor(0.0, device=self.lut_values.device)
+
+        # Smoothness regularization
+        diff2 = self.lut_values[2:] - 2 * self.lut_values[1:-1] + self.lut_values[:-2]
+        return self.config.lut_reg_weight * (diff2 ** 2).mean()
+
+    def update_lut_ema(self):
+        """Update EMA for LUT."""
+        if self.config.lut_ema and self.training and self.adaptation_method == 'lut':
+            with torch.no_grad():
+                self.lut_ema_values.copy_(
+                    self.config.lut_ema_momentum * self.lut_ema_values +
+                    (1 - self.config.lut_ema_momentum) * self.lut_values
+                )
+
+
+
+    @property
+    def loss(self) -> torch.Tensor:
+        """Compute BN statistics alignment loss (optimized)."""
+        # Collect all statistics in batched tensors
+        batch_means = []
+        batch_vars = []
+        source_means = []
+        source_vars = []
+
+        for stats, src_mean, src_var in zip(
+                self.hook_manager.batch_stats,
+                self.norm_extractor.source_means,
+                self.norm_extractor.source_vars
+        ):
+            if stats['mean'] is not None:
+                # Reduce to scalar for efficiency
+                batch_means.append(stats['mean'].mean())
+                batch_vars.append(stats['var'].mean())
+                source_means.append(src_mean.mean())
+                source_vars.append(src_var.mean())
+
+        # Batched computation (single graph node)
+        if len(batch_means) > 0:
+            batch_means = torch.stack(batch_means)
+            batch_vars = torch.stack(batch_vars)
+            source_means = torch.stack(source_means).to(batch_means.device)
+            source_vars = torch.stack(source_vars).to(batch_vars.device)
+
+            mean_loss = F.mse_loss(batch_means, source_means)
+            var_loss = F.mse_loss(batch_vars, source_vars)
+
+            return mean_loss + var_loss
+        
+        
+
+        # Update EMA if using LUT
+        if self.config.lut_ema:
+            self.transform_controller.update_lut_ema()
+
+        return torch.tensor(0.0, device=self._device)
+
+
 
 
 class CascadedNormEngine(AdaptationEngine):
     """
-    CascadedNorm: Input transformation for BN/LN alignment.
+    Cascaded Norm Adaptation Engine
+    Injects CascadedNorm module into the base model.
 
-    Transforms input to match norm layer source statistics.
-    Works with both BatchNorm and LayerNorm.
+    Supports:
+    - nn.BatchNorm2d / nn.BatchNorm1d / FrozenBatchNorm2d
+    - nn.LayerNorm
+
+    Args:
+        base_model: Pre-trained model
+        config: CascadedNormConfig with learning parameters
+
+    Example:
+        >>> adaptive_model = CascadedNormEngine(base_model, config)
+        >>> otuput = adaptive_model(batch)
     """
-
-    model_name: str = "CascadedNorm"
+    model_name: str = "CascadedNormEngine"
 
     def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
-        super().__init__(base_model, config)
-
+        self.dist_norm = None  # will be overridden by _pre_init()
+        self.dist_norm_state = None
         self.config = config
 
-        # Input transformation
-        self.transform_controller = InputTransformController()
-        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
+        super().__init__(base_model, config)
 
-        # Norm extraction (both BN and LN)
-        print(f"[CascadedNorm] Extracting norm layers...")
-        self.norm_extractor = NormStatisticsExtractor(self.base_model)
-        print(f"[CascadedNorm] Found {len(self.norm_extractor.norm_layers)} norm layers "
-              f"(BN: {self.norm_extractor.norm_types.count('bn')}, "
-              f"LN: {self.norm_extractor.norm_types.count('ln')})")
+    def _pre_init(self):
+        # Transformation modules
+        self.dist_norm = CascadedNorm(self.config)
 
-        # Hook manager
-        self.hook_manager = NormStatisticsHook(self.norm_extractor.norm_types)
-        self.hook_manager.register_hooks(self.norm_extractor.norm_layers)
+    def _post_init(self):
+        self.dist_norm.to(self.device)
+        self.dist_norm.to(self.dtype)
+        self.dist_norm_state = {key: value.requires_grad for key, value in self.dist_norm.items()}
 
-        # Stats
-        self.stats = {'alignment_losses': [], 'transform_params': []}
+        # Extract norm layers
+        if config.verbose:
+            print(f"\n[CascadedNorm] Extracting norm layers...")
+            print(f"  Cascade mode: {config.cascade_mode}")
+            if config.cascade_indices:
+                print(f"  Cascade indices: {config.cascade_indices}")
+
+        if config.verbose:
+            print(f"\n[CascadedNorm] Summary:")
+            print(f"  Total layers: {len(self.norm_extractor.norm_layers)}")
+            print(f"  BN: {self.norm_extractor.norm_types.count('bn')}")
+            print(f"  FrozenBN: {self.norm_extractor.norm_types.count('frozen_bn')}")
+            print(f"  LN: {self.norm_extractor.norm_types.count('ln')}")
+
+    def _extract_norm_layers(self, model: nn.Module):
+        """Find all normalization layers including FrozenBatchNorm."""
+        for name, module in model.named_modules():
+            module_type = type(module).__name__
+
+            # Regular BatchNorm
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                self.norm_layers.append(module)
+                self.norm_types.append('bn')
+                self.source_means.append(module.running_mean.clone())
+                self.source_vars.append(module.running_var.clone())
+                if self.config.verbose:
+                    print(f"  [BN] {name}: {module.num_features} channels")
+
+            # LayerNorm
+            elif isinstance(module, nn.LayerNorm):
+                self.norm_layers.append(module)
+                self.norm_types.append('ln')
+                # LN targets normalized distribution
+                self.source_means.append(torch.tensor(0.0))
+                self.source_vars.append(torch.tensor(1.0))
+                if self.config.verbose:
+                    print(f"  [LN] {name}")
+
+            # FrozenBatchNorm (Detectron2)
+            elif 'FrozenBatchNorm' in module_type or \
+                    ('Norm' in module_type and
+                     hasattr(module, 'weight') and
+                     hasattr(module, 'bias') and
+                     not isinstance(module, nn.LayerNorm)):
+                self.norm_layers.append(module)
+                self.norm_types.append('frozen_bn')
+                # FrozenBN stores stats in weight/bias
+                self.source_means.append(module.weight.clone())
+                self.source_vars.append(module.bias.clone())
+                if self.config.verbose:
+                    print(f"  [FrozenBN] {name}")
+
+    def _filter_by_cascade_mode(self):
+        """Filter layers based on cascade mode."""
+        if self.config.cascade_mode == 'all':
+            pass  # Use all
+
+        elif self.config.cascade_mode == 'single':
+            # Use only last layer
+            if len(self.norm_layers) > 0:
+                self.norm_layers = [self.norm_layers[-1]]
+                self.norm_types = [self.norm_types[-1]]
+                self.source_means = [self.source_means[-1]]
+                self.source_vars = [self.source_vars[-1]]
+
+        elif self.config.cascade_mode == 'selected':
+            # Use selected indices
+            if self.config.cascade_indices is not None:
+                indices = self.config.cascade_indices
+                self.norm_layers = [self.norm_layers[i] for i in indices
+                                    if i < len(self.norm_layers)]
+                self.norm_types = [self.norm_types[i] for i in indices
+                                   if i < len(self.norm_types)]
+                self.source_means = [self.source_means[i] for i in indices
+                                     if i < len(self.source_means)]
+                self.source_vars = [self.source_vars[i] for i in indices
+                                    if i < len(self.source_vars)]
 
     def online_parameters(self):
-        """Only transformation parameters."""
-        return self.transform_controller.parameters()
+        return self.dist_norm.online_parameters()
 
-    @property
-    def optimizer(self):
-        """Lazy optimizer initialization."""
-        if self._optimizer is None:
-            if self.config.optim == "Adam":
-                self._optimizer = optim.Adam(
-                    self.online_parameters(), lr=self.config.adapt_lr
-                )
-            elif self.config.optim == "AdamW":
-                self._optimizer = optim.AdamW(
-                    self.online_parameters(), lr=self.config.adapt_lr
-                )
-            else:
-                self._optimizer = optim.SGD(
-                    self.online_parameters(), lr=self.config.adapt_lr, momentum=0.9
-                )
-        return self._optimizer
-
-    def _transform_image(self, img):
-        """Transform single image with gamma correction."""
-        clip_low, clip_high, gamma = self.transform_controller()
-        transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        return transformed, (clip_low, clip_high, gamma)
-
-    def _transform_batch(self, imgs):
-        """Transform batch."""
-        transformed_list = []
-        params_list = []
-
-        for i in range(imgs.shape[0]):
-            transformed, params = self._transform_image(imgs[i])
-            transformed_list.append(transformed)
-            params_list.append(params)
-
-        return torch.stack(transformed_list, dim=0), params_list
-
-    def _compute_regularization_loss(self):
-        """L2 regularization."""
-        reg_loss = torch.tensor(0.0, device=self._device)
-        for param in self.transform_controller.parameters():
-            reg_loss = reg_loss + param.pow(2).sum()
-        return self.config.param_regularization * reg_loss
-
-    def forward(self, batched_inputs):
-        """Forward with transformation and alignment."""
-        if not self.adapting:
-            return self.base_model(batched_inputs)
-
-        if isinstance(batched_inputs, torch.Tensor):
-            return self._forward_tensor(batched_inputs)
-        return self._forward_dict_list(batched_inputs)
-
-    def _forward_tensor(self, imgs):
-        """Handle tensor input."""
-        imgs = imgs.to(self._device)
-
-        original_scale = imgs.max() <= 1.0
-        if original_scale:
-            imgs = imgs * 255.0
-
-        imgs_transformed, params_list = self._transform_batch(imgs)
-
-        for params in params_list:
-            self.stats['transform_params'].append(tuple(p.item() for p in params))
-
-        model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
-        outputs = self.base_model(model_input)
-
-        alignment_loss = self.norm_extractor.compute_alignment_loss()
-        reg_loss = self._compute_regularization_loss()
-        total_loss = alignment_loss + reg_loss
-
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
-
-        self.stats['alignment_losses'].append(total_loss.item())
-
-        return outputs
-
-    def _forward_dict_list(self, batched_inputs):
-        """Handle list of dicts."""
-        transformed_inputs = []
-
-        for input_dict in batched_inputs:
-            if 'image' not in input_dict:
-                transformed_inputs.append(input_dict)
-                continue
-
-            img = input_dict['image'].to(self._device)
-            original_scale = img.max() <= 1.0
-            if original_scale:
-                img = img * 255.0
-
-            img_transformed, params = self._transform_image(img)
-            self.stats['transform_params'].append(tuple(p.item() for p in params))
-
-            new_input = input_dict.copy()
-            new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
-            transformed_inputs.append(new_input)
-
-        outputs = self.base_model(transformed_inputs)
-
-        alignment_loss = self.norm_extractor.compute_alignment_loss()
-        reg_loss = self._compute_regularization_loss()
-        total_loss = alignment_loss + reg_loss
-
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
-
-        self.stats['alignment_losses'].append(total_loss.item())
-
-        return outputs
-
-    def reset(self):
-        """Reset adaptation."""
-        super().reset()
-        self.transform_controller = InputTransformController().to(self._device)
-        self._optimizer = None
-        self.stats = {'alignment_losses': [], 'transform_params': []}
-
-    def get_stats(self):
-        """Get statistics."""
-        if not self.stats['alignment_losses']:
-            return None
-
-        params_array = np.array(self.stats['transform_params'])
-
-        return {
-            'num_steps': len(self.stats['alignment_losses']),
-            'mean_loss': np.mean(self.stats['alignment_losses']),
-            'final_loss': self.stats['alignment_losses'][-1],
-            'mean_clip_low': np.mean(params_array[:, 0]),
-            'mean_clip_high': np.mean(params_array[:, 1]),
-            'mean_gamma': np.mean(params_array[:, 2]),
+    def _reset_stats(self):
+        # Statistics tracking
+        self._stats = {
+            'losses': [],
+            'transform_params': [],
+            'config': {
+                'adaptation_method': self.adaptation_method,
+                'cascade_mode': self.config.cascade_mode,
+                'num_layers': len(self.norm_extractor.norm_layers),
+            }
         }
 
-    def to(self, *args, **kwargs):
-        """Move to device."""
-        result = super().to(*args, **kwargs)
-        self.transform_controller = self.transform_controller.to(self._device)
-        self.stretcher = self.stretcher.to(self._device)
-        return result
+    def reset(self, reset_stats=False):
+        self.dist_norm.load_state_dict(self.dist_norm_state)
+        self.online(self.adapting)
+        self.to(self.device)
+        self.to(self.dtype)
+        try:
+            self.optimizer.zero_grad()
+        except:
+            pass
+        if reset_stats:
+            current_stats = self._stats
+            self._reset_stats()
+            return current_stats
+        else:
+            return None
 
-    def __del__(self):
-        """Cleanup hooks."""
-        if hasattr(self, 'hook_manager'):
-            self.hook_manager.remove_hooks()
+    def forward(self, *args, **kwargs):
+        self.optimizer.zero_grad()
+
+        # Forward through model
+        result = self.base_model(*args, **kwargs)
+
+        # Compute losses (batched for efficiency)
+        loss = self.dist_norm.loss
+        if self.
+
+        # Backward and update
+        loss.backward()
+        self.optimizer.step()
+
+        # Log statistics
+        self.stats['losses'].append(loss.item())
+
+        # Log transform parameters
+        if self.config.adaptation_method == 'gamma_clamp':
+            clip_low, clip_high, gamma = self.transform_controller()
+            self.stats['transform_params'].append({
+                'clip_low': clip_low.item(),
+                'clip_high': clip_high.item(),
+                'gamma': gamma.mean().item() if gamma.dim() > 0 else gamma.item()
+            })
+
+        return result
