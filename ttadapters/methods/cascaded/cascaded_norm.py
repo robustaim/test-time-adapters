@@ -107,7 +107,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
     def __init__(self, temperature: float = 0.01):
         super().__init__()
-        self.base_temperature = temperature
+        self.temperature = temperature
 
     def soft_percentile_batch(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """
