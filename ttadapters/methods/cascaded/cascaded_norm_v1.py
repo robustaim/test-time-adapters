@@ -344,12 +344,16 @@ class CascadedNormEngine(AdaptationEngine):
 
         # Wrap the first module's forward
         original_forward = first_module.forward
+        
+        # Counter for debugging
+        self._transform_call_count = 0
 
         def preprocessing_forward(x, *args, **kwargs):
             # Apply dist_norm to image input with 255 scaling only when adapting
             # At this point, x is always a tensor (dict extraction happened earlier)
             if self.adapting and isinstance(x, torch.Tensor) and x.ndim == 4:
-                print(f"[DEBUG] Transforming in first_module wrapper, shape: {x.shape}")
+                self._transform_call_count += 1
+                print(f"[DEBUG] Transform #{self._transform_call_count}, shape: {x.shape}")
                 original_scale = x.max() <= 1.0
                 if original_scale:
                     x = x * 255.0
@@ -364,7 +368,7 @@ class CascadedNormEngine(AdaptationEngine):
                 
                 if original_scale:
                     x = x / 255.0
-                print(f"[DEBUG] Transformation done, params: {clip_low.item():.2f}, {clip_high.item():.2f}, {gamma.item():.2f}")
+                print(f"[DEBUG] Transform done, params: {clip_low.item():.2f}, {clip_high.item():.2f}, {gamma.item():.2f}")
             
             return original_forward(x, *args, **kwargs)
 
@@ -424,11 +428,17 @@ class CascadedNormEngine(AdaptationEngine):
         if not self.adapting:
             return self.base_model(*args, **kwargs)
 
+        # Reset transform counter for this forward call
+        self._transform_call_count = 0
+        print(f"\n[FORWARD START]")
+
         # Zero gradients
         self.optimizer.zero_grad()
 
         # Forward (transformation happens in _inject_dist_norm wrapper)
         result = self.base_model(*args, **kwargs)
+
+        print(f"[FORWARD END] Total transformations in this forward: {self._transform_call_count}\n")
 
         # Compute alignment loss
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
