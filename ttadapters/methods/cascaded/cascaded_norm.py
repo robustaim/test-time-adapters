@@ -93,57 +93,54 @@ class CascadedNormConfig(AdaptationConfig):
 class DifferentiableHistogramStretcher(nn.Module):
     """
     Differentiable histogram stretching with channel-wise processing.
-    Uses straight-through estimator for exact percentile calculation.
+    
+    Supports two modes:
+    1. Percentile mode (use_percentile=True):
+        - clip_low/high are percentile values (0-100)
+        - Computes actual pixel values via soft_percentile per channel
+    2. Clamp mode (use_percentile=False, default):
+        - clip_low/high are direct pixel values (0-255)
+        - Uses values directly without percentile computation
+    
+    Key: Each RGB channel is processed independently to preserve color balance.
     """
 
     def __init__(self, temperature: float = 0.01):
         super().__init__()
-        self.temperature = temperature  # Keep for backward compatibility
+        self.temperature = temperature
 
-    def hard_percentile_batch(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    def soft_percentile_batch(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """
-        Exact percentile calculation with straight-through gradient estimator.
-        
-        Forward: Exact percentile (non-differentiable)
-        Backward: Gradient flows through soft approximation
+        Vectorized differentiable percentile for multiple channels.
         
         Args:
             x: Input channels (B, C, H, W)
             p: Target percentile (0-100, scalar)
         
         Returns:
-            torch.Tensor: Exact percentile values per channel (B, C)
+            torch.Tensor: Percentile values per channel (B, C)
         """
         B, C, H, W = x.shape
         N = H * W
         
-        # Reshape to (B, C, H*W)
-        x_flat = x.reshape(B, C, -1)
+        # Reshape to (B, C, H*W) for per-channel sorting
+        x_flat = x.reshape(B, C, -1)  # (B, C, N)
         
-        # Compute exact percentile index
-        k = int((p / 100.0) * (N - 1))
-        k = max(0, min(N - 1, k))
+        # Compute percentile index
+        idx = (p / 100.0) * (N - 1)
+        indices = torch.arange(N, device=x.device, dtype=x.dtype)  # (N,)
         
-        # Sort and get exact k-th value (non-differentiable)
-        sorted_x, _ = torch.sort(x_flat, dim=-1)
-        hard_percentile = sorted_x[:, :, k]  # (B, C)
+        # Compute weights: (N,) broadcast to (B, C, N)
+        weights = F.softmax(
+            -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N), 
+            dim=-1
+        )  # (1, 1, N) -> (B, C, N) after broadcast
         
-        if self.training:
-            # Soft approximation for gradient
-            idx = (p / 100.0) * (N - 1)
-            indices = torch.arange(N, device=x.device, dtype=x.dtype)
-            weights = F.softmax(
-                -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N),
-                dim=-1
-            )
-            soft_percentile = (weights * sorted_x).sum(dim=-1)
-            
-            # Straight-through estimator: forward uses hard, backward uses soft
-            percentile = hard_percentile + (soft_percentile - soft_percentile.detach())
-        else:
-            percentile = hard_percentile
+        # Sort per channel
+        sorted_x, _ = torch.sort(x_flat, dim=-1)  # (B, C, N)
         
-        return percentile
+        # Weighted sum per channel
+        return (weights * sorted_x).sum(dim=-1)  # (B, C)
 
     def forward(
         self, image: torch.Tensor,
@@ -151,8 +148,19 @@ class DifferentiableHistogramStretcher(nn.Module):
         use_percentile: bool = False
     ) -> torch.Tensor:
         """
-        Apply channel-wise stretching with exact percentile calculation.
+        Apply channel-wise stretching to image(s) with vectorized operations.
+        
+        Args:
+            image: Input image (C, H, W) or (B, C, H, W)
+            clip_low: Lower clipping bound
+            clip_high: Upper clipping bound
+            gamma: Gamma correction factor
+            use_percentile: Whether bounds are percentiles or pixel values
+        
+        Returns:
+            Stretched image with same shape as input
         """
+        # Handle batch dimension
         if image.dim() == 3:
             image = image.unsqueeze(0)
             squeeze_output = True
@@ -161,21 +169,24 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         B, C, H, W = image.shape
 
+        # Compute channel-wise clipping values
         if use_percentile:
-            # Use exact percentile (straight-through gradient)
-            low_vals = self.hard_percentile_batch(image, clip_low)
-            high_vals = self.hard_percentile_batch(image, clip_high)
+            low_vals = self.soft_percentile_batch(image, clip_low)    # (B, C)
+            high_vals = self.soft_percentile_batch(image, clip_high)  # (B, C)
+            # Reshape for broadcasting: (B, C, 1, 1)
             low_vals = low_vals.view(B, C, 1, 1)
             high_vals = high_vals.view(B, C, 1, 1)
         else:
+            # Scalar values broadcast to all channels
             low_vals = clip_low
             high_vals = clip_high
 
-        # Vectorized transformation
+        # Vectorized soft clipping (broadcasts across all dimensions)
         scale = 50.0
         clipped = low_vals + F.softplus((image - low_vals) * scale) / scale
         clipped = high_vals - F.softplus((high_vals - clipped) * scale) / scale
 
+        # Vectorized normalization and gamma correction
         range_vals = high_vals - low_vals + 1e-6
         normalized = (clipped - low_vals) / range_vals
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
