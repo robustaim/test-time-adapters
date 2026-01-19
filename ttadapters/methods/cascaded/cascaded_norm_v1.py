@@ -297,22 +297,47 @@ class CascadedNormEngine(AdaptationEngine):
             # Fallback: wrap base_model.forward
             original_forward = self.base_model.forward
             def preprocessing_forward(x, *args, **kwargs):
-                if isinstance(x, torch.Tensor) and x.ndim == 4 and self.adapting:
-                    # V1: Scale to 255, transform each image, scale back
-                    original_scale = x.max() <= 1.0
-                    if original_scale:
-                        x = x * 255.0
+                if self.adapting:
+                    # Handle tensor input
+                    if isinstance(x, torch.Tensor) and x.ndim == 4:
+                        # V1: Scale to 255, transform each image, scale back
+                        original_scale = x.max() <= 1.0
+                        if original_scale:
+                            x = x * 255.0
+                        
+                        # Transform batch (process each image individually)
+                        transformed_list = []
+                        for i in range(x.shape[0]):
+                            clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
+                            transformed = self.cascaded_norm.transform_controller.stretcher(x[i], clip_low, clip_high, gamma)
+                            transformed_list.append(transformed)
+                        x = torch.stack(transformed_list, dim=0)
+                        
+                        if original_scale:
+                            x = x / 255.0
                     
-                    # Transform batch (process each image individually)
-                    transformed_list = []
-                    for i in range(x.shape[0]):
-                        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-                        transformed = self.cascaded_norm.transform_controller.stretcher(x[i], clip_low, clip_high, gamma)
-                        transformed_list.append(transformed)
-                    x = torch.stack(transformed_list, dim=0)
-                    
-                    if original_scale:
-                        x = x / 255.0
+                    # Handle dict_list input (Detectron2 format)
+                    elif isinstance(x, list) and len(x) > 0 and isinstance(x[0], dict):
+                        transformed_inputs = []
+                        for input_dict in x:
+                            if 'image' not in input_dict:
+                                transformed_inputs.append(input_dict)
+                                continue
+                            
+                            img = input_dict['image'].to(self._device)
+                            original_scale = img.max() <= 1.0
+                            if original_scale:
+                                img = img * 255.0
+                            
+                            # Transform single image
+                            clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
+                            img_transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
+                            
+                            new_input = input_dict.copy()
+                            new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
+                            transformed_inputs.append(new_input)
+                        x = transformed_inputs
+                
                 return original_forward(x, *args, **kwargs)
             self.base_model.forward = preprocessing_forward
             return
@@ -322,7 +347,8 @@ class CascadedNormEngine(AdaptationEngine):
 
         def preprocessing_forward(x, *args, **kwargs):
             # Apply dist_norm to image input with 255 scaling only when adapting
-            if self.adapting:
+            # At this point, x is always a tensor (dict extraction happened earlier)
+            if self.adapting and isinstance(x, torch.Tensor) and x.ndim == 4:
                 original_scale = x.max() <= 1.0
                 if original_scale:
                     x = x * 255.0
@@ -337,6 +363,7 @@ class CascadedNormEngine(AdaptationEngine):
                 
                 if original_scale:
                     x = x / 255.0
+            
             return original_forward(x, *args, **kwargs)
 
         first_module.forward = preprocessing_forward
