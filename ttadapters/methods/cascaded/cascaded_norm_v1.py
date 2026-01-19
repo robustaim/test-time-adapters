@@ -313,7 +313,7 @@ class CascadedNormEngine(AdaptationEngine):
         model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
         outputs = self.base_model(model_input)
 
-        alignment_loss = self.norm_extractor.compute_alignment_loss()
+        alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
 
@@ -348,7 +348,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         outputs = self.base_model(transformed_inputs)
 
-        alignment_loss = self.norm_extractor.compute_alignment_loss()
+        alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
 
