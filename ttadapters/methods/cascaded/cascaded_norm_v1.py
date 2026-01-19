@@ -445,6 +445,8 @@ class CascadedNormEngine(AdaptationEngine):
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
 
+        print(f"[LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
+
         self._stats['alignment_losses'].append(total_loss.item())
 
         # Backward and update
