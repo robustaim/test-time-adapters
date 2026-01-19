@@ -207,13 +207,20 @@ class CascadedNormEngine(AdaptationEngine):
     model_name: str = "CascadedNormEngine"
 
     def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
-        super().__init__(base_model, config)
-
+        self.cascaded_norm: CascadedNorm  # will be initialized in _pre_init()
+        self.cascaded_norm_state: dict
         self.config = config
 
-        # CascadedNorm: transformation + norm layer management  
-        self.cascaded_norm = CascadedNorm(config)
-        
+        super().__init__(base_model, config)
+
+    def _pre_init(self):
+        # Transformation modules
+        self.cascaded_norm = CascadedNorm(self.config)
+
+    def _post_init(self):
+        self.cascaded_norm.to(self.device)
+        self.cascaded_norm_state = {key: value.cpu() for key, value in self.cascaded_norm.state_dict().items()}
+
         # Extract norm layers and wrap them
         print(f"[CascadedNorm] Extracting norm layers...")
         self.cascaded_norm.extract_norm_layers(self.base_model, self._cascade_wrap)
@@ -372,10 +379,17 @@ class CascadedNormEngine(AdaptationEngine):
         return outputs
 
     def reset(self, reset_stats=False):
-        """Reset adaptation."""
-        super().reset(reset_stats=reset_stats)
-        self.cascaded_norm.transform_controller = GammaTransform(self.config).to(self._device)
-        self._optimizer = None
+        """Reset model to initial state."""
+        self.cascaded_norm.load_state_dict(self.cascaded_norm_state)
+        self.online(self.adapting)
+        self.to(self.device)
+        self.to(self.dtype)
+        try:
+            self.optimizer.zero_grad()
+        except:
+            pass
+        if reset_stats:
+            self._stats = {'alignment_losses': [], 'transform_params': []}
 
     @property
     def stats(self):
