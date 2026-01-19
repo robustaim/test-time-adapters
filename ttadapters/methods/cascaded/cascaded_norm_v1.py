@@ -465,13 +465,23 @@ class CascadedNormEngine(AdaptationEngine):
         result = self.base_model(*args, **kwargs)
 
         # Compute alignment loss (original V1 method)
-        loss = self.dist_norm.compute_alignment_loss()
-        self._stats['alignment_losses'].append(loss.item())
+        alignment_loss = self.dist_norm.compute_alignment_loss()
+        
+        # Compute regularization loss (penalize extreme parameter values)
+        clip_low, clip_high, gamma = self.dist_norm.current_params
+        reg_loss = self.config.param_regularization * (
+            (clip_low - 2.0).pow(2) +      # Encourage clip_low near 2
+            (clip_high - 98.0).pow(2) +    # Encourage clip_high near 98
+            (gamma - 1.0).pow(2)           # Encourage gamma near 1
+        )
+        
+        total_loss = alignment_loss + reg_loss
+        self._stats['alignment_losses'].append(total_loss.item())
 
         # Backward and update
-        loss.backward()
+        total_loss.backward()
         self.optimizer.step()
-        self._stats['losses'].append(loss.item())
+        self._stats['losses'].append(total_loss.item())
 
         # Log transform parameters
         clip_low, clip_high, gamma = self.dist_norm.current_params
