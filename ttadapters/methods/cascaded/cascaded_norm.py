@@ -382,20 +382,40 @@ class CascadedNorm(nn.Module):
         Aligns batch statistics with source statistics across all monitored
         normalization layers.
         """
-        current_means, current_vars = [], []
-        source_means, source_vars = self.source_means, self.source_vars
+        current_means, current_vars, source_means, source_vars = [], [], [], []
 
         # Query target statistics
-        for layer in self.norm_layers:
-            current_means.append(layer.current_mean)
-            current_vars.append(layer.current_var)
+        for layer, src_mean, src_var in zip(self.norm_layers, self.source_means, self.source_vars):
+            mean = layer.current_mean
+            var = layer.current_var
+
+            # Reduce to scalar for consistent stacking
+            if mean.numel() > 1:
+                mean = mean.mean()
+            if var.numel() > 1:
+                var = var.mean()
+            if src_mean.numel() > 1:
+                src_mean = src_mean.mean()
+            if src_var.numel() > 1:
+                src_var = src_var.mean()
+
+            current_means.append(mean)
+            current_vars.append(var)
+            source_means.append(src_mean)
+            source_vars.append(src_var)
 
         # Batched computation (single graph node for efficiency)
         if len(current_means) > 0:
             current_means = torch.stack(current_means)
             current_vars = torch.stack(current_vars)
-            source_means = torch.stack(source_means).to(current_means.device)
-            source_vars = torch.stack(source_vars).to(current_vars.device)
+            source_means = torch.stack([
+                m.mean() if m.numel() > 1 else m
+                for m in self.source_means
+            ]).to(current_means.device)
+            source_vars = torch.stack([
+                v.mean() if v.numel() > 1 else v
+                for v in self.source_vars
+            ]).to(current_vars.device)
 
             target_stat = torch.cat([current_means, current_vars], dim=0)
             source_stat = torch.cat([source_means, source_vars], dim=0)
@@ -450,7 +470,6 @@ class CascadedNormEngine(AdaptationEngine):
 
     def _post_init(self):
         self.dist_norm.to(self.device)
-        self.dist_norm.to(self.dtype)
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
 
         # Inject dist_norm into base model
