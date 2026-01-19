@@ -341,8 +341,11 @@ class CascadedNormEngine(AdaptationEngine):
             module_type = type(module).__name__
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
+                # BN: Use running statistics (averaged over channels to scalar)
                 found.append((
-                    name, "BN", module, module.running_mean.clone(), module.running_var.clone()
+                    name, "BN", module, 
+                    module.running_mean.mean().clone(),  # Convert to scalar
+                    module.running_var.mean().clone()    # Convert to scalar
                 ))
             elif isinstance(module, nn.LayerNorm):
                 found.append((
