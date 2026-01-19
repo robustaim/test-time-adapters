@@ -335,6 +335,8 @@ class CascadedNormEngine(AdaptationEngine):
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
 
+        print(f"[PHASE2 LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
+
         self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
@@ -369,6 +371,8 @@ class CascadedNormEngine(AdaptationEngine):
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
+
+        print(f"[PHASE2 LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
 
         self.optimizer.zero_grad()
         total_loss.backward()
