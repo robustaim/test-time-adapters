@@ -122,6 +122,9 @@ class DifferentiableHistogramStretcher(nn.Module):
         """
         B, C, H, W = x.shape
         N = H * W
+
+        # Adaptive temperature: smaller for larger images
+        temp = self.base_temperature / (N / 100000)  # Normalize to ~100k pixels
         
         # Reshape to (B, C, H*W) for per-channel sorting
         x_flat = x.reshape(B, C, -1)  # (B, C, N)
@@ -132,7 +135,7 @@ class DifferentiableHistogramStretcher(nn.Module):
         
         # Compute weights: (N,) broadcast to (B, C, N)
         weights = F.softmax(
-            -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N), 
+            -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (temp * N), 
             dim=-1
         )  # (1, 1, N) -> (B, C, N) after broadcast
         
