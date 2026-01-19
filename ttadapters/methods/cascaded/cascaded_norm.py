@@ -110,90 +110,56 @@ class DifferentiableHistogramStretcher(nn.Module):
 
     def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """
-        Vectorized differentiable percentile approximation using all pixels.
-
+        Differentiable percentile approximation (global across all pixels).
+        
         Args:
-            x (torch.Tensor): Input images of shape (B, C, H, W).
-            p (torch.Tensor): Target percentile value (0-100, scalar).
-
+            x: Input images (B, C, H, W) or (C, H, W)
+            p: Target percentile (0-100, scalar)
+        
         Returns:
-            torch.Tensor: Calculated percentiles of shape (B, C).
+            torch.Tensor: Single scalar percentile value
         """
-        B, C, H, W = x.shape
-        # Flatten spatial dimensions to (B, C, H*W)
-        x_flat = x.view(B, C, -1)
-        N = x_flat.shape[-1]
+        # Flatten ALL dimensions to single 1D tensor
+        x_flat = x.flatten()
+        N = x_flat.shape[0]
 
-        # Calculate target index in the sorted array
         idx = (p / 100.0) * (N - 1)
-
-        # Softmax-based weights around the target index
-        # This handles the differentiability of the percentile selection
         indices = torch.arange(N, device=x.device, dtype=x.dtype)
         weights = F.softmax(-(indices - idx).abs() / (self.temperature * N), dim=-1)
-        weights = weights.view(1, 1, -1)
 
-        # Sort all pixels along the flattened spatial dimension
-        # Modern GPUs handle 1M elements efficiently with CUDA sort
-        sorted_x, _ = torch.sort(x_flat, dim=-1)
-
-        # Weighted sum returns the approximate percentile value per channel: (B, C)
-        return (weights * sorted_x).sum(dim=-1)
+        sorted_x, _ = torch.sort(x_flat)
+        return (weights * sorted_x).sum()  # return single scalar
 
     def forward(
         self, image: torch.Tensor,
         clip_low: torch.Tensor, clip_high: torch.Tensor, gamma: torch.Tensor,
         use_percentile: bool = False
     ) -> torch.Tensor:
-        """
-        Apply vectorized stretching and gamma correction to the entire batch.
+        """Apply stretching to entire batch with shared low/high values."""
 
-        Args:
-            image: Input image (B, C, H, W) or (C, H, W)
-            clip_low: Lower clipping value
-                - If use_percentile=True: percentile value (0-100), e.g., 2.0 for 2nd percentile
-                - If use_percentile=False: pixel value (0-255), e.g., 10.0
-            clip_high: Upper clipping value
-                - If use_percentile=True: percentile value (0-100), e.g., 98.0 for 98th percentile
-                - If use_percentile=False: pixel value (0-255), e.g., 245.0
-            gamma: Gamma correction value
-            use_percentile: If True, interpret clip_low/high as percentile values.
-                            If False, interpret them as direct pixel values.
-
-        Returns:
-            Transformed image in range [0, 255]
-        """
-        # Ensure 4D shape (B, C, H, W) even for single image input
         if image.dim() == 3:
             image = image.unsqueeze(0)
 
         B, C, H, W = image.shape
 
-        # 1. Compute low/high values based on mode
+        # 1. Compute SINGLE low/high value for entire batch
         if use_percentile:
-            # Percentile mode: compute actual pixel values from percentiles
-            low_val = self.soft_percentile(image, clip_low)   # (B, C)
-            high_val = self.soft_percentile(image, clip_high) # (B, C)
-            # Reshape for broadcasting: (B, C) -> (B, C, 1, 1)
-            low_val_bc = low_val.view(B, C, 1, 1)
-            high_val_bc = high_val.view(B, C, 1, 1)
+            low_val = self.soft_percentile(image, clip_low)   # scalar
+            high_val = self.soft_percentile(image, clip_high) # scalar
         else:
-            # Clamp mode: use clip_low/high directly as pixel values
-            # Broadcast scalar values to (B, C, 1, 1)
-            low_val_bc = clip_low.view(1, 1, 1, 1).expand(B, C, 1, 1)
-            high_val_bc = clip_high.view(1, 1, 1, 1).expand(B, C, 1, 1)
+            low_val = clip_low
+            high_val = clip_high
 
-        # 2. Differentiable Clipping using Softplus to keep gradients alive
+        # 2. Broadcasting: scalar -> (1, 1, 1, 1) -> applies to all (B, C, H, W)
         scale = 50.0
-        clipped = low_val_bc + F.softplus((image - low_val_bc) * scale) / scale
-        clipped = high_val_bc - F.softplus((high_val_bc - clipped) * scale) / scale
+        clipped = low_val + F.softplus((image - low_val) * scale) / scale
+        clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
 
-        # 3. Normalization to [0, 1] and Gamma Correction
-        range_val = high_val_bc - low_val_bc + 1e-6
-        normalized = (clipped - low_val_bc) / range_val
+        # 3. Normalization and gamma correction
+        range_val = high_val - low_val + 1e-6
+        normalized = (clipped - low_val) / range_val
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
 
-        # 4. Scale back to [0, 255]
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
 
