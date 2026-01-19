@@ -134,37 +134,7 @@ class CascadedNorm(nn.Module):
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
-    def extract_norm_layers(self, model: nn.Module, cascade_wrap_fn):
-        """Find all BN/LN layers and wrap them."""
-        found = []
-        for name, module in model.named_modules():
-            if isinstance(module, nn.BatchNorm2d) or "BatchNorm2d" in module.__class__.__name__:
-                # BN: Use running statistics (averaged over channels)
-                found.append((
-                    name, "BN", module,
-                    module.running_mean.mean().clone(),
-                    module.running_var.mean().clone()
-                ))
-                print(f"  [BN] Found: {name} ({module.num_features} channels)")
 
-            elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module.__class__.__name__:
-                # LN: Target normalized distribution (mean=0, var=1)
-                found.append((
-                    name, "LN", module,
-                    torch.tensor(0.0),
-                    torch.tensor(1.0)
-                ))
-                print(f"  [LN] Found: {name}")
-        
-        # Wrap layers
-        cascade_wrap_fn(found)
-        
-        # Populate norm layer info
-        for _, _, module, running_mean, running_var in found:
-            self.norm_layers.append(module)
-            self.norm_types.append(_)
-            self.source_means.append(running_mean)
-            self.source_vars.append(running_var)
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
@@ -225,14 +195,77 @@ class CascadedNormEngine(AdaptationEngine):
         self._inject_dist_norm()
 
         # Extract norm layers and wrap them
+        self._extract_norm_layers()
+
+        # Stats
+        self._stats = {
+            'alignment_losses': [], 
+            'transform_params': [],
+            # Latency tracking if needed
+            'forward_times': [],
+            'backward_times': []
+        }
+
+    def _extract_norm_layers(self):
+        """
+        Find all normalization layers including FrozenBatchNorm.
+
+        Extracts source statistics (running_mean/var) for alignment.
+        """
         print(f"[CascadedNorm] Extracting norm layers...")
-        self.cascaded_norm.extract_norm_layers(self.base_model, self._cascade_wrap)
+        found = []
+        for name, module in self.base_model.named_modules():
+            module_type = type(module).__name__
+
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
+                # BN: Use running statistics (averaged over channels)
+                found.append((
+                    name, "BN", module,
+                    module.running_mean.mean().clone(), # Scalar source mean
+                    module.running_var.mean().clone()   # Scalar source var
+                ))
+            elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
+                 # LN: Target normalized distribution (mean=0, var=1)
+                found.append((
+                    name, "LN", module,
+                    torch.tensor(0.0),
+                    torch.tensor(1.0)
+                ))
+        
+        # Filtering & Wrapping
+        filtered = self._filter_by_cascade_mode(found)
+        self._cascade_wrap(filtered)
+        
+        # Populate to CascadedNorm
+        self.cascaded_norm.norm_layers = []
+        self.cascaded_norm.norm_types = []
+        self.cascaded_norm.source_means = []
+        self.cascaded_norm.source_vars = []
+
+        for _, norm_type, module, running_mean, running_var in filtered:
+            self.cascaded_norm.norm_layers.append(module)
+            self.cascaded_norm.norm_types.append(norm_type)
+            self.cascaded_norm.source_means.append(running_mean)
+            self.cascaded_norm.source_vars.append(running_var)
+
         print(f"[CascadedNorm] Found {len(self.cascaded_norm.norm_layers)} norm layers "
               f"(BN: {self.cascaded_norm.norm_types.count('BN')}, "
               f"LN: {self.cascaded_norm.norm_types.count('LN')})")
 
-        # Stats
-        self._stats = {'alignment_losses': [], 'transform_params': []}
+    def _filter_by_cascade_mode(self, norm_list):
+        """Filter normalization layers based on cascade mode."""
+        if not hasattr(self.config, 'cascade_mode'):
+             return norm_list
+             
+        match self.config.cascade_mode:
+            case "single":
+                return [norm_list[0]]
+            case "single_last":
+                return [norm_list[-1]]
+            case "selected":
+                return [norm_list[i] for i in getattr(self.config, 'cascade_indices', [])]
+            case _:  # all
+                return norm_list
 
     @staticmethod
     def _cascade_wrap(filtered: list[nn.Module]):
@@ -284,28 +317,27 @@ class CascadedNormEngine(AdaptationEngine):
         """
         Inject dist_norm into the first submodule's forward.
 
-        Wraps the first actual layer that processes images (e.g., backbone, conv1, stem)
-        to ensure transformation is applied to the pure image tensor, avoiding
-        provider-specific input format complexities in base_model.forward.
+        Wraps the first actual layer that processes images (e.g., backbone, conv1, stem).
+        Handles pre-normalized inputs (e.g. Detectron2) by dynamically inspecting
+        input statistics and applying reversible normalization.
         """
-        # Find first submodule (backbone, stem, conv1, patch_embed, etc.)
+        # Find first submodule
         first_module = self._find_first_image_module()
 
         if first_module is None:
             if self.config.verbose:
                 print("[Warning] No suitable first module found, falling back to base_model.forward wrapping")
-            # Fallback: wrap base_model.forward
+            
+            # Fallback: wrap base_model.forward (Legacy V1 method)
             original_forward = self.base_model.forward
             def preprocessing_forward(x, *args, **kwargs):
                 if self.adapting:
-                    # Handle tensor input
+                    # Handle tensor input (Raw Image usually)
                     if isinstance(x, torch.Tensor) and x.ndim == 4:
-                        # V1: Scale to 255, transform each image, scale back
                         original_scale = x.max() <= 1.0
                         if original_scale:
                             x = x * 255.0
                         
-                        # Transform batch (process each image individually)
                         transformed_list = []
                         for i in range(x.shape[0]):
                             clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
@@ -329,7 +361,6 @@ class CascadedNormEngine(AdaptationEngine):
                             if original_scale:
                                 img = img * 255.0
                             
-                            # Transform single image
                             clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
                             img_transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
                             
@@ -339,45 +370,54 @@ class CascadedNormEngine(AdaptationEngine):
                         x = transformed_inputs
                 
                 return original_forward(x, *args, **kwargs)
+            
             self.base_model.forward = preprocessing_forward
             return
 
         # Wrap the first module's forward
         original_forward = first_module.forward
-        
-        # Counter for debugging
-        self._transform_call_count = 0
 
         def preprocessing_forward(x, *args, **kwargs):
-            # Apply dist_norm to image input with 255 scaling only when adapting
-            # At this point, x is always a tensor (dict extraction happened earlier)
             if self.adapting and isinstance(x, torch.Tensor) and x.ndim == 4:
-                self._transform_call_count += 1
-                print(f"[DEBUG] Transform #{self._transform_call_count}, shape: {x.shape}")
-                print(f"[DEBUG] Input stats - Min: {x.min().item():.2f}, Max: {x.max().item():.2f}, Mean: {x.mean().item():.2f}")
+                # Dynamic Range Normalization
+                # Input x might be already normalized (e.g. mean=0, std=1, containing negative values)
+                # But Stretcher expects [0, 255] distribution.
                 
-                original_scale = x.max() <= 1.0
-                if original_scale:
-                    x = x * 255.0
-                
-                # Transform batch (process each image individually)
                 transformed_list = []
                 for i in range(x.shape[0]):
+                    img = x[i]
+                    
+                    # 1. Capture dynamic range per image
+                    img_min = img.min()
+                    img_max = img.max()
+                    img_range = img_max - img_min + 1e-6
+                    
+                    # 2. Normalize to [0, 1]
+                    img_norm = (img - img_min) / img_range
+                    
+                    # 3. Scale to [0, 255] for Stretcher
+                    img_255 = img_norm * 255.0
+                    
+                    # 4. Transform
                     clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-                    transformed = self.cascaded_norm.transform_controller.stretcher(x[i], clip_low, clip_high, gamma)
-                    transformed_list.append(transformed)
+                    t_255 = self.cascaded_norm.transform_controller.stretcher(img_255, clip_low, clip_high, gamma)
+                    
+                    # 5. Restore original scale
+                    t_norm = t_255 / 255.0
+                    t_restored = t_norm * img_range + img_min
+                    
+                    transformed_list.append(t_restored)
+                    
                 x = torch.stack(transformed_list, dim=0)
-                
-                if original_scale:
-                    x = x / 255.0
-                print(f"[DEBUG] Transform done, params: {clip_low.item():.2f}, {clip_high.item():.2f}, {gamma.item():.2f}")
-            
+
             return original_forward(x, *args, **kwargs)
 
         first_module.forward = preprocessing_forward
-
+        
         if self.config.verbose:
             print(f"[CascadedNorm] Injected dist_norm into: {first_module.__class__.__name__}")
+
+
 
     def _find_first_image_module(self) -> nn.Module:
         """
@@ -430,30 +470,23 @@ class CascadedNormEngine(AdaptationEngine):
         if not self.adapting:
             return self.base_model(*args, **kwargs)
 
-        # Reset transform counter for this forward call
-        self._transform_call_count = 0
-        print(f"\n[FORWARD START]")
-
         # Zero gradients
         self.optimizer.zero_grad()
 
         # Forward (transformation happens in _inject_dist_norm wrapper)
         result = self.base_model(*args, **kwargs)
 
-        print(f"[FORWARD END] Total transformations in this forward: {self._transform_call_count}\n")
-
         # Compute alignment loss
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
-
-        print(f"[LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
 
         self._stats['alignment_losses'].append(total_loss.item())
 
         # Backward and update
         total_loss.backward()
         self.optimizer.step()
+
 
         # Log transform parameters
         clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
@@ -485,14 +518,22 @@ class CascadedNormEngine(AdaptationEngine):
             return None
 
         params_array = np.array(self._stats['transform_params'])
+        
+        # Safe mean calculation
+        if len(params_array) > 0:
+            mean_clip_low = np.mean(params_array[:, 0])
+            mean_clip_high = np.mean(params_array[:, 1])
+            mean_gamma = np.mean(params_array[:, 2])
+        else:
+            mean_clip_low = mean_clip_high = mean_gamma = 0.0
 
         return {
             'num_steps': len(self._stats['alignment_losses']),
             'mean_loss': np.mean(self._stats['alignment_losses']),
             'final_loss': self._stats['alignment_losses'][-1],
-            'mean_clip_low': np.mean(params_array[:, 0]),
-            'mean_clip_high': np.mean(params_array[:, 1]),
-            'mean_gamma': np.mean(params_array[:, 2]),
+            'mean_clip_low': mean_clip_low,
+            'mean_clip_high': mean_clip_high,
+            'mean_gamma': mean_gamma,
         }
 
     def to(self, *args, **kwargs):
