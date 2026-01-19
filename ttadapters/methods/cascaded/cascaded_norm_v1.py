@@ -260,7 +260,7 @@ class CascadedNormEngine(AdaptationEngine):
         self.hook_manager.register_hooks(self.norm_extractor.norm_layers)
 
         # Stats
-        self.stats = {'alignment_losses': [], 'transform_params': []}
+        self._stats = {'alignment_losses': [], 'transform_params': []}
 
     def online_parameters(self):
         """Only transformation parameters."""
@@ -311,7 +311,7 @@ class CascadedNormEngine(AdaptationEngine):
         imgs_transformed, params_list = self._transform_batch(imgs)
 
         for params in params_list:
-            self.stats['transform_params'].append(tuple(p.item() for p in params))
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
 
         model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
         outputs = self.base_model(model_input)
@@ -324,7 +324,7 @@ class CascadedNormEngine(AdaptationEngine):
         total_loss.backward()
         self.optimizer.step()
 
-        self.stats['alignment_losses'].append(total_loss.item())
+        self._stats['alignment_losses'].append(total_loss.item())
 
         return outputs
 
@@ -343,7 +343,7 @@ class CascadedNormEngine(AdaptationEngine):
                 img = img * 255.0
 
             img_transformed, params = self._transform_image(img)
-            self.stats['transform_params'].append(tuple(p.item() for p in params))
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
             new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
@@ -359,28 +359,28 @@ class CascadedNormEngine(AdaptationEngine):
         total_loss.backward()
         self.optimizer.step()
 
-        self.stats['alignment_losses'].append(total_loss.item())
+        self._stats['alignment_losses'].append(total_loss.item())
 
         return outputs
 
-    def reset(self):
+    def reset(self, reset_stats=False):
         """Reset adaptation."""
-        super().reset()
+        super().reset(reset_stats=reset_stats)
         self.transform_controller = InputTransformController().to(self._device)
         self._optimizer = None
-        self.stats = {'alignment_losses': [], 'transform_params': []}
 
-    def get_stats(self):
+    @property
+    def stats(self):
         """Get statistics."""
-        if not self.stats['alignment_losses']:
+        if not self._stats['alignment_losses']:
             return None
 
-        params_array = np.array(self.stats['transform_params'])
+        params_array = np.array(self._stats['transform_params'])
 
         return {
-            'num_steps': len(self.stats['alignment_losses']),
-            'mean_loss': np.mean(self.stats['alignment_losses']),
-            'final_loss': self.stats['alignment_losses'][-1],
+            'num_steps': len(self._stats['alignment_losses']),
+            'mean_loss': np.mean(self._stats['alignment_losses']),
+            'final_loss': self._stats['alignment_losses'][-1],
             'mean_clip_low': np.mean(params_array[:, 0]),
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
