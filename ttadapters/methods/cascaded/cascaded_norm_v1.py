@@ -170,57 +170,37 @@ class CascadedNorm(nn.Module):
         """Get learnable parameters for optimization."""
         return self.transform_controller.parameters()
 
-    def diff(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_alignment_loss(self) -> torch.Tensor:
         """
-        Compute BN statistics alignment (optimized batched computation).
-
-        Aligns batch statistics with source statistics across all monitored
-        normalization layers.
+        Compute alignment loss between batch and source statistics.
+        
+        Original V1 implementation: per-layer MSE loss accumulation.
         """
-        current_means, current_vars, source_means, source_vars = [], [], [], []
+        total_loss = torch.tensor(0.0, device=self.source_means[0].device)
 
-        # Query target statistics
-        for layer, src_mean, src_var in zip(self.norm_layers, self.source_means, self.source_vars):
-            mean = layer.current_mean
-            var = layer.current_var
+        for i, (norm_layer, source_mean, source_var) in enumerate(
+            zip(self.norm_layers, self.source_means, self.source_vars)
+        ):
+            if not hasattr(norm_layer, 'current_mean') or norm_layer.current_mean is None:
+                continue
 
-            # Reduce to scalar for consistent stacking
-            if mean.numel() > 1:
-                mean = mean.mean()
-            if var.numel() > 1:
-                var = var.mean()
-            if src_mean.numel() > 1:
-                src_mean = src_mean.mean()
-            if src_var.numel() > 1:
-                src_var = src_var.mean()
+            batch_mean = norm_layer.current_mean
+            batch_var = norm_layer.current_var
 
-            current_means.append(mean)
-            current_vars.append(var)
-            source_means.append(src_mean)
-            source_vars.append(src_var)
+            src_mean = source_mean.to(batch_mean.device)
+            src_var = source_var.to(batch_var.device)
 
-        # Batched computation (single graph node for efficiency)
-        if len(current_means) > 0:
-            current_means = torch.stack(current_means)
-            current_vars = torch.stack(current_vars)
-            source_means = torch.stack([
-                m.mean() if m.numel() > 1 else m
-                for m in self.source_means
-            ]).to(current_means.device)
-            source_vars = torch.stack([
-                v.mean() if v.numel() > 1 else v
-                for v in self.source_vars
-            ]).to(current_vars.device)
+            # For BN with multiple channels, average to scalar
+            if batch_mean.ndim > 0:
+                batch_mean = batch_mean.mean()
+                batch_var = batch_var.mean()
 
-            target_stat = torch.cat([current_means, current_vars], dim=0)
-            source_stat = torch.cat([source_means, source_vars], dim=0)
-        else:
-            # No norm layers to align
-            device = next(self.parameters()).device
-            target_stat = torch.zeros(0, device=device)
-            source_stat = torch.zeros(0, device=device)
+            loss_mean = F.mse_loss(batch_mean, src_mean)
+            loss_var = F.mse_loss(batch_var, src_var)
 
-        return target_stat, source_stat
+            total_loss = total_loss + loss_mean + loss_var
+
+        return total_loss
 
 
 class CascadedNormEngine(AdaptationEngine):
@@ -246,7 +226,6 @@ class CascadedNormEngine(AdaptationEngine):
         >>> output = adaptive_model(batch)
     """
     model_name: str = "CascadedNormEngine"
-    loss_class = nn.HuberLoss
 
     def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
         self.dist_norm: CascadedNorm  # will be initialized in _pre_init()
@@ -459,8 +438,8 @@ class CascadedNormEngine(AdaptationEngine):
         # Forward
         result = self.base_model(*args, **kwargs)
 
-        # Compute alignment loss
-        loss = self.loss_function(*self.dist_norm.diff())
+        # Compute alignment loss (original V1 method)
+        loss = self.dist_norm.compute_alignment_loss()
         self._stats['alignment_losses'].append(loss.item())
 
         # Backward and update
