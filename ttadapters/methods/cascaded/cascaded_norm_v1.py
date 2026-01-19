@@ -161,50 +161,21 @@ class CascadedNorm(nn.Module):
         self.source_vars: List[torch.Tensor] = []
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
-        """
-        Transform input image(s) with gamma correction.
-        
-        Handles both single image (C, H, W) and batch (B, C, H, W).
-        V1 processes images individually, expects 0-255 scale.
-        """
-        # Get transform parameters
+        """Transform input image with gamma correction."""
         self.current_params = self.transform_controller()
         
-        # Handle batch dimension
+        # Process each image individually
         if img.dim() == 3:
             # Single image (C, H, W)
-            # Check if img needs to be scaled to 255
-            if img.max() <= 1.0:
-                img = img * 255.0
-                
-            transformed = self.transform_controller.stretcher(
-                img, *self.current_params
-            )
-            
-            # Scale back if needed
-            if img.max() <= 255.0:  # Was scaled up
-                transformed = transformed / 255.0
-                
-            return transformed
+            return self.transform_controller.stretcher(img, *self.current_params)
         else:
-            # Batch (B, C, H, W) - process each image individually
-            original_scale = img.max() <= 1.0
-            if original_scale:
-                img = img * 255.0
-                
+            # Batch (B, C, H, W)
             transformed_list = []
             for i in range(img.shape[0]):
-                transformed = self.transform_controller.stretcher(
-                    img[i], *self.current_params
-                )
+                transformed = self.transform_controller.stretcher(img[i], *self.current_params)
                 transformed_list.append(transformed)
-            
-            result = torch.stack(transformed_list, dim=0)
-            
-            if original_scale:
-                result = result / 255.0
-                
-            return result
+            return torch.stack(transformed_list, dim=0)
+
 
     def online_parameters(self):
         """Get learnable parameters for optimization."""
@@ -316,7 +287,13 @@ class CascadedNormEngine(AdaptationEngine):
             original_forward = self.base_model.forward
             def preprocessing_forward(x, *args, **kwargs):
                 if isinstance(x, torch.Tensor) and x.ndim == 4:
+                    # V1: Scale to 255, transform, scale back
+                    original_scale = x.max() <= 1.0
+                    if original_scale:
+                        x = x * 255.0
                     x = self.dist_norm(x)
+                    if original_scale:
+                        x = x / 255.0
                 return original_forward(x, *args, **kwargs)
             self.base_model.forward = preprocessing_forward
             return
@@ -325,14 +302,20 @@ class CascadedNormEngine(AdaptationEngine):
         original_forward = first_module.forward
 
         def preprocessing_forward(x, *args, **kwargs):
-            # Apply dist_norm to image input
+            # Apply dist_norm to image input with 255 scaling
+            original_scale = x.max() <= 1.0
+            if original_scale:
+                x = x * 255.0
             x = self.dist_norm(x)
+            if original_scale:
+                x = x / 255.0
             return original_forward(x, *args, **kwargs)
 
         first_module.forward = preprocessing_forward
 
         if self.config.verbose:
             print(f"[CascadedNorm] Injected dist_norm into: {first_module.__class__.__name__}")
+
 
     def _find_first_image_module(self) -> nn.Module:
         """
@@ -499,4 +482,3 @@ class CascadedNormEngine(AdaptationEngine):
         })
 
         return result
-
