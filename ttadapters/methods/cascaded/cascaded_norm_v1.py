@@ -354,6 +354,8 @@ class CascadedNormEngine(AdaptationEngine):
             if self.adapting and isinstance(x, torch.Tensor) and x.ndim == 4:
                 self._transform_call_count += 1
                 print(f"[DEBUG] Transform #{self._transform_call_count}, shape: {x.shape}")
+                print(f"[DEBUG] Input stats - Min: {x.min().item():.2f}, Max: {x.max().item():.2f}, Mean: {x.mean().item():.2f}")
+                
                 original_scale = x.max() <= 1.0
                 if original_scale:
                     x = x * 255.0
