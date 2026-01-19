@@ -1,7 +1,7 @@
 """
-CascadedNorm: Input Transformation for BN Statistics Alignment
+CascadedNorm: Input Transformation for Norm Statistics Alignment
 
-Test-time adaptation that transforms input images to align with source BN statistics.
+Test-time adaptation that transforms input images to align with source BN/LN statistics.
 
 Key Innovation:
     Instead of adapting norm layers, we adapt the INPUT to match what the frozen
@@ -20,31 +20,32 @@ Pipeline:
               Update via BN alignment loss
 
 Advantages:
-    1. Architecture-agnostic (works with any model with BN)
-    2. BN layers stay completely frozen (use running_mean/var)
-    3. Only transform parameters are learned (3 params)
-    4. Single forward pass per step
-    5. No source data needed (BN.running_mean/var contains source info)
-
-Author: CascadedNorm Team
-Date: 2026-01-13
-Version: 2.0 (Input Transform Alignment)
+    1. Architecture-agnostic
+    2. Only transform parameters are learned (adaptation stability)
+    3. No source data needed (BN.running_mean/var contains source info)
 """
 
+from typing import List
+from dataclasses import dataclass
+
 import torch
-from torch import nn, optim
+from torch import nn
 import torch.nn.functional as F
 import numpy as np
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple, Literal
 
 from ..base import AdaptationEngine, AdaptationConfig
 from ...models.base import BaseModel
 
 
-# =============================================================================
-# Input Transformation Modules
-# =============================================================================
+@dataclass
+class CascadedNormConfig(AdaptationConfig):
+    """Configuration for CascadedNorm."""
+    adaptation_name: str = "CascadedNormEngine"
+    adapt_lr: float = 1e-3
+
+    param_regularization: float = 0.01
+    temperature: float = 0.01
+
 
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
@@ -109,10 +110,6 @@ class InputTransformController(nn.Module):
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
         return clip_low, clip_high, gamma
 
-
-# =============================================================================
-# BN Statistics Management
-# =============================================================================
 
 class NormStatisticsExtractor:
     """Extract and cache BN/LN layer references and source statistics."""
@@ -214,21 +211,6 @@ class NormStatisticsHook:
         self.hooks = []
 
 
-# =============================================================================
-# Configuration and Engine
-# =============================================================================
-
-@dataclass
-class CascadedNormConfig(AdaptationConfig):
-    """Configuration for CascadedNorm."""
-
-    adaptation_name: str = "CascadedNorm"
-    temperature: float = 0.01
-    param_regularization: float = 0.01
-    optim: Literal["SGD", "Adam"] = "SGD"
-    adapt_lr: float = 1e-3
-
-
 class CascadedNormEngine(AdaptationEngine):
     """
     CascadedNorm: Input transformation for BN/LN alignment.
@@ -236,8 +218,7 @@ class CascadedNormEngine(AdaptationEngine):
     Transforms input to match norm layer source statistics.
     Works with both BatchNorm and LayerNorm.
     """
-
-    model_name: str = "CascadedNorm"
+    model_name: str = "CascadedNormEngine"
 
     def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
         super().__init__(base_model, config)

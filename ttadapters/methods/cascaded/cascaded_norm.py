@@ -1,4 +1,29 @@
-""" CascadedNorm: Input Transformation for Norm Statistics Alignment """
+"""
+CascadedNorm: Input Transformation for Norm Statistics Alignment
+
+Test-time adaptation that transforms input images to align with source BN/LN statistics.
+
+Key Innovation:
+    Instead of adapting norm layers, we adapt the INPUT to match what the frozen
+    BN layers expect (their running_mean/var from source domain training).
+
+Mathematical Foundation:
+    1. Transform input: x̃ = T(x; θ)  where T is differentiable histogram stretching
+    2. Forward through model: features pass through BN layers
+    3. Compute batch statistics at each BN: μ_batch, σ²_batch
+    4. Loss: L = Σ_i ||μ_batch^i - μ_source^i||² + ||σ²_batch^i - σ²_source^i||²
+    5. Update θ via backprop (BN layers stay frozen)
+
+Pipeline:
+    [Input] → [Transform T(θ)] → [Frozen Model with BN] → [Output]
+                    ↑
+              Update via BN alignment loss
+
+Advantages:
+    1. Architecture-agnostic
+    2. Only transform parameters are learned (adaptation stability)
+    3. No source data needed (BN.running_mean/var contains source info)
+"""
 
 from typing import Optional, List, Literal
 from dataclasses import dataclass
@@ -70,6 +95,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     # ==================== Adaptation Method ====================
     adaptation_method: Literal["gamma_clamp", "lut"] = "gamma_clamp"
+    adapt_lr: float = 1e-3
 
     # Gamma Clamp options
     use_percentile: bool = False  # False: pixel values, True: percentile values
@@ -93,7 +119,7 @@ class CascadedNormConfig(AdaptationConfig):
 class DifferentiableHistogramStretcher(nn.Module):
     """
     Differentiable histogram stretching with channel-wise processing.
-    
+
     Supports two modes:
     1. Percentile mode (use_percentile=True):
         - clip_low/high are percentile values (0-100)
@@ -101,7 +127,7 @@ class DifferentiableHistogramStretcher(nn.Module):
     2. Clamp mode (use_percentile=False, default):
         - clip_low/high are direct pixel values (0-255)
         - Uses values directly without percentile computation
-    
+
     Key: Each RGB channel is processed independently to preserve color balance.
     """
 
@@ -112,33 +138,33 @@ class DifferentiableHistogramStretcher(nn.Module):
     def soft_percentile_batch(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """
         Vectorized differentiable percentile for multiple channels.
-        
+
         Args:
             x: Input channels (B, C, H, W)
             p: Target percentile (0-100, scalar)
-        
+
         Returns:
             torch.Tensor: Percentile values per channel (B, C)
         """
         B, C, H, W = x.shape
         N = H * W
-        
+
         # Reshape to (B, C, H*W) for per-channel sorting
         x_flat = x.reshape(B, C, -1)  # (B, C, N)
-        
+
         # Compute percentile index
         idx = (p / 100.0) * (N - 1)
         indices = torch.arange(N, device=x.device, dtype=x.dtype)  # (N,)
-        
+
         # Compute weights: (N,) broadcast to (B, C, N)
         weights = F.softmax(
             -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N), 
             dim=-1
         )  # (1, 1, N) -> (B, C, N) after broadcast
-        
+
         # Sort per channel
         sorted_x, _ = torch.sort(x_flat, dim=-1)  # (B, C, N)
-        
+
         # Weighted sum per channel
         return (weights * sorted_x).sum(dim=-1)  # (B, C)
 
@@ -149,14 +175,14 @@ class DifferentiableHistogramStretcher(nn.Module):
     ) -> torch.Tensor:
         """
         Apply channel-wise stretching to image(s) with vectorized operations.
-        
+
         Args:
             image: Input image (C, H, W) or (B, C, H, W)
             clip_low: Lower clipping bound
             clip_high: Upper clipping bound
             gamma: Gamma correction factor
             use_percentile: Whether bounds are percentiles or pixel values
-        
+
         Returns:
             Stretched image with same shape as input
         """
