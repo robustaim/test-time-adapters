@@ -187,15 +187,9 @@ class GammaTransform(nn.Module):
         self.config = config
 
         # Learnable parameters (raw, will be constrained in forward)
-        if config.use_percentile:
-            # 목표: 2%, 98% → logit 변환
-            self.clip_low = nn.Parameter(torch.tensor(-1.386))   # logit(0.2)
-            self.clip_high = nn.Parameter(torch.tensor(1.386))    # logit(0.8)
-        else:
-            # 목표: 10, 245 → logit 변환
-            self.clip_low = nn.Parameter(torch.tensor(-2.535))   # logit(10/127.5)
-            self.clip_high = nn.Parameter(torch.tensor(2.250))    # logit(117.5/127.5)
-        self.gamma = nn.Parameter(torch.tensor(0.0))  # logit(0.5) for gamma=1.0
+        self.clip_low = nn.Parameter(torch.tensor(2.0))
+        self.clip_high = nn.Parameter(torch.tensor(98.0))
+        self.gamma = nn.Parameter(torch.tensor(1.0))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
