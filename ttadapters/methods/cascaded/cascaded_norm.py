@@ -532,7 +532,7 @@ class CascadedNormEngine(AdaptationEngine):
             # Fallback: wrap base_model.forward
             original_forward = self.base_model.forward
             def preprocessing_forward(x, *args, **kwargs):
-                if isinstance(x, torch.Tensor) and x.ndim == 4:
+                if isinstance(x, torch.Tensor) and x.ndim == 4 and self.adapting:
                     x = self.dist_norm(x)
                 return original_forward(x, *args, **kwargs)
             self.base_model.forward = preprocessing_forward
@@ -542,8 +542,9 @@ class CascadedNormEngine(AdaptationEngine):
         original_forward = first_module.forward
 
         def preprocessing_forward(x, *args, **kwargs):
-            # Apply dist_norm to image input
-            x = self.dist_norm(x)
+            # Apply dist_norm to image input only when adapting
+            if self.adapting:
+                x = self.dist_norm(x)
             return original_forward(x, *args, **kwargs)
 
         first_module.forward = preprocessing_forward
