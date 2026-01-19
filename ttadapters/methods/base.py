@@ -119,11 +119,11 @@ class AdaptationEngine(BaseModel):
                 self._optimizer = optim.AdamW(self.online_parameters(), lr=self.config.adapt_lr)
             elif self.config.optim == "Muon":
                 self._optimizer = Muon(
-                    self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
+                    list(self.online_parameters()), lr=self.config.adapt_lr, momentum=self.config.momentum
                 )
             elif self.config.optim == "MuonWithAuxAdam":
                 self._optimizer = MuonWithAuxAdam(
-                    self.online_parameters(),
+                    list(self.online_parameters()),
                     lr=self.config.adapt_lr, adam_lr=self.config.adapt_lr / 10, momentum=self.config.momentum
                 )
             else:
