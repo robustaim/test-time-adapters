@@ -182,11 +182,16 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
         nn.init.zeros_(self.gating_predictor[-2].weight)
         
+        # Momentum-based associative memory (Nested Learning)
+        # Acts as implicit memory for domain-specific gating patterns
+        self.register_buffer('gating_ema', torch.tensor(0.5))
+        self.gating_momentum = 0.9  # Momentum coefficient
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
-        """Transform image with adaptive gating."""
+        """Transform image with adaptive gating and momentum-based memory."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
@@ -194,15 +199,23 @@ class GammaTransform(nn.Module):
         
         # Predict gating from image features
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
-        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        gating_pred = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        
+        # Associative memory via momentum (EMA)
+        # Remembers domain-specific gating patterns from recent samples
+        if self.training:
+            gating_raw = self.gating_momentum * self.gating_ema + (1 - self.gating_momentum) * gating_pred
+            self.gating_ema = gating_raw.detach()  # Update memory
+        else:
+            gating_raw = gating_pred  # No momentum during evaluation
         
         # Quadratic polarization: push away from 0.5
         # gating < 0.5 → push toward 0 (less transformation)
         # gating > 0.5 → push toward 1 (more transformation)
         gating = torch.where(
-            gating < 0.5,
-            2 * gating**2,           # 0→0, 0.5→0.5 (parabola)
-            1 - 2 * (1 - gating)**2  # 0.5→0.5, 1→1 (parabola)
+            gating_raw < 0.5,
+            2 * gating_raw**2,           # 0→0, 0.5→0.5 (parabola)
+            1 - 2 * (1 - gating_raw)**2  # 0.5→0.5, 1→1 (parabola)
         )
         
         # Apply transformation
