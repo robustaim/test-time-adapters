@@ -95,8 +95,12 @@ class TemperaturePredictor(nn.Module):
         # Compute statistics per image in batch
         mean = img.mean(dim=[2, 3])  # (B, C) - per-channel mean
         std = img.std(dim=[2, 3])    # (B, C) - per-channel std
-        brightness = img.mean(dim=[1, 2, 3], keepdim=True)  # (B, 1) - overall brightness
-        contrast = img.std(dim=[1, 2, 3], keepdim=True)     # (B, 1) - overall contrast
+        brightness = img.mean(dim=[1, 2, 3])  # (B,) - overall brightness
+        contrast = img.std(dim=[1, 2, 3])     # (B,) - overall contrast
+        
+        # Reshape brightness and contrast to (B, 1) for concatenation
+        brightness = brightness.unsqueeze(1)  # (B, 1)
+        contrast = contrast.unsqueeze(1)      # (B, 1)
         
         # Concatenate all features
         features = torch.cat([mean, std, brightness, contrast], dim=1)  # (B, 8)
