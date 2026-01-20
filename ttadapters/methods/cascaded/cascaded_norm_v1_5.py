@@ -149,7 +149,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters with Deep Delta Learning (DDL) transformation."""
+    """Learnable parameters for histogram stretching with gamma correction and adaptive gating."""
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
@@ -172,80 +172,24 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
         nn.init.zeros_(self.temperature_predictor[-1].weight)
         
-        # DDL: Predict k, v, β for 8x8 spatial domain
-        # Dimension: 3 channels * 8 * 8 = 192
-        ddl_dim = 3 * 8 * 8
-        
-        # k predictor (reflection direction)
-        self.k_predictor = nn.Sequential(
-            nn.Linear(16, 128),
-            nn.ReLU(),
-            nn.Linear(128, ddl_dim)
-        )
-        
-        # v predictor (value vector)
-        self.v_predictor = nn.Sequential(
-            nn.Linear(16, 128),
-            nn.ReLU(),
-            nn.Linear(128, ddl_dim)
-        )
-        
-        # β predictor (gate ∈ [0, 2])
-        self.beta_predictor = nn.Sequential(
+        # NEW: Gating predictor (adaptive transformation strength)
+        # Clear images → gating ≈ 0 (keep original)
+        # Degraded images → gating ≈ 1 (apply transformation)
+        self.gating_predictor = nn.Sequential(
             nn.Linear(16, 8),
             nn.ReLU(),
             nn.Linear(8, 1),
-            nn.Sigmoid()  # [0, 1]
+            nn.Sigmoid()  # [0, 1] gating strength
         )
-        # Initialize near 0.5 for moderate gating
-        nn.init.constant_(self.beta_predictor[-2].bias, 0.0)
-        nn.init.zeros_(self.beta_predictor[-2].weight)
+        # Initialize to output 0.5 (moderate gating)
+        nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
+        nn.init.zeros_(self.gating_predictor[-2].weight)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
-    def _apply_ddl(self, img, transformed, features):
-        """
-        Apply Deep Delta Learning transformation.
-        
-        DDL: X_new = (I - β*k*k^T)*X + β*k*v
-                   = X - β*k*(k^T·X) + β*k*v
-        """
-        # Get original size
-        original_size = img.shape[-2:]
-        
-        # Downsample both images to 8x8
-        img_small = F.interpolate(img.unsqueeze(0), size=8, mode='bilinear', align_corners=False).squeeze(0)
-        trans_small = F.interpolate(transformed.unsqueeze(0), size=8, mode='bilinear', align_corners=False).squeeze(0)
-        
-        # Flatten to vectors
-        img_flat = img_small.flatten()  # (192,)
-        trans_flat = trans_small.flatten()  # (192,)
-        
-        # Predict DDL parameters
-        k = self.k_predictor(features)  # (192,)
-        k = F.normalize(k, dim=0)  # Normalize: ||k||=1
-        
-        v = self.v_predictor(features)  # (192,)
-        
-        beta = 2.0 * self.beta_predictor(features).squeeze()  # [0, 2]
-        
-        # Apply DDL to transformed image
-        # DDL: output = trans - β*k*(k^T·trans) + β*k*v
-        k_T_trans = (k * trans_flat).sum()  # scalar projection
-        output_flat = trans_flat - beta * k * k_T_trans + beta * k * v
-        
-        # Reshape back to 8x8
-        output_small = output_flat.reshape(3, 8, 8)
-        
-        # Upsample to original size
-        output = F.interpolate(output_small.unsqueeze(0), size=original_size, 
-                              mode='bilinear', align_corners=False).squeeze(0)
-        
-        return output, beta
-
     def forward(self, img):
-        """Transform image with DDL."""
+        """Transform image with adaptive gating."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
@@ -258,14 +202,17 @@ class GammaTransform(nn.Module):
         log_temp = self.temperature_predictor(img_features)  # (1,) or (B, 1)
         temperature = torch.exp(log_temp).clamp(1e-6, 1.0).squeeze(-1)  # scalar or (B,)
         
-        # Apply histogram stretching
+        # Per-sample gating (predicted from same features)
+        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        
+        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
         
-        # Apply DDL transformation (replaces simple gating)
-        output, beta = self._apply_ddl(img, transformed, img_features)
+        # Adaptive blending: gating=0 → original, gating=1 → transformed
+        # Clear images should learn gating≈0, degraded images gating≈1
+        output = gating * transformed + (1 - gating) * img
         
-        return output, (clip_low, clip_high, gamma, temperature, beta)
-
+        return output, (clip_low, clip_high, gamma, temperature, gating)
 
 
 class CascadedNorm(nn.Module):
