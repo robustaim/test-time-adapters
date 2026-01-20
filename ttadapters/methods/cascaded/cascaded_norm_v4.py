@@ -65,15 +65,18 @@ class AssociativeMemory(nn.Module):
         # QKV projections (16x16x3 = 768 → feat_dim)
         self.q_proj = nn.Linear(768, feat_dim)  # 16*16*3
         self.k_proj = nn.Linear(768, feat_dim)
-        self.v_proj = nn.Linear(768, 2)  # [gating_logit, log_temp]
+        self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
         
-        # Initialize to reasonable values
-        nn.init.normal_(self.v_proj.weight, 0, 0.01)
-        nn.init.constant_(self.v_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
+        # Output projection (feat_dim → 2 parameters)
+        self.out_proj = nn.Linear(feat_dim, 2)  # [gating_logit, log_temp]
+        
+        # Initialize output projection to reasonable values
+        nn.init.normal_(self.out_proj.weight, 0, 0.01)
+        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
         
         # Memory buffers (circular queue)
         self.register_buffer('K_mem', torch.zeros(mem_size, feat_dim))
-        self.register_buffer('V_mem', torch.zeros(mem_size, 2))
+        self.register_buffer('V_mem', torch.zeros(mem_size, feat_dim))  # Same dim!
         self.register_buffer('ptr', torch.tensor(0))
     
     def forward(self, img):
@@ -98,19 +101,22 @@ class AssociativeMemory(nn.Module):
         # QKV projections
         Q = self.q_proj(feat)  # (B, feat_dim)
         K = self.k_proj(feat)  # (B, feat_dim)
-        V = self.v_proj(feat)  # (B, 2)
+        V = self.v_proj(feat)  # (B, feat_dim) - same as K!
         
         # Retrieve from memory via attention
         attn = F.softmax(Q @ self.K_mem.T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
-        params = attn @ self.V_mem  # (B, 2)
+        retrieved_v = attn @ self.V_mem  # (B, feat_dim)
         
-        #  Update memory (circular buffer, detached)
+        # Project to output parameters
+        params = self.out_proj(retrieved_v)  # (B, 2)
+        
+        # Update memory (circular buffer, detached)
         self.K_mem[self.ptr] = K[0].detach()
         self.V_mem[self.ptr] = V[0].detach()
         self.ptr = (self.ptr + 1) % self.mem_size
         
-        # Memory alignment loss: K should be close to V
-        # This enforces "memorization" of image-parameter pairs
+        # Memory alignment loss: K should be close to V (same dimension now!)
+        # This enforces "memorization" of image features
         loss_mem = F.mse_loss(K, V.detach())
         
         if squeeze_output:
