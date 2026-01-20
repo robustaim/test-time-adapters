@@ -47,23 +47,27 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-class TinyImageEncoder(nn.Module):
+class SpatialAttentionEncoder(nn.Module):
     """
-    Lightweight CNN for extracting visual features from images.
+    CNN with spatial attention for extracting domain-specific visual features.
     
-    Aggressively downsamples input to 8x8, then uses a tiny CNN.
-    Works with any input size thanks to adaptive pooling.
+    Key insight:
+    - Fog: Uniform pattern across entire image → high attention everywhere
+    - Night: Local bright spots (lamps) + dark regions → selective attention
     
     Output: 16-dimensional feature vector
     """
     
     def __init__(self):
         super().__init__()
+        # Feature extractor
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),  # 8x8 → 8x8
+            nn.Conv2d(3, 32, 3, padding=1),  # 8x8 → 8x8, 32 channels
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),  # 8x8 → 1x1
         )
+        
+        # Spatial attention
+        self.attention_conv = nn.Conv2d(32, 1, 1)  # 32 → 1 attention map
         
     def forward(self, img):
         """
@@ -83,12 +87,22 @@ class TinyImageEncoder(nn.Module):
         img_tiny = F.interpolate(img, size=8, mode='bilinear', align_corners=False)
         
         # Extract features
-        features = self.conv(img_tiny).flatten(1)  # (B, 16)
+        features = self.conv(img_tiny)  # (B, 32, 8, 8)
+        
+        # Compute spatial attention
+        attention = torch.sigmoid(self.attention_conv(features))  # (B, 1, 8, 8)
+        
+        # Apply attention and pool
+        weighted_features = features * attention  # (B, 32, 8, 8)
+        pooled = weighted_features.mean(dim=[2, 3])  # (B, 32)
+        
+        # Reduce to 16-dim
+        output = pooled[:, :16]  # (B, 16) - use first 16 channels
         
         if squeeze_output:
-            features = features.squeeze(0)  # (16,)
+            output = output.squeeze(0)  # (16,)
         
-        return features
+        return output
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -144,8 +158,8 @@ class GammaTransform(nn.Module):
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))
         
-        # Per-sample temperature predictor
-        self.image_encoder = TinyImageEncoder()  # 16-dim features
+        # Per-sample temperature predictor with spatial attention
+        self.image_encoder = SpatialAttentionEncoder()  # 16-dim features with attention
         self.temperature_predictor = nn.Sequential(
             nn.Linear(16, 8),
             nn.ReLU(),
