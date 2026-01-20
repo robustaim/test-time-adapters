@@ -105,6 +105,63 @@ class SpatialAttentionEncoder(nn.Module):
         return output
 
 
+class SpatialGatingPredictor(nn.Module):
+    """
+    Predicts pixel-wise gating map for selective transformation blending.
+    
+    Inspired by Deep Delta Learning: selective information incorporation.
+    - Fog: Uniform high gating across image
+    - Night: High gating for bright spots (lamps), low for dark regions
+    - Clear: Low gating everywhere → mostly skip transformation
+    
+    Output: (1, H, W) gating map in [0, 1]
+    """
+    
+    def __init__(self):
+        super().__init__()
+        # Decoder: 16-dim features → 8x8 gating map
+        self.decoder = nn.Sequential(
+            nn.Linear(16, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),  # 8x8 = 64 values
+        )
+        
+        # Initialize to output moderate gating (0.5)
+        nn.init.zeros_(self.decoder[-1].weight)
+        nn.init.zeros_(self.decoder[-1].bias)
+    
+    def forward(self, img_features, target_size):
+        """
+        Args:
+            img_features: (16,) or (B, 16) - from SpatialAttentionEncoder
+            target_size: (H, W) - target image size
+        Returns:
+            gating_map: (1, H, W) or (B, 1, H, W) - pixel-wise gating
+        """
+        # Handle batch dimension
+        if img_features.dim() == 1:
+            img_features = img_features.unsqueeze(0)
+            squeeze_batch = True
+        else:
+            squeeze_batch = False
+        
+        # Decode to 8x8 map
+        gate_flat = self.decoder(img_features)  # (B, 64)
+        gate_small = gate_flat.view(-1, 1, 8, 8)  # (B, 1, 8, 8)
+        
+        # Upsample to target size
+        gate_map = F.interpolate(gate_small, size=target_size, 
+                                 mode='bilinear', align_corners=False)  # (B, 1, H, W)
+        
+        # Apply sigmoid for [0, 1] range
+        gate_map = torch.sigmoid(gate_map)
+        
+        if squeeze_batch:
+            gate_map = gate_map.squeeze(0)  # (1, H, W)
+        
+        return gate_map
+
+
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
@@ -165,24 +222,15 @@ class GammaTransform(nn.Module):
         # Image encoder for gating prediction
         self.image_encoder = SpatialAttentionEncoder()  # 16-dim features
         
-        # Gating predictor (adaptive transformation strength)
-        # Clear images → gating ≈ 0 (keep original)
-        # Degraded images → gating ≈ 1 (apply transformation)
-        self.gating_predictor = nn.Sequential(
-            nn.Linear(16, 8),
-            nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()  # [0, 1] gating strength
-        )
-        # Initialize to output 0.5 (moderate gating)
-        nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
-        nn.init.zeros_(self.gating_predictor[-2].weight)
+        # Spatial gating predictor (pixel-wise transformation strength)
+        # Clear images → low gating map, Degraded images → high gating map
+        self.gating_predictor = SpatialGatingPredictor()
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
-        """Transform image with adaptive gating."""
+        """Transform image with spatial adaptive gating."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
@@ -190,15 +238,21 @@ class GammaTransform(nn.Module):
         
         # Predict gating from image features
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
-        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
         # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
         
-        # Adaptive blending: gating=0 → original, gating=1 → transformed
-        output = gating * transformed + (1 - gating) * img
+        # Spatial gating map (pixel-wise blending)
+        target_size = img.shape[-2:]  # (H, W)
+        gating_map = self.gating_predictor(img_features, target_size)  # (1, H, W) or (B, 1, H, W)
         
-        return output, (clip_low, clip_high, gamma, gating)
+        # Adaptive blending: gating_map=0 → original, gating_map=1 → transformed
+        output = gating_map * transformed + (1 - gating_map) * img
+        
+        # For logging: report mean gating as summary statistic
+        mean_gating = gating_map.mean()
+        
+        return output, (clip_low, clip_high, gamma, mean_gating)
 
 
 class CascadedNorm(nn.Module):
