@@ -188,8 +188,8 @@ class GammaTransform(nn.Module):
             nn.Sigmoid()  # [0, 1] adaptive momentum strength
         )
         # Initialize to output ~0.9 (default high momentum)
-        nn.init.constant_(self.momentum_predictor[-1].bias, 2.2)  # sigmoid(2.2) ≈ 0.9
-        nn.init.zeros_(self.momentum_predictor[-1].weight)
+        nn.init.constant_(self.momentum_predictor[-2].bias, 2.2)  # sigmoid(2.2) ≈ 0.9
+        nn.init.zeros_(self.momentum_predictor[-2].weight)
         
         # Momentum memory buffer
         self.register_buffer('gating_ema', torch.tensor(0.5))
