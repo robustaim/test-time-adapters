@@ -437,16 +437,12 @@ class CascadedNormEngine(AdaptationEngine):
                                for p in params_list])  # (B,)
         gatings = gatings.to(self._device)
         
-        # 1. Polarization loss: Encourage gates near 0 or 1
+        # Polarization loss: Encourage gates near 0 or 1
         # L_polar = E[g * (1-g)] → minimized when g∈{0,1}
         polarization_loss = (gatings * (1 - gatings)).mean()
         
-        # 2. Diversity loss: Encourage variance in gating
-        # L_div = -var(g) → maximized when gates are diverse
-        diversity_loss = -gatings.var()
-        
-        # Weighted combination
-        gating_loss = 0.1 * polarization_loss + 0.01 * diversity_loss
+        # Use polarization only (diversity doesn't apply with batch_size=1)
+        gating_loss = 0.1 * polarization_loss
         
         return gating_loss
 
