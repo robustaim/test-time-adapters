@@ -47,6 +47,50 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
+class TinyImageEncoder(nn.Module):
+    """
+    Lightweight CNN for extracting visual features from images.
+    
+    Aggressively downsamples input to 8x8, then uses a tiny CNN.
+    Works with any input size thanks to adaptive pooling.
+    
+    Output: 16-dimensional feature vector
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1),  # 8x8 → 8x8
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),  # 8x8 → 1x1
+        )
+        
+    def forward(self, img):
+        """
+        Args:
+            img: (C, H, W) or (B, C, H, W)
+        Returns:
+            features: (16,) or (B, 16)
+        """
+        # Handle batch dimension
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        # Aggressive downsample to 8x8
+        img_tiny = F.interpolate(img, size=8, mode='bilinear', align_corners=False)
+        
+        # Extract features
+        features = self.conv(img_tiny).flatten(1)  # (B, 16)
+        
+        if squeeze_output:
+            features = features.squeeze(0)  # (16,)
+        
+        return features
+
+
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
@@ -92,64 +136,60 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 class GammaTransform(nn.Module):
     """
-    Per-sample transformation with learnable parameter prediction.
+    Per-sample transformation with full parameter prediction.
     
-    Predicts all transformation parameters (clip_low, clip_high, gamma, temperature)
-    from image statistics, enabling domain-specific adaptation without catastrophic forgetting.
+    Predicts ALL 4 parameters (clip_low, clip_high, gamma, temperature) from
+    image features for complete domain-specific adaptation.
     """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         
-        # Parameter predictor network
-        self.predictor = nn.Sequential(
-            nn.Linear(8, 32),   # Input: 8 image statistics
+        # Per-sample parameter predictor
+        self.image_encoder = TinyImageEncoder()  # 16-dim features
+        self.param_predictor = nn.Sequential(
+            nn.Linear(16, 32),
             nn.ReLU(),
             nn.Linear(32, 16),
             nn.ReLU(),
-            nn.Linear(16, 4)    # Output: 4 transformation parameters
+            nn.Linear(16, 4)  # Output: 4 transformation parameters
         )
         
-        # Initialize final layer to zeros to prevent saturation
-        nn.init.zeros_(self.predictor[-1].weight)
-        nn.init.zeros_(self.predictor[-1].bias)
+        # Initialize to reasonable defaults
+        import math
+        with torch.no_grad():
+            # Set biases to output default parameter ranges
+            self.param_predictor[-1].bias[0] = 0.0  # clip_low → sigmoid(0)*10 = 5
+            self.param_predictor[-1].bias[1] = 0.0  # clip_high → 90+sigmoid(0)*10 = 95
+            self.param_predictor[-1].bias[2] = 0.0  # gamma → 0.5+sigmoid(0)*1.5 = 1.25
+            self.param_predictor[-1].bias[3] = math.log(config.temperature)  # temperature
+        nn.init.zeros_(self.param_predictor[-1].weight)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
         """Transform image with per-sample predicted parameters."""
-        # Handle batch dimension
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
-            squeeze_output = True
+        # Extract image features
+        img_features = self.image_encoder(img)  # (16,) or (B, 16)
+        
+        # Predict all 4 parameters
+        raw_params = self.param_predictor(img_features)  # (4,) or (B, 4)
+        
+        # Handle scalar vs batch
+        if raw_params.dim() == 1:
+            # Scalar case
+            clip_low = torch.sigmoid(raw_params[0]) * 10
+            clip_high = 90 + torch.sigmoid(raw_params[1]) * 10
+            gamma = 0.5 + torch.sigmoid(raw_params[2]) * 1.5
+            temperature = torch.exp(raw_params[3]).clamp(1e-6, 1.0)
         else:
-            squeeze_output = False
-
-        # Compute image statistics
-        mean = img.mean(dim=[2, 3])  # (B, C)
-        std = img.std(dim=[2, 3])    # (B, C)
-        brightness = img.mean(dim=[1, 2, 3]).unsqueeze(1)  # (B, 1)
-        contrast = img.std(dim=[1, 2, 3]).unsqueeze(1)     # (B, 1)
+            # Batch case
+            clip_low = torch.sigmoid(raw_params[:, 0]) * 10
+            clip_high = 90 + torch.sigmoid(raw_params[:, 1]) * 10
+            gamma = 0.5 + torch.sigmoid(raw_params[:, 2]) * 1.5
+            temperature = torch.exp(raw_params[:, 3]).clamp(1e-6, 1.0)
         
-        features = torch.cat([mean, std, brightness, contrast], dim=1)  # (B, 8)
-        
-        # Predict transformation parameters
-        raw_params = self.predictor(features)  # (B, 4)
-        
-        clip_low = torch.sigmoid(raw_params[:, 0]) * 10  # [0, 10]
-        clip_high = 90 + torch.sigmoid(raw_params[:, 1]) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(raw_params[:, 2]) * 1.5  # [0.5, 2.0]
-        temperature = torch.exp(raw_params[:, 3]).clamp(1e-6, 1.0)  # [1e-6, 1.0]
-        
-        if squeeze_output:
-            clip_low = clip_low.squeeze(0)
-            clip_high = clip_high.squeeze(0)
-            gamma = gamma.squeeze(0)
-            temperature = temperature.squeeze(0)
-            img = img.squeeze(0)
-        
-        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
         return transformed, (clip_low, clip_high, gamma, temperature)
 
