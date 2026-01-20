@@ -185,10 +185,21 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
         nn.init.zeros_(self.gating_predictor[-2].weight)
         
-        # Momentum-based associative memory (Nested Learning)
-        # Acts as implicit memory for domain-specific gating patterns
+        # Adaptive momentum beta predictor (Nested Learning with domain-specific memory)
+        # Stable domains (Clear) → high beta (use memory)
+        # Variable domains (Night) → low beta (reactivity)
+        self.momentum_predictor = nn.Sequential(
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()  # [0, 1] adaptive momentum strength
+        )
+        # Initialize to output ~0.9 (default high momentum)
+        nn.init.constant_(self.momentum_predictor[-1].bias, 2.2)  # sigmoid(2.2) ≈ 0.9
+        nn.init.zeros_(self.momentum_predictor[-1].weight)
+        
+        # Momentum memory buffer
         self.register_buffer('gating_ema', torch.tensor(0.5))
-        self.gating_momentum = 0.9  # Momentum coefficient
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
@@ -210,10 +221,14 @@ class GammaTransform(nn.Module):
         # Per-sample gating (predicted from same features)
         gating_pred = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
-        # Associative memory via momentum (EMA)
-        # Remembers domain-specific gating patterns from recent samples
+        # Predict adaptive momentum beta
+        momentum_beta = self.momentum_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        
+        # Associative memory with adaptive momentum (EMA)
+        # High beta → strong memory (Clear, stable)
+        # Low beta → reactive (Night, variable)
         if self.training:
-            gating = self.gating_momentum * self.gating_ema + (1 - self.gating_momentum) * gating_pred
+            gating = momentum_beta * self.gating_ema + (1 - momentum_beta) * gating_pred
             self.gating_ema = gating.detach()  # Update memory
         else:
             gating = gating_pred  # No momentum during evaluation
