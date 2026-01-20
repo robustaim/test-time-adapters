@@ -381,7 +381,7 @@ class CascadedNormEngine(AdaptationEngine):
             if original_scale:
                 img = img * 255.0
 
-            img_transformed, params = self._transform_image(img)
+            img_transformed, params = self.cascaded_norm(img)
             self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
