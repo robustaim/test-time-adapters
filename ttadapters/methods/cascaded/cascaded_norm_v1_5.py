@@ -226,7 +226,7 @@ class GammaTransform(nn.Module):
         # Adaptive blending: gating=0 → original, gating=1 → transformed
         output = gating * transformed + (1 - gating) * img
         
-        return output, (clip_low, clip_high, gamma, gating)
+        return output, (clip_low, clip_high, gamma, gating, momentum_beta)
 
 
 class CascadedNorm(nn.Module):
@@ -576,6 +576,7 @@ class CascadedNormEngine(AdaptationEngine):
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
             'mean_gating': np.mean(params_array[:, 3]),
+            'mean_momentum_beta': np.mean(params_array[:, 4]),
         }
 
     def to(self, *args, **kwargs):

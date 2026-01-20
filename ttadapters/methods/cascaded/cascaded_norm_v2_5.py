@@ -240,7 +240,7 @@ class GammaTransform(nn.Module):
         # Clear images should learn gating≈0, degraded images gating≈1
         output = gating * transformed + (1 - gating) * img
         
-        return output, (clip_low, clip_high, gamma, temperature, gating)
+        return output, (clip_low, clip_high, gamma, temperature, gating, momentum_beta)
 
 
 class CascadedNorm(nn.Module):
@@ -581,6 +581,8 @@ class CascadedNormEngine(AdaptationEngine):
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
             'mean_temperature': np.mean(params_array[:, 3]),
+            'mean_gating': np.mean(params_array[:, 4]),
+            'mean_momentum_beta': np.mean(params_array[:, 5]),
         }
 
     def to(self, *args, **kwargs):
