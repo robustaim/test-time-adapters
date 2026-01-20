@@ -33,7 +33,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from ..base import AdaptationEngine, AdaptationConfig
-from ...models.base import BaseModel
+from ...models.base import BaseModel, ModelProvider
 
 
 @dataclass
@@ -500,9 +500,6 @@ class CascadedNormEngine(AdaptationEngine):
         self.dist_norm.to(self.device)
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
 
-        # Inject dist_norm into base model
-        self._inject_dist_norm()
-
         # Extract norm layers from base model
         self._extract_norm_layers()
 
@@ -514,78 +511,6 @@ class CascadedNormEngine(AdaptationEngine):
             print(f"  Total layers: {len(self.dist_norm.norm_layers)}")
             for cls in self.dist_norm.norm_layers:
                 print(f"      {cls.__class__.__name__}")
-
-    def _inject_dist_norm(self):
-        """
-        Inject dist_norm into the first submodule's forward.
-
-        Wraps the first actual layer that processes images (e.g., backbone, conv1, stem)
-        to ensure transformation is applied to the pure image tensor, avoiding
-        provider-specific input format complexities in base_model.forward.
-        """
-        # Find first submodule (backbone, stem, conv1, patch_embed, etc.)
-        first_module = self._find_first_image_module()
-
-        if first_module is None:
-            if self.config.verbose:
-                print("[Warning] No suitable first module found, falling back to base_model.forward wrapping")
-            # Fallback: wrap base_model.forward
-            original_forward = self.base_model.forward
-            def preprocessing_forward(x, *args, **kwargs):
-                if isinstance(x, torch.Tensor) and x.ndim == 4 and self.adapting:
-                    x = self.dist_norm(x)
-                return original_forward(x, *args, **kwargs)
-            self.base_model.forward = preprocessing_forward
-            return
-
-        # Wrap the first module's forward
-        original_forward = first_module.forward
-
-        def preprocessing_forward(x, *args, **kwargs):
-            # Apply dist_norm to image input only when adapting
-            if self.adapting:
-                x = self.dist_norm(x)
-            return original_forward(x, *args, **kwargs)
-
-        first_module.forward = preprocessing_forward
-
-        if self.config.verbose:
-            print(f"[CascadedNorm] Injected dist_norm into: {first_module.__class__.__name__}")
-
-    def _find_first_image_module(self) -> nn.Module:
-        """
-        Find the first module that directly processes images.
-
-        Searches for common patterns:
-        1. Named modules: 'backbone', 'stem', 'conv1', 'patch_embed', 'model'
-        2. First Conv2d or Linear layer
-        3. First child module
-
-        Returns:
-            First module that likely receives image tensors, or None if not found
-        """
-        # Strategy 1: Check for common named attributes
-        common_names = ["backbone", "stem", "conv1", "patch_embed", "features", "model"]
-        for name in common_names:
-            if hasattr(self.base_model, name):
-                module = getattr(self.base_model, name)
-                if isinstance(module, nn.Module):
-                    return module
-
-        # Strategy 2: Find first Conv2d or Linear
-        for module in self.base_model.modules():
-            if isinstance(module, (nn.Conv2d, nn.Linear)) and module is not self.base_model:
-                return module
-
-        # Strategy 3: First child
-        try:
-            first_child = next(self.base_model.children())
-            if isinstance(first_child, nn.Module):
-                return first_child
-        except StopIteration:
-            pass
-
-        return None
 
     def _extract_norm_layers(self):
         """
@@ -715,6 +640,16 @@ class CascadedNormEngine(AdaptationEngine):
         self.optimizer.zero_grad()
 
         # Forward
+        if self.adapting:
+            match self.model_provider:
+                case ModelProvider.Detectron2:
+                    args = (self.dist_norm(*args), )
+                case ModelProvider.HuggingFace:
+                    pass  # TODO
+                case ModelProvider.Ultralytics:
+                    pass  # TODO
+                case _:
+                    raise ValueError(f"Model provider {self.model_provider} is not supported.")
         result = self.base_model(*args, **kwargs)
 
         # Compute alignment loss
