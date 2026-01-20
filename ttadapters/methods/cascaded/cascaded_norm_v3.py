@@ -302,10 +302,14 @@ class CascadedNormEngine(AdaptationEngine):
         return self.cascaded_norm.online_parameters()
 
     def _transform_image(self, img):
-        """Transform single image with gamma correction."""
+        """Transform single image with gamma correction and 50% blending."""
         clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
         transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
-        return transformed, (clip_low, clip_high, gamma)
+        
+        # 50% blending (controlled experiment)
+        output = 0.5 * transformed + 0.5 * img
+        
+        return output, (clip_low, clip_high, gamma)
 
     def _transform_batch(self, imgs):
         """Transform batch."""
