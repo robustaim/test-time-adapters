@@ -103,9 +103,9 @@ class AssociativeMemory(nn.Module):
         K = self.k_proj(feat)  # (B, feat_dim)
         V = self.v_proj(feat)  # (B, feat_dim) - same as K!
         
-        # Retrieve from memory via attention
-        attn = F.softmax(Q @ self.K_mem.T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
-        retrieved_v = attn @ self.V_mem  # (B, feat_dim)
+        # Retrieve from memory via attention (detach memory to prevent gradient issues)
+        attn = F.softmax(Q @ self.K_mem.detach().T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
+        retrieved_v = attn @ self.V_mem.detach()  # (B, feat_dim)
         
         # Project to output parameters
         params = self.out_proj(retrieved_v)  # (B, 2)
