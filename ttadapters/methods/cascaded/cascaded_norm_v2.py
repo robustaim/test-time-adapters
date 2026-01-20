@@ -110,6 +110,10 @@ class GammaTransform(nn.Module):
             nn.Linear(16, 4)    # Output: 4 transformation parameters
         )
         
+        # Initialize final layer to zeros to prevent saturation
+        nn.init.zeros_(self.predictor[-1].weight)
+        nn.init.zeros_(self.predictor[-1].bias)
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
