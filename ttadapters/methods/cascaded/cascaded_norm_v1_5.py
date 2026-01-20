@@ -152,7 +152,8 @@ class GammaTransform(nn.Module):
             nn.Linear(8, 1)
         )
         # Initialize to output ~log(config.temperature)
-        nn.init.constant_(self.temperature_predictor[-1].bias, config.temperature.log())
+        import math
+        nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
         nn.init.zeros_(self.temperature_predictor[-1].weight)
         
         # Integrated stretcher
