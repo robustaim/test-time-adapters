@@ -451,22 +451,32 @@ class CascadedNormEngine(AdaptationEngine):
         Gating regularization loss to improve adaptation quality.
         
         Objectives:
-        1. Polarization: Push gates toward 0 (skip) or 1 (transform)
+        1. Entropy regularization: Encourage exploration (prevent saturation)
+        2. Weak polarization: Gentle push toward 0 or 1
         """
         if not params_list:
             return torch.tensor(0.0, device=self._device)
         
-        # Extract gating values (5th parameter in v1_5: clip_low, clip_high, gamma, temperature, gating)
+        # Extract gating values
+        # v2_5: (clip_low, clip_high, gamma, temperature, gating, momentum_beta)
         gatings = torch.stack([p[4] if isinstance(p[4], torch.Tensor) else torch.tensor(p[4]) 
                                for p in params_list])  # (B,)
         gatings = gatings.to(self._device)
         
-        # Polarization loss: Encourage gates near 0 or 1
-        # L_polar = E[g * (1-g)] → minimized when g∈{0,1}
+        # 1. Entropy regularization (maximize entropy → encourage exploration)
+        # H(g) = -[g*log(g) + (1-g)*log(1-g)]
+        # Maximum at g=0.5, minimum at g∈{0,1}
+        eps = 1e-6
+        gating_entropy = -(gatings * torch.log(gatings + eps) + 
+                          (1 - gatings) * torch.log(1 - gatings + eps))
+        exploration_loss = -gating_entropy.mean()  # Negative = maximize entropy
+        
+        # 2. Weak polarization (gentle push when BN alignment is satisfied)
         polarization_loss = (gatings * (1 - gatings)).mean()
         
-        # Use polarization only (diversity doesn't apply with batch_size=1)
-        gating_loss = 0.1 * polarization_loss
+        # Combined: exploration >> polarization
+        # Exploration prevents saturation, BN alignment loss does the real work
+        gating_loss = 0.1 * exploration_loss + 0.01 * polarization_loss
         
         return gating_loss
 
