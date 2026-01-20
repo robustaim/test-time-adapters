@@ -25,7 +25,7 @@ Advantages:
     3. No source data needed (BN.running_mean/var contains source info)
 """
 
-from typing import List
+from typing import List, Tuple
 from dataclasses import dataclass
 
 import torch
