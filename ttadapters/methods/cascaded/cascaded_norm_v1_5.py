@@ -417,6 +417,30 @@ class CascadedNormEngine(AdaptationEngine):
             params_list.append(params)
 
         return torch.stack(transformed_list, dim=0), params_list
+    
+    def _compute_gating_loss(self, params_list):
+        """
+        Gating regularization loss to improve adaptation quality.
+        
+        Objectives:
+        1. Polarization: Push gates toward 0 (skip) or 1 (transform)
+        """
+        if not params_list:
+            return torch.tensor(0.0, device=self._device)
+        
+        # Extract gating values (5th parameter in v1_5: clip_low, clip_high, gamma, temperature, gating)
+        gatings = torch.stack([p[4] if isinstance(p[4], torch.Tensor) else torch.tensor(p[4]) 
+                               for p in params_list])  # (B,)
+        gatings = gatings.to(self._device)
+        
+        # Polarization loss: Encourage gates near 0 or 1
+        # L_polar = E[g * (1-g)] → minimized when g∈{0,1}
+        polarization_loss = (gatings * (1 - gatings)).mean()
+        
+        # Use polarization only (diversity doesn't apply with batch_size=1)
+        gating_loss = 0.1 * polarization_loss
+        
+        return gating_loss
 
     def _compute_regularization_loss(self):
         """L2 regularization."""
@@ -452,7 +476,8 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        total_loss = alignment_loss + reg_loss
+        gating_loss = self._compute_gating_loss(params_list)
+        total_loss = alignment_loss + reg_loss + gating_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -487,7 +512,9 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        total_loss = alignment_loss + reg_loss
+        all_params = [p for p in self._stats['transform_params'][-len(batched_inputs):]]
+        gating_loss = self._compute_gating_loss(all_params) if all_params else torch.tensor(0.0, device=self._device)
+        total_loss = alignment_loss + reg_loss + gating_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
