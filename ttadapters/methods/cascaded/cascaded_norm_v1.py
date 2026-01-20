@@ -25,7 +25,7 @@ Advantages:
     3. No source data needed (BN.running_mean/var contains source info)
 """
 
-from typing import List, Tuple
+from typing import List
 from dataclasses import dataclass
 
 import torch
@@ -50,7 +50,11 @@ class CascadedNormConfig(AdaptationConfig):
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
+    def __init__(self, temperature: float = 0.01):
+        super().__init__()
+        self.temperature = temperature
+
+    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """Differentiable percentile approximation."""
         x_flat = x.flatten()
         n = x_flat.shape[0]
@@ -58,15 +62,15 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         idx = (p / 100.0) * (n - 1)
         indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (temperature * n), dim=0)
+        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
 
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
-    def stretch_channel(self, channel, clip_low, clip_high, gamma, temperature):
+    def stretch_channel(self, channel, clip_low, clip_high, gamma):
         """Apply stretching to single channel with gamma correction."""
-        low_val = self.soft_percentile(channel, clip_low, temperature)
-        high_val = self.soft_percentile(channel, clip_high, temperature)
+        low_val = self.soft_percentile(channel, clip_low)
+        high_val = self.soft_percentile(channel, clip_high)
 
         scale = 50.0
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
@@ -79,13 +83,13 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image, clip_low, clip_high, gamma, temperature):
+    def forward(self, image, clip_low, clip_high, gamma):
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]
         stretched = torch.zeros_like(image)
 
         for c in range(C):
-            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma, temperature)
+            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma)
 
         return stretched
 
@@ -98,26 +102,16 @@ class GammaTransform(nn.Module):
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
-
-        # Learnable temperature parameter (log-space initialization)
-        # Initial value: log(config.temperature)
-        self.temperature_log = nn.Parameter(torch.tensor(config.temperature).log())
-
+        
         # Integrated stretcher
-        self.stretcher = DifferentiableHistogramStretcher()
+        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
         """Transform image and get constrained parameters."""
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
-
-        # Temperature in log-space, constrained to [1e-6, 1.0]
-        # temperature = exp(temperature_log), clamped
-        temperature = torch.exp(self.temperature_log).clamp(1e-6, 1.0)
-
-        transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
-        return transformed, (clip_low, clip_high, gamma, temperature)
+        return clip_low, clip_high, gamma
 
 
 class CascadedNorm(nn.Module):
@@ -139,10 +133,6 @@ class CascadedNorm(nn.Module):
         self.norm_types: List[str] = []  # 'bn' or 'ln'
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
-
-    def forward(self, img) -> Tuple[torch.Tensor, Tuple[float, float, float, float]]:
-        transformed_img, params = self.transform_controller(img)
-        return transformed_img, params
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
@@ -311,13 +301,19 @@ class CascadedNormEngine(AdaptationEngine):
         """Only transformation parameters."""
         return self.cascaded_norm.online_parameters()
 
+    def _transform_image(self, img):
+        """Transform single image with gamma correction."""
+        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
+        transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
+        return transformed, (clip_low, clip_high, gamma)
+
     def _transform_batch(self, imgs):
         """Transform batch."""
         transformed_list = []
         params_list = []
 
         for i in range(imgs.shape[0]):
-            transformed, params = self.cascaded_norm(imgs[i])
+            transformed, params = self._transform_image(imgs[i])
             transformed_list.append(transformed)
             params_list.append(params)
 
@@ -430,7 +426,6 @@ class CascadedNormEngine(AdaptationEngine):
             'mean_clip_low': np.mean(params_array[:, 0]),
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
-            'mean_temperature': np.mean(params_array[:, 3]),
         }
 
     def to(self, *args, **kwargs):
