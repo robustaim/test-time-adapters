@@ -67,12 +67,12 @@ class AssociativeMemory(nn.Module):
         self.k_proj = nn.Linear(768, feat_dim)
         self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
         
-        # Output projection (feat_dim → 2 parameters)
-        self.out_proj = nn.Linear(feat_dim, 2)  # [gating_logit, log_temp]
+        # Output projection (feat_dim → 3 parameters)
+        self.out_proj = nn.Linear(feat_dim, 3)  # [gating_logit, log_temp, gamma_logit]
         
         # Initialize output projection to reasonable values
         nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
+        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0, gamma≈1.0
         
         # Memory buffers (circular queue)
         self.register_buffer('K_mem', torch.zeros(mem_size, feat_dim))
@@ -103,30 +103,24 @@ class AssociativeMemory(nn.Module):
         K = self.k_proj(feat)  # (B, feat_dim)
         V = self.v_proj(feat)  # (B, feat_dim) - same as K!
         
-        # Clone memory for use (prevents inplace operation issues)
-        # Gradient graph uses these copies, while original buffers get updated
-        K_mem_read = self.K_mem.clone().detach()
-        V_mem_read = self.V_mem.clone().detach()
-        
         # Retrieve from memory via attention
-        attn = F.softmax(Q @ K_mem_read.T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
-        retrieved_v = attn @ V_mem_read  # (B, feat_dim)
+        attn = F.softmax(Q @ self.K_mem.T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
+        retrieved_v = attn @ self.V_mem  # (B, feat_dim)
         
         # Project to output parameters
-        params = self.out_proj(retrieved_v)  # (B, 2)
+        params = self.out_proj(retrieved_v)  # (B, 3)
         
-        # Update memory (circular buffer, detached and no_grad to prevent inplace error)
-        with torch.no_grad():
-            self.K_mem[self.ptr] = K[0].detach()
-            self.V_mem[self.ptr] = V[0].detach()
-            self.ptr = (self.ptr + 1) % self.mem_size
+        # Update memory (circular buffer, detached)
+        self.K_mem[self.ptr] = K[0].detach()
+        self.V_mem[self.ptr] = V[0].detach()
+        self.ptr = (self.ptr + 1) % self.mem_size
         
         # Memory alignment loss: K should be close to V (same dimension now!)
         # This enforces "memorization" of image features
         loss_mem = F.mse_loss(K, V.detach())
         
         if squeeze_output:
-            params = params.squeeze(0)  # (2,)
+            params = params.squeeze(0)  # (3,)
         
         return params, loss_mem
 
@@ -183,9 +177,9 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
+        # Global parameters (clip only - gamma is now adaptive!)
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
         
         # Associative memory for adaptive parameters
         self.memory = AssociativeMemory(mem_size=1000, feat_dim=128)
@@ -203,15 +197,15 @@ class GammaTransform(nn.Module):
             transformed: (C, H, W) transformed image
             params: tuple of (clip_low, clip_high, gamma, gating, temperature, loss_mem)
         """
-        # Global parameters (same for all images)
+        # Global parameters (clip only - gamma now from memory!)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
         
         # Retrieve adaptive parameters from memory
-        mem_params, loss_mem = self.memory(img)  # (2,): [gating_logit, log_temp]
+        mem_params, loss_mem = self.memory(img)  # (3,): [gating_logit, log_temp, gamma_logit]
         gating = torch.sigmoid(mem_params[0])  # [0, 1]
         temperature = torch.exp(mem_params[1]).clamp(1e-4, 0.1)  # [0.0001, 0.1]
+        gamma = 0.5 + torch.sigmoid(mem_params[2]) * 1.5  # [0.5, 2.0] - adaptive!
         
         # Transform image
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
