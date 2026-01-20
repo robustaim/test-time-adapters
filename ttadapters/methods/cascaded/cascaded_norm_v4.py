@@ -110,10 +110,11 @@ class AssociativeMemory(nn.Module):
         # Project to output parameters
         params = self.out_proj(retrieved_v)  # (B, 2)
         
-        # Update memory (circular buffer, detached)
-        self.K_mem[self.ptr] = K[0].detach()
-        self.V_mem[self.ptr] = V[0].detach()
-        self.ptr = (self.ptr + 1) % self.mem_size
+        # Update memory (circular buffer, detached and no_grad to prevent inplace error)
+        with torch.no_grad():
+            self.K_mem[self.ptr] = K[0].detach()
+            self.V_mem[self.ptr] = V[0].detach()
+            self.ptr = (self.ptr + 1) % self.mem_size
         
         # Memory alignment loss: K should be close to V (same dimension now!)
         # This enforces "memorization" of image features
