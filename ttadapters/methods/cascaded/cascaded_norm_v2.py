@@ -91,31 +91,61 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters for histogram stretching with gamma correction."""
+    """
+    Per-sample transformation with learnable parameter prediction.
+    
+    Predicts all transformation parameters (clip_low, clip_high, gamma, temperature)
+    from image statistics, enabling domain-specific adaptation without catastrophic forgetting.
+    """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
-
-        # Learnable temperature parameter (log-space initialization)
-        # Initial value: log(config.temperature)
-        self.temperature_log = nn.Parameter(torch.tensor(config.temperature).log())
-
+        
+        # Parameter predictor network
+        self.predictor = nn.Sequential(
+            nn.Linear(8, 32),   # Input: 8 image statistics
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 4)    # Output: 4 transformation parameters
+        )
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image and get constrained parameters."""
-        clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
-        clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
+        """Transform image with per-sample predicted parameters."""
+        # Handle batch dimension
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
 
-        # Temperature in log-space, constrained to [1e-6, 1.0]
-        # temperature = exp(temperature_log), clamped
-        temperature = torch.exp(self.temperature_log).clamp(1e-6, 1.0)
-
+        # Compute image statistics
+        mean = img.mean(dim=[2, 3])  # (B, C)
+        std = img.std(dim=[2, 3])    # (B, C)
+        brightness = img.mean(dim=[1, 2, 3]).unsqueeze(1)  # (B, 1)
+        contrast = img.std(dim=[1, 2, 3]).unsqueeze(1)     # (B, 1)
+        
+        features = torch.cat([mean, std, brightness, contrast], dim=1)  # (B, 8)
+        
+        # Predict transformation parameters
+        raw_params = self.predictor(features)  # (B, 4)
+        
+        clip_low = torch.sigmoid(raw_params[:, 0]) * 10  # [0, 10]
+        clip_high = 90 + torch.sigmoid(raw_params[:, 1]) * 10  # [90, 100]
+        gamma = 0.5 + torch.sigmoid(raw_params[:, 2]) * 1.5  # [0.5, 2.0]
+        temperature = torch.exp(raw_params[:, 3]).clamp(1e-6, 1.0)  # [1e-6, 1.0]
+        
+        if squeeze_output:
+            clip_low = clip_low.squeeze(0)
+            clip_high = clip_high.squeeze(0)
+            gamma = gamma.squeeze(0)
+            temperature = temperature.squeeze(0)
+            img = img.squeeze(0)
+        
+        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
         return transformed, (clip_low, clip_high, gamma, temperature)
 
