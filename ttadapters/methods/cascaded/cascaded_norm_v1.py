@@ -108,11 +108,7 @@ class SpatialAttentionEncoder(nn.Module):
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
-    def __init__(self, temperature: float = 0.01):
-        super().__init__()
-        self.temperature = temperature
-
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor, temperature: torch.Tensor) -> torch.Tensor:
         """Differentiable percentile approximation."""
         x_flat = x.flatten()
         n = x_flat.shape[0]
@@ -120,15 +116,15 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         idx = (p / 100.0) * (n - 1)
         indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
+        weights = F.softmax(-(indices - idx).abs() / (temperature * n), dim=0)
 
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
-    def stretch_channel(self, channel, clip_low, clip_high, gamma):
+    def stretch_channel(self, channel, clip_low, clip_high, gamma, temperature):
         """Apply stretching to single channel with gamma correction."""
-        low_val = self.soft_percentile(channel, clip_low)
-        high_val = self.soft_percentile(channel, clip_high)
+        low_val = self.soft_percentile(channel, clip_low, temperature)
+        high_val = self.soft_percentile(channel, clip_high, temperature)
 
         scale = 50.0
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
@@ -141,64 +137,56 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image, clip_low, clip_high, gamma):
+    def forward(self, image, clip_low, clip_high, gamma, temperature):
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]
         stretched = torch.zeros_like(image)
 
         for c in range(C):
-            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma)
+            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma, temperature)
 
         return stretched
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters for histogram stretching with gamma correction and adaptive gating."""
+    """Learnable parameters for histogram stretching with gamma correction."""
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         # Global parameters (shared across all images)
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
+        self.gamma = nn.Parameter(torch.tensor(1.0))
         
-        # Image encoder for gating prediction
-        self.image_encoder = SpatialAttentionEncoder()  # 16-dim features
-        
-        # Gating predictor (adaptive transformation strength)
-        # Clear images → gating ≈ 0 (keep original)
-        # Degraded images → gating ≈ 1 (apply transformation)
-        self.gating_predictor = nn.Sequential(
+        # Per-sample temperature predictor with spatial attention
+        self.image_encoder = SpatialAttentionEncoder()  # 16-dim features with attention
+        self.temperature_predictor = nn.Sequential(
             nn.Linear(16, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()  # [0, 1] gating strength
+            nn.Linear(8, 1)
         )
-        # Initialize to output 0.5 (moderate gating)
-        nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
-        nn.init.zeros_(self.gating_predictor[-2].weight)
+        # Initialize to output ~log(config.temperature)
+        import math
+        nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
+        nn.init.zeros_(self.temperature_predictor[-1].weight)
         
         # Integrated stretcher
-        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
+        self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image with adaptive gating."""
+        """Transform image with per-sample predicted temperature."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
         
-        # Predict gating from image features
+        # Per-sample temperature (predicted from image)
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
-        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        log_temp = self.temperature_predictor(img_features)  # (1,) or (B, 1)
+        temperature = torch.exp(log_temp).clamp(1e-6, 1.0).squeeze(-1)  # scalar or (B,)
         
-        # Apply transformation
-        transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        
-        # Adaptive blending: gating=0 → original, gating=1 → transformed
-        output = gating * transformed + (1 - gating) * img
-        
-        return output, (clip_low, clip_high, gamma, gating)
+        transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
+        return transformed, (clip_low, clip_high, gamma, temperature)
 
 
 class CascadedNorm(nn.Module):
@@ -392,18 +380,13 @@ class CascadedNormEngine(AdaptationEngine):
         """Only transformation parameters."""
         return self.cascaded_norm.online_parameters()
 
-    def _transform_image(self, img):
-        """Transform single image with gamma correction and adaptive gating."""
-        transformed, params = self.cascaded_norm.transform_controller(img)
-        return transformed, params
-
     def _transform_batch(self, imgs):
         """Transform batch."""
         transformed_list = []
         params_list = []
 
         for i in range(imgs.shape[0]):
-            transformed, params = self._transform_image(imgs[i])
+            transformed, params = self.cascaded_norm(imgs[i])
             transformed_list.append(transformed)
             params_list.append(params)
 
@@ -420,8 +403,8 @@ class CascadedNormEngine(AdaptationEngine):
         if not params_list:
             return torch.tensor(0.0, device=self._device)
         
-        # Extract gating values (4th parameter)
-        gatings = torch.stack([p[3] if isinstance(p[3], torch.Tensor) else torch.tensor(p[3]) 
+        # Extract gating values (5th parameter in v1_5)
+        gatings = torch.stack([p[4] if isinstance(p[4], torch.Tensor) else torch.tensor(p[4]) 
                                for p in params_list])  # (B,)
         gatings = gatings.to(self._device)
         
@@ -468,8 +451,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        gating_loss = self._compute_gating_loss(params_list)
-        total_loss = alignment_loss + reg_loss + gating_loss
+        total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -504,12 +486,10 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        
-        # Collect params from all transformed inputs
         all_params = [p for p in self._stats['transform_params'][-len(batched_inputs):]]
         gating_loss = self._compute_gating_loss(all_params) if all_params else torch.tensor(0.0, device=self._device)
-        
         total_loss = alignment_loss + reg_loss + gating_loss
+
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -547,7 +527,7 @@ class CascadedNormEngine(AdaptationEngine):
             'mean_clip_low': np.mean(params_array[:, 0]),
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
-            'mean_gating': np.mean(params_array[:, 3]),
+            'mean_temperature': np.mean(params_array[:, 3]),
         }
 
     def to(self, *args, **kwargs):
