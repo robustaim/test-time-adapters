@@ -136,17 +136,19 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 class GammaTransform(nn.Module):
     """
-    Per-sample transformation with full parameter prediction.
+    Per-sample transformation with full parameter prediction and adaptive gating.
     
     Predicts ALL 4 parameters (clip_low, clip_high, gamma, temperature) from
-    image features for complete domain-specific adaptation.
+    image features AND gating strength for domain-specific adaptation.
     """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         
-        # Per-sample parameter predictor
+        # Shared image encoder (extract features once!)
         self.image_encoder = TinyImageEncoder()  # 16-dim features
+        
+        # Per-sample parameter predictor
         self.param_predictor = nn.Sequential(
             nn.Linear(16, 32),
             nn.ReLU(),
@@ -165,16 +167,32 @@ class GammaTransform(nn.Module):
             self.param_predictor[-1].bias[3] = math.log(config.temperature)  # temperature
         nn.init.zeros_(self.param_predictor[-1].weight)
         
+        # NEW: Gating predictor (adaptive transformation strength)
+        # Clear images → gating ≈ 0 (keep original)
+        # Degraded images → gating ≈ 1 (apply transformation)
+        self.gating_predictor = nn.Sequential(
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()  # [0, 1] gating strength
+        )
+        # Initialize to output 0.5 (moderate gating)
+        nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
+        nn.init.zeros_(self.gating_predictor[-2].weight)
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image with per-sample predicted parameters."""
-        # Extract image features
+        """Transform image with per-sample predicted parameters and adaptive gating."""
+        # Extract image features ONCE (shared by both predictors)
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
         
-        # Predict all 4 parameters
+        # Predict all 4 transformation parameters
         raw_params = self.param_predictor(img_features)  # (4,) or (B, 4)
+        
+        # Predict gating strength from same features
+        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
         # Handle scalar vs batch
         if raw_params.dim() == 1:
@@ -190,8 +208,14 @@ class GammaTransform(nn.Module):
             gamma = 0.5 + torch.sigmoid(raw_params[:, 2]) * 1.5
             temperature = torch.exp(raw_params[:, 3]).clamp(1e-6, 1.0)
         
+        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
-        return transformed, (clip_low, clip_high, gamma, temperature)
+        
+        # Adaptive blending: gating=0 → original, gating=1 → transformed
+        # Clear images should learn gating≈0, degraded images gating≈1
+        output = gating * transformed + (1 - gating) * img
+        
+        return output, (clip_low, clip_high, gamma, temperature, gating)
 
 
 class CascadedNorm(nn.Module):

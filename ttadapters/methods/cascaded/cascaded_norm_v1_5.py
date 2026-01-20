@@ -149,7 +149,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters for histogram stretching with gamma correction."""
+    """Learnable parameters for histogram stretching with gamma correction and adaptive gating."""
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
@@ -158,8 +158,10 @@ class GammaTransform(nn.Module):
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))
         
-        # Per-sample temperature predictor with spatial attention
+        # Shared image encoder (extract features once!)
         self.image_encoder = SpatialAttentionEncoder()  # 16-dim features with attention
+        
+        # Per-sample temperature predictor
         self.temperature_predictor = nn.Sequential(
             nn.Linear(16, 8),
             nn.ReLU(),
@@ -170,23 +172,47 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
         nn.init.zeros_(self.temperature_predictor[-1].weight)
         
+        # NEW: Gating predictor (adaptive transformation strength)
+        # Clear images → gating ≈ 0 (keep original)
+        # Degraded images → gating ≈ 1 (apply transformation)
+        self.gating_predictor = nn.Sequential(
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()  # [0, 1] gating strength
+        )
+        # Initialize to output 0.5 (moderate gating)
+        nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
+        nn.init.zeros_(self.gating_predictor[-2].weight)
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image with per-sample predicted temperature."""
+        """Transform image with adaptive gating."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
         
-        # Per-sample temperature (predicted from image)
+        # Extract image features ONCE (shared by both predictors)
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
+        
+        # Per-sample temperature (predicted from image)
         log_temp = self.temperature_predictor(img_features)  # (1,) or (B, 1)
         temperature = torch.exp(log_temp).clamp(1e-6, 1.0).squeeze(-1)  # scalar or (B,)
         
+        # Per-sample gating (predicted from same features)
+        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
+        
+        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
-        return transformed, (clip_low, clip_high, gamma, temperature)
+        
+        # Adaptive blending: gating=0 → original, gating=1 → transformed
+        # Clear images should learn gating≈0, degraded images gating≈1
+        output = gating * transformed + (1 - gating) * img
+        
+        return output, (clip_low, clip_high, gamma, temperature, gating)
 
 
 class CascadedNorm(nn.Module):
