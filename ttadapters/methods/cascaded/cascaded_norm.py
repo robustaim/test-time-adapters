@@ -115,6 +115,17 @@ class CascadedNormConfig(AdaptationConfig):
     # ==================== Transformation ====================
     temperature: float = 0.01  # For differentiable percentile (only when use_percentile=True)
 
+    def __post_init__(self):
+        # Cascade mode validation
+        if self.cascade_mode == "selected":
+            if self.cascade_indices is None or len(self.cascade_indices) == 0:
+                raise ValueError("cascade_indices must be provided when cascade_mode='selected'")
+
+        # LUT validation
+        if self.adaptation_method == "lut":
+            if self.lut_size < 16 or self.lut_size > 1024:
+                raise ValueError(f"lut_size must be in [16, 1024], got {self.lut_size}")
+
 
 class DifferentiableHistogramStretcher(nn.Module):
     """
