@@ -172,33 +172,24 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
         nn.init.zeros_(self.temperature_predictor[-1].weight)
         
-        # NEW: Enhanced gating predictor (deeper for better domain discrimination)
+        # Gating predictor (adaptive transformation strength)
         # Clear images → gating ≈ 0 (keep original)
         # Degraded images → gating ≈ 1 (apply transformation)
         self.gating_predictor = nn.Sequential(
-            nn.Linear(16, 64),
+            nn.Linear(16, 8),
             nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(8, 1),
             nn.Sigmoid()  # [0, 1] gating strength
         )
         # Initialize to output 0.5 (moderate gating)
         nn.init.constant_(self.gating_predictor[-2].bias, 0.0)
         nn.init.zeros_(self.gating_predictor[-2].weight)
         
-        # Momentum-based associative memory (Nested Learning)
-        # Acts as implicit memory for domain-specific gating patterns
-        self.register_buffer('gating_ema', torch.tensor(0.5))
-        self.gating_momentum = 0.9  # Momentum coefficient
-        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image with adaptive gating and momentum-based memory."""
+        """Transform image with adaptive gating."""
         # Global parameters (same for all images)
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
@@ -212,24 +203,7 @@ class GammaTransform(nn.Module):
         temperature = torch.exp(log_temp).clamp(1e-6, 1.0).squeeze(-1)  # scalar or (B,)
         
         # Per-sample gating (predicted from same features)
-        gating_pred = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
-        
-        # Associative memory via momentum (EMA)
-        # Remembers domain-specific gating patterns from recent samples
-        if self.training:
-            gating_raw = self.gating_momentum * self.gating_ema + (1 - self.gating_momentum) * gating_pred
-            self.gating_ema = gating_raw.detach()  # Update memory
-        else:
-            gating_raw = gating_pred  # No momentum during evaluation
-        
-        # Quadratic polarization: push away from 0.5
-        # gating < 0.5 → push toward 0 (less transformation)
-        # gating > 0.5 → push toward 1 (more transformation)
-        gating = torch.where(
-            gating_raw < 0.5,
-            2 * gating_raw**2,           # 0→0, 0.5→0.5 (parabola)
-            1 - 2 * (1 - gating_raw)**2  # 0.5→0.5, 1→1 (parabola)
-        )
+        gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
         # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
