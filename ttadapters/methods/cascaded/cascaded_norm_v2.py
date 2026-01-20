@@ -161,26 +161,25 @@ class GammaTransform(nn.Module):
         self.image_encoder = SpatialAttentionEncoder()  # 16-dim features
         
         # Transform parameter predictor (predicts all parameters from image)
-        # Outputs: [clip_low, clip_high, gamma, gating]
-        # Clear images → small clip range, gamma≈1.0, gating≈0 (keep original)
-        # Degraded images → wider clip range, adaptive gamma, gating≈1 (apply transformation)
+        # Outputs: [clip_low, clip_high, gamma]
+        # Clear images → small clip range, gamma≈1.0
+        # Degraded images → wider clip range, adaptive gamma
         self.param_predictor = nn.Sequential(
             nn.Linear(16, 32),
             nn.ReLU(),
             nn.Linear(32, 16),
             nn.ReLU(),
-            nn.Linear(16, 4)  # 4 outputs: clip_low, clip_high, gamma, gating
+            nn.Linear(16, 3)  # 3 outputs: clip_low, clip_high, gamma
         )
         
         # Initialize to reasonable defaults
-        # We want initial predictions to be: clip_low≈2, clip_high≈98, gamma≈1.0, gating≈0.5
+        # We want initial predictions to be: clip_low≈2, clip_high≈98, gamma≈1.0
         with torch.no_grad():
             # Set last layer bias to produce pre-activation values that map to desired defaults
             # clip_low: sigmoid(x)*10 ≈ 2 → x ≈ -0.85
             # clip_high: 90 + sigmoid(x)*10 ≈ 98 → sigmoid(x) ≈ 0.8 → x ≈ 1.39
             # gamma: 0.5 + sigmoid(x)*1.5 ≈ 1.0 → sigmoid(x) ≈ 0.33 → x ≈ -0.69
-            # gating: sigmoid(x) ≈ 0.5 → x ≈ 0.0
-            self.param_predictor[-1].bias.copy_(torch.tensor([-0.85, 1.39, -0.69, 0.0]))
+            self.param_predictor[-1].bias.copy_(torch.tensor([-0.85, 1.39, -0.69]))
             # Small weights for stability
             nn.init.normal_(self.param_predictor[-1].weight, mean=0.0, std=0.01)
         
@@ -193,32 +192,23 @@ class GammaTransform(nn.Module):
         img_features = self.image_encoder(img)  # (16,) or (B, 16)
         
         # Predict all transformation parameters from image
-        raw_params = self.param_predictor(img_features)  # (4,) or (B, 4)
+        raw_params = self.param_predictor(img_features)  # (3,) or (B, 3)
         
         # Handle batch vs single image
-        if raw_params.dim() == 1:  # Single image (4,)
-            clip_low_raw, clip_high_raw, gamma_raw, gating_raw = raw_params
-        else:  # Batch (B, 4)
-            clip_low_raw, clip_high_raw, gamma_raw, gating_raw = raw_params.unbind(dim=-1)
+        if raw_params.dim() == 1:  # Single image (3,)
+            clip_low_raw, clip_high_raw, gamma_raw = raw_params
+        else:  # Batch (B, 3)
+            clip_low_raw, clip_high_raw, gamma_raw = raw_params.unbind(dim=-1)
         
         # Apply activation functions to constrain to valid ranges
         clip_low = torch.sigmoid(clip_low_raw) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(clip_high_raw) * 10  # [90, 100]
         gamma = 0.5 + torch.sigmoid(gamma_raw) * 1.5  # [0.5, 2.0]
-        gating = torch.sigmoid(gating_raw)  # [0, 1]
         
-        # Apply transformation
-        transformed = self.stretcher(img, clip_low, clip_high, gamma)
+        # Apply transformation directly (no gating/blending)
+        output = self.stretcher(img, clip_low, clip_high, gamma)
         
-        # Adaptive blending: gating=0 → original, gating=1 → transformed
-        # Handle batch dimension properly
-        if img.dim() == 3:  # Single image (C, H, W)
-            output = gating * transformed + (1 - gating) * img
-        else:  # Batch (B, C, H, W) - need to broadcast gating
-            gating_expanded = gating.view(-1, 1, 1, 1)  # (B, 1, 1, 1)
-            output = gating_expanded * transformed + (1 - gating_expanded) * img
-        
-        return output, (clip_low, clip_high, gamma, gating)
+        return output, (clip_low, clip_high, gamma)
 
 
 class CascadedNorm(nn.Module):
@@ -431,28 +421,10 @@ class CascadedNormEngine(AdaptationEngine):
     
     def _compute_gating_loss(self, params_list):
         """
-        Gating regularization loss to improve adaptation quality.
-        
-        Objectives:
-        1. Polarization: Push gates toward 0 (skip) or 1 (transform)
-        2. Diversity: Prevent all gates from being the same
+        Gating loss removed - no longer using gating mechanism.
+        Returns zero for compatibility with existing code.
         """
-        if not params_list:
-            return torch.tensor(0.0, device=self._device)
-        
-        # Extract gating values (4th parameter)
-        gatings = torch.stack([p[3] if isinstance(p[3], torch.Tensor) else torch.tensor(p[3]) 
-                               for p in params_list])  # (B,)
-        gatings = gatings.to(self._device)
-        
-        # Polarization loss: Encourage gates near 0 or 1
-        # L_polar = E[g * (1-g)] → minimized when g∈{0,1}
-        polarization_loss = (gatings * (1 - gatings)).mean()
-        
-        # Use polarization only (diversity doesn't apply with batch_size=1)
-        gating_loss = 0.1 * polarization_loss
-        
-        return gating_loss
+        return torch.tensor(0.0, device=self._device)
 
     def _compute_regularization_loss(self):
         """L2 regularization."""
@@ -567,7 +539,6 @@ class CascadedNormEngine(AdaptationEngine):
             'mean_clip_low': np.mean(params_array[:, 0]),
             'mean_clip_high': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
-            'mean_gating': np.mean(params_array[:, 3]),
         }
 
     def to(self, *args, **kwargs):
