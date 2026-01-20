@@ -102,7 +102,7 @@ class GammaTransform(nn.Module):
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
-        
+
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
@@ -117,22 +117,32 @@ class GammaTransform(nn.Module):
 class CascadedNorm(nn.Module):
     """
     CascadedNorm: Manages transformation and norm layer statistics.
-    
+
     Integrates GammaTransform controller and tracks normalization layers.
     """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
-        
+
         # Transform controller with integrated stretcher
         self.transform_controller = GammaTransform(config)
-        
+
         # Norm layer tracking (will be populated by Engine)
         self.norm_layers: List[nn.Module] = []
         self.norm_types: List[str] = []  # 'bn' or 'ln'
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
+
+    def foward(self, img):
+        """Transform single image with gamma correction and 50% blending."""
+        clip_low, clip_high, gamma = self.transform_controller()
+        transformed = self.transform_controller.stretcher(img, clip_low, clip_high, gamma)
+
+        # 50% blending (controlled experiment)
+        output = 0.5 * transformed + 0.5 * img
+
+        return output, (clip_low, clip_high, gamma)
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
@@ -159,7 +169,7 @@ class CascadedNorm(nn.Module):
             total_loss = total_loss + loss_mean + loss_var
 
         return total_loss
-    
+
     def online_parameters(self):
         """Get learnable parameters for optimization."""
         return self.transform_controller.parameters()
@@ -214,17 +224,17 @@ class CascadedNormEngine(AdaptationEngine):
                     module.running_var.mean().clone()   # Scalar source var
                 ))
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
-                 # LN: Target normalized distribution (mean=0, var=1)
+                # LN: Target normalized distribution (mean=0, var=1)
                 found.append((
                     name, "LN", module,
                     torch.tensor(0.0),
                     torch.tensor(1.0)
                 ))
-        
+
         # Filtering & Wrapping
         filtered = self._filter_by_cascade_mode(found)
         self._cascade_wrap(filtered)
-        
+
         # Populate to CascadedNorm
         for _, norm_type, module, running_mean, running_var in filtered:
             self.cascaded_norm.norm_layers.append(module)
@@ -239,8 +249,8 @@ class CascadedNormEngine(AdaptationEngine):
     def _filter_by_cascade_mode(self, norm_list):
         """Filter normalization layers based on cascade mode."""
         if not hasattr(self.config, 'cascade_mode'):
-             return norm_list
-             
+            return norm_list
+
         match self.config.cascade_mode:
             case "single":
                 return [norm_list[0]]
@@ -301,23 +311,13 @@ class CascadedNormEngine(AdaptationEngine):
         """Only transformation parameters."""
         return self.cascaded_norm.online_parameters()
 
-    def _transform_image(self, img):
-        """Transform single image with gamma correction and 50% blending."""
-        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-        transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
-        
-        # 50% blending (controlled experiment)
-        output = 0.5 * transformed + 0.5 * img
-        
-        return output, (clip_low, clip_high, gamma)
-
     def _transform_batch(self, imgs):
         """Transform batch."""
         transformed_list = []
         params_list = []
 
         for i in range(imgs.shape[0]):
-            transformed, params = self._transform_image(imgs[i])
+            transformed, params = self.cascaded_norm(imgs[i])
             transformed_list.append(transformed)
             params_list.append(params)
 
@@ -381,7 +381,7 @@ class CascadedNormEngine(AdaptationEngine):
             if original_scale:
                 img = img * 255.0
 
-            img_transformed, params = self._transform_image(img)
+            img_transformed, params = self.cascaded_norm(img)
             self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
