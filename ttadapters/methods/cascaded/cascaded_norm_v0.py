@@ -94,17 +94,14 @@ class DifferentiableHistogramStretcher(nn.Module):
         return stretched
 
 
-class GammaTransform(nn.Module):
+class InputTransformController(nn.Module):
     """Learnable parameters for histogram stretching with gamma correction."""
 
-    def __init__(self, config: CascadedNormConfig):
+    def __init__(self):
         super().__init__()
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
-        
-        # Integrated stretcher
-        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self):
         """Get constrained parameters."""
@@ -114,74 +111,52 @@ class GammaTransform(nn.Module):
         return clip_low, clip_high, gamma
 
 
-class CascadedNorm(nn.Module):
-    """
-    CascadedNorm: Manages transformation and norm layer statistics.
-    
-    Integrates GammaTransform controller and tracks normalization layers.
-    """
+class NormStatisticsExtractor:
+    """Extract and cache BN/LN layer references and source statistics."""
 
-    def __init__(self, config: CascadedNormConfig):
-        super().__init__()
-        self.config = config
-        
-        # Transform controller with integrated stretcher
-        self.transform_controller = GammaTransform(config)
-        
-        # Norm layer tracking (will be populated by Engine)
+    def __init__(self, model: nn.Module):
         self.norm_layers: List[nn.Module] = []
         self.norm_types: List[str] = []  # 'bn' or 'ln'
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
-    def extract_norm_layers(self, model: nn.Module, cascade_wrap_fn):
-        """Find all BN/LN layers and wrap them."""
-        found = []
+        self._extract_norm_layers(model)
+
+    def _extract_norm_layers(self, model: nn.Module):
+        """Find all BN/LN layers."""
         for name, module in model.named_modules():
             if isinstance(module, nn.BatchNorm2d) or "BatchNorm2d" in module.__class__.__name__:
+                self.norm_layers.append(module)
+                self.norm_types.append('bn')
                 # BN: Use running statistics (averaged over channels)
-                found.append((
-                    name, "BN", module,
-                    module.running_mean.mean().clone(),
-                    module.running_var.mean().clone()
-                ))
+                self.source_means.append(module.running_mean.mean().clone())
+                self.source_vars.append(module.running_var.mean().clone())
                 print(f"  [BN] Found: {name} ({module.num_features} channels)")
 
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module.__class__.__name__:
+                self.norm_layers.append(module)
+                self.norm_types.append('ln')
                 # LN: Target normalized distribution (mean=0, var=1)
-                found.append((
-                    name, "LN", module,
-                    torch.tensor(0.0),
-                    torch.tensor(1.0)
-                ))
+                self.source_means.append(torch.tensor(0.0))
+                self.source_vars.append(torch.tensor(1.0))
                 print(f"  [LN] Found: {name}")
-        
-        # Wrap layers
-        cascade_wrap_fn(found)
-        
-        # Populate norm layer info
-        for _, _, module, running_mean, running_var in found:
-            self.norm_layers.append(module)
-            self.norm_types.append(_)
-            self.source_means.append(running_mean)
-            self.source_vars.append(running_var)
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
 
         for i, (norm_layer, norm_type) in enumerate(zip(self.norm_layers, self.norm_types)):
-            if not hasattr(norm_layer, 'current_mean') or norm_layer.current_mean is None:
+            if not hasattr(norm_layer, '_batch_mean') or norm_layer._batch_mean is None:
                 continue
 
-            batch_mean = norm_layer.current_mean
-            batch_var = norm_layer.current_var
+            batch_mean = norm_layer._batch_mean
+            batch_var = norm_layer._batch_var
 
             source_mean = self.source_means[i].to(batch_mean.device)
             source_var = self.source_vars[i].to(batch_var.device)
 
             # For BN with multiple channels, average to scalar
-            if norm_type == 'BN' and batch_mean.ndim > 0:
+            if norm_type == 'bn' and batch_mean.ndim > 0:
                 batch_mean = batch_mean.mean()
                 batch_var = batch_var.mean()
 
@@ -191,10 +166,49 @@ class CascadedNorm(nn.Module):
             total_loss = total_loss + loss_mean + loss_var
 
         return total_loss
-    
-    def online_parameters(self):
-        """Get learnable parameters for optimization."""
-        return self.transform_controller.parameters()
+
+
+class NormStatisticsHook:
+    """Hook to collect batch statistics from BN/LN layers."""
+
+    def __init__(self, norm_types: List[str]):
+        """
+        Args:
+            norm_types: List of 'bn' or 'ln' for each norm layer
+        """
+        self.hooks = []
+        self.norm_types = norm_types
+
+    def register_hooks(self, norm_layers: List[nn.Module]):
+        """Register forward hooks."""
+        for i, norm_layer in enumerate(norm_layers):
+            norm_type = self.norm_types[i]
+            hook = norm_layer.register_forward_hook(
+                lambda module, input, output, nt=norm_type: self._hook_fn(module, input, output, nt)
+            )
+            self.hooks.append(hook)
+
+    def _hook_fn(self, module, input, output, norm_type):
+        """Capture batch statistics."""
+        x = input[0]
+
+        if norm_type == 'bn':
+            # BatchNorm: (B, C, H, W) -> channel-wise statistics
+            batch_mean = x.mean(dim=[0, 2, 3])  # [C]
+            batch_var = x.var(dim=[0, 2, 3], unbiased=False)  # [C]
+        else:  # 'ln'
+            # LayerNorm: global statistics
+            batch_mean = x.mean()  # scalar
+            batch_var = x.var(unbiased=False)  # scalar
+
+        module._batch_mean = batch_mean
+        module._batch_var = batch_var
+
+    def remove_hooks(self):
+        """Remove all hooks."""
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
 
 
 class CascadedNormEngine(AdaptationEngine):
@@ -207,84 +221,36 @@ class CascadedNormEngine(AdaptationEngine):
     model_name: str = "CascadedNormEngine"
 
     def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
-        self.cascaded_norm: CascadedNorm  # will be initialized in _pre_init()
-        self.cascaded_norm_state: dict
-        self.config = config
-
         super().__init__(base_model, config)
 
-    def _pre_init(self):
-        # Transformation modules
-        self.cascaded_norm = CascadedNorm(self.config)
+        self.config = config
 
-    def _post_init(self):
-        self.cascaded_norm.to(self.device)
-        self.cascaded_norm_state = {key: value.cpu() for key, value in self.cascaded_norm.state_dict().items()}
+        # Input transformation
+        self.transform_controller = InputTransformController()
+        self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-        # Extract norm layers and wrap them
+        # Norm extraction (both BN and LN)
         print(f"[CascadedNorm] Extracting norm layers...")
-        self.cascaded_norm.extract_norm_layers(self.base_model, self._cascade_wrap)
-        print(f"[CascadedNorm] Found {len(self.cascaded_norm.norm_layers)} norm layers "
-              f"(BN: {self.cascaded_norm.norm_types.count('BN')}, "
-              f"LN: {self.cascaded_norm.norm_types.count('LN')})")
+        self.norm_extractor = NormStatisticsExtractor(self.base_model)
+        print(f"[CascadedNorm] Found {len(self.norm_extractor.norm_layers)} norm layers "
+              f"(BN: {self.norm_extractor.norm_types.count('bn')}, "
+              f"LN: {self.norm_extractor.norm_types.count('ln')})")
+
+        # Hook manager
+        self.hook_manager = NormStatisticsHook(self.norm_extractor.norm_types)
+        self.hook_manager.register_hooks(self.norm_extractor.norm_layers)
 
         # Stats
         self._stats = {'alignment_losses': [], 'transform_params': []}
 
-    @staticmethod
-    def _cascade_wrap(filtered: list[nn.Module]):
-        """Wrap norm layer forward methods to capture batch statistics."""
-        class_cache = {}
-
-        for name, module_type, module, running_mean, running_var in filtered:
-            original_class = module.__class__
-
-            if original_class not in class_cache:
-                # Define wrapped forward
-                if module_type == "BN":
-                    def new_forward(_self, _input: torch.Tensor) -> torch.Tensor:
-                        if _input.dim() == 4:  # (B, C, H, W)
-                            dims = (0, 2, 3)
-                        elif _input.dim() == 3:  # (B, C, L)
-                            dims = (0, 2)
-                        else:  # (B, C)
-                            dims = (0,)
-                        _self.current_mean = _input.mean(dim=dims)
-                        _self.current_var = _input.var(dim=dims, unbiased=False)
-
-                        return original_class.forward(_self, _input)
-                elif module_type == "LN":
-                    def new_forward(_self, _input: torch.Tensor) -> torch.Tensor:
-                        if hasattr(module, "normalized_shape"):
-                            dims = tuple(range(-len(module.normalized_shape), 0))
-                            _self.current_mean = _input.mean(dim=dims)
-                            _self.current_var = _input.var(dim=dims, unbiased=False)
-                        else:
-                            _self.current_mean = _input.mean()
-                            _self.current_var = _input.var(unbiased=False)
-
-                        return original_class.forward(_self, _input)
-
-                # Create new class
-                new_class = type("Cascaded"+original_class.__name__, (original_class,), {
-                    "forward": new_forward
-                })
-                class_cache[original_class] = new_class
-            else:  # from class cache
-                new_class = class_cache[original_class]
-
-            module.__class__ = new_class  # override class
-            module.current_mean = torch.tensor(0.0)  # register stat variable
-            module.current_var = torch.tensor(0.0)  # register stat variable
-
     def online_parameters(self):
         """Only transformation parameters."""
-        return self.cascaded_norm.online_parameters()
+        return self.transform_controller.parameters()
 
     def _transform_image(self, img):
         """Transform single image with gamma correction."""
-        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-        transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
+        clip_low, clip_high, gamma = self.transform_controller()
+        transformed = self.stretcher(img, clip_low, clip_high, gamma)
         return transformed, (clip_low, clip_high, gamma)
 
     def _transform_batch(self, imgs):
@@ -302,7 +268,7 @@ class CascadedNormEngine(AdaptationEngine):
     def _compute_regularization_loss(self):
         """L2 regularization."""
         reg_loss = torch.tensor(0.0, device=self._device)
-        for param in self.cascaded_norm.transform_controller.parameters():
+        for param in self.transform_controller.parameters():
             reg_loss = reg_loss + param.pow(2).sum()
         return self.config.param_regularization * reg_loss
 
@@ -331,11 +297,9 @@ class CascadedNormEngine(AdaptationEngine):
         model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
         outputs = self.base_model(model_input)
 
-        alignment_loss = self.cascaded_norm.compute_alignment_loss()
+        alignment_loss = self.norm_extractor.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
-
-        print(f"[PHASE2 LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -368,11 +332,9 @@ class CascadedNormEngine(AdaptationEngine):
 
         outputs = self.base_model(transformed_inputs)
 
-        alignment_loss = self.cascaded_norm.compute_alignment_loss()
+        alignment_loss = self.norm_extractor.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
-
-        print(f"[PHASE2 LOSS] Alignment: {alignment_loss.item():.4f}, Reg: {reg_loss.item():.4f}, Total: {total_loss.item():.4f}")
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -383,17 +345,10 @@ class CascadedNormEngine(AdaptationEngine):
         return outputs
 
     def reset(self, reset_stats=False):
-        """Reset model to initial state."""
-        self.cascaded_norm.load_state_dict(self.cascaded_norm_state)
-        self.online(self.adapting)
-        self.to(self.device)
-        self.to(self.dtype)
-        try:
-            self.optimizer.zero_grad()
-        except:
-            pass
-        if reset_stats:
-            self._stats = {'alignment_losses': [], 'transform_params': []}
+        """Reset adaptation."""
+        super().reset(reset_stats=reset_stats)
+        self.transform_controller = InputTransformController().to(self._device)
+        self._optimizer = None
 
     @property
     def stats(self):
@@ -415,5 +370,11 @@ class CascadedNormEngine(AdaptationEngine):
     def to(self, *args, **kwargs):
         """Move to device."""
         result = super().to(*args, **kwargs)
-        self.cascaded_norm = self.cascaded_norm.to(self._device)
+        self.transform_controller = self.transform_controller.to(self._device)
+        self.stretcher = self.stretcher.to(self._device)
         return result
+
+    def __del__(self):
+        """Cleanup hooks."""
+        if hasattr(self, 'hook_manager'):
+            self.hook_manager.remove_hooks()
