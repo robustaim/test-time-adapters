@@ -475,8 +475,8 @@ class CascadedNormEngine(AdaptationEngine):
         polarization_loss = (gatings * (1 - gatings)).mean()
         
         # Combined: exploration >> polarization
-        # Exploration prevents saturation, BN alignment loss does the real work
-        gating_loss = 0.1 * exploration_loss + 0.01 * polarization_loss
+        # Strong exploration to prevent saturation (competing with BN alignment)
+        gating_loss = 1.0 * exploration_loss + 0.01 * polarization_loss
         
         return gating_loss
 
