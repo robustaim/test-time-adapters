@@ -643,7 +643,9 @@ class CascadedNormEngine(AdaptationEngine):
         if self.adapting:
             match self.model_provider:
                 case ModelProvider.Detectron2:
-                    args = (self.dist_norm(*args), )
+                    inputs = args[0]  # Detectron2 inputs are List[Dict] with "image" key
+                    for x in inputs:
+                        x['image'] = self.dist_norm(x['image'])
                 case ModelProvider.HuggingFace:
                     pass  # TODO
                 case ModelProvider.Ultralytics:
