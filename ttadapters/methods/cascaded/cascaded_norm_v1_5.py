@@ -209,6 +209,15 @@ class GammaTransform(nn.Module):
         # Per-sample gating (predicted from same features)
         gating = self.gating_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
+        # Quadratic polarization: push away from 0.5
+        # gating < 0.5 → push toward 0 (less transformation)
+        # gating > 0.5 → push toward 1 (more transformation)
+        gating = torch.where(
+            gating < 0.5,
+            2 * gating**2,           # 0→0, 0.5→0.5 (parabola)
+            1 - 2 * (1 - gating)**2  # 0.5→0.5, 1→1 (parabola)
+        )
+        
         # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
         
