@@ -221,6 +221,10 @@ class CascadedNorm(nn.Module):
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
+    def forward(self, img) -> Tuple[torch.Tensor, Tuple[float, float, float, float]]:
+        transformed_img, params = self.transform_controller(img)
+        return transformed_img, params
+
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
