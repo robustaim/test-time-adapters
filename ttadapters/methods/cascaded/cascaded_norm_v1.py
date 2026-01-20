@@ -47,74 +47,6 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-class TemperaturePredictor(nn.Module):
-    """
-    Predicts optimal temperature from image statistics.
-    
-    Enables per-sample temperature adaptation without catastrophic forgetting.
-    Each image gets its own temperature based on its visual properties
-    (brightness, contrast, color distribution).
-    
-    Input features (8 total):
-        - RGB mean (3): Average color values per channel
-        - RGB std (3): Color distribution spread per channel
-        - Overall brightness (1): Global luminance
-        - Contrast (1): Global intensity variation
-    
-    Output:
-        - Temperature in [1e-6, 1.0] range
-    """
-    
-    def __init__(self):
-        super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(8, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1)
-        )
-    
-    def forward(self, img: torch.Tensor) -> torch.Tensor:
-        """
-        Predict temperature from image statistics.
-        
-        Args:
-            img: Input image (C, H, W) or (B, C, H, W)
-        
-        Returns:
-            temperature: Predicted temperature, scalar or (B,)
-        """
-        # Handle batch dimension
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        # Compute statistics per image in batch
-        mean = img.mean(dim=[2, 3])  # (B, C) - per-channel mean
-        std = img.std(dim=[2, 3])    # (B, C) - per-channel std
-        brightness = img.mean(dim=[1, 2, 3])  # (B,) - overall brightness
-        contrast = img.std(dim=[1, 2, 3])     # (B,) - overall contrast
-        
-        # Reshape brightness and contrast to (B, 1) for concatenation
-        brightness = brightness.unsqueeze(1)  # (B, 1)
-        contrast = contrast.unsqueeze(1)      # (B, 1)
-        
-        # Concatenate all features
-        features = torch.cat([mean, std, brightness, contrast], dim=1)  # (B, 8)
-        
-        # Predict log-temperature, then transform to [1e-6, 1.0]
-        log_temp = self.predictor(features)  # (B, 1)
-        temperature = torch.exp(log_temp).clamp(1e-6, 1.0).squeeze(-1)  # (B,)
-        
-        if squeeze_output:
-            temperature = temperature.squeeze(0)  # scalar
-        
-        return temperature
-
-
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
@@ -159,29 +91,61 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters for histogram stretching with gamma correction."""
+    """
+    Per-sample transformation with learnable parameter prediction.
+    
+    Predicts all transformation parameters (clip_low, clip_high, gamma, temperature)
+    from image statistics, enabling domain-specific adaptation without catastrophic forgetting.
+    """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
-
-        # Per-sample temperature predictor (replaces global temperature_log)
-        self.temperature_predictor = TemperaturePredictor()
-
+        
+        # Parameter predictor network
+        self.predictor = nn.Sequential(
+            nn.Linear(8, 32),   # Input: 8 image statistics
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 4)    # Output: 4 transformation parameters
+        )
+        
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher()
 
     def forward(self, img):
-        """Transform image with per-sample predicted temperature."""
-        clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
-        clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
+        """Transform image with per-sample predicted parameters."""
+        # Handle batch dimension
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
 
-        # Predict temperature from image statistics (per-sample)
-        temperature = self.temperature_predictor(img)
-
+        # Compute image statistics
+        mean = img.mean(dim=[2, 3])  # (B, C)
+        std = img.std(dim=[2, 3])    # (B, C)
+        brightness = img.mean(dim=[1, 2, 3]).unsqueeze(1)  # (B, 1)
+        contrast = img.std(dim=[1, 2, 3]).unsqueeze(1)     # (B, 1)
+        
+        features = torch.cat([mean, std, brightness, contrast], dim=1)  # (B, 8)
+        
+        # Predict transformation parameters
+        raw_params = self.predictor(features)  # (B, 4)
+        
+        clip_low = torch.sigmoid(raw_params[:, 0]) * 10  # [0, 10]
+        clip_high = 90 + torch.sigmoid(raw_params[:, 1]) * 10  # [90, 100]
+        gamma = 0.5 + torch.sigmoid(raw_params[:, 2]) * 1.5  # [0.5, 2.0]
+        temperature = torch.exp(raw_params[:, 3]).clamp(1e-6, 1.0)  # [1e-6, 1.0]
+        
+        if squeeze_output:
+            clip_low = clip_low.squeeze(0)
+            clip_high = clip_high.squeeze(0)
+            gamma = gamma.squeeze(0)
+            temperature = temperature.squeeze(0)
+            img = img.squeeze(0)
+        
+        # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma, temperature)
         return transformed, (clip_low, clip_high, gamma, temperature)
 
