@@ -172,13 +172,17 @@ class GammaTransform(nn.Module):
         nn.init.constant_(self.temperature_predictor[-1].bias, math.log(config.temperature))
         nn.init.zeros_(self.temperature_predictor[-1].weight)
         
-        # NEW: Gating predictor (adaptive transformation strength)
+        # NEW: Enhanced gating predictor (deeper for better domain discrimination)
         # Clear images → gating ≈ 0 (keep original)
         # Degraded images → gating ≈ 1 (apply transformation)
         self.gating_predictor = nn.Sequential(
-            nn.Linear(16, 8),
+            nn.Linear(16, 64),
             nn.ReLU(),
-            nn.Linear(8, 1),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
             nn.Sigmoid()  # [0, 1] gating strength
         )
         # Initialize to output 0.5 (moderate gating)
