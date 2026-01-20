@@ -134,8 +134,6 @@ class CascadedNorm(nn.Module):
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
-
-
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
@@ -191,20 +189,11 @@ class CascadedNormEngine(AdaptationEngine):
         self.cascaded_norm.to(self.device)
         self.cascaded_norm_state = {key: value.cpu() for key, value in self.cascaded_norm.state_dict().items()}
 
-        # Inject dist_norm into base model
-        self._inject_dist_norm()
-
         # Extract norm layers and wrap them
         self._extract_norm_layers()
 
         # Stats
-        self._stats = {
-            'alignment_losses': [], 
-            'transform_params': [],
-            # Latency tracking if needed
-            'forward_times': [],
-            'backward_times': []
-        }
+        self._stats = {'alignment_losses': [], 'transform_params': []}
 
     def _extract_norm_layers(self):
         """
@@ -237,11 +226,6 @@ class CascadedNormEngine(AdaptationEngine):
         self._cascade_wrap(filtered)
         
         # Populate to CascadedNorm
-        self.cascaded_norm.norm_layers = []
-        self.cascaded_norm.norm_types = []
-        self.cascaded_norm.source_means = []
-        self.cascaded_norm.source_vars = []
-
         for _, norm_type, module, running_mean, running_var in filtered:
             self.cascaded_norm.norm_layers.append(module)
             self.cascaded_norm.norm_types.append(norm_type)
@@ -313,150 +297,27 @@ class CascadedNormEngine(AdaptationEngine):
             module.current_mean = torch.tensor(0.0)  # register stat variable
             module.current_var = torch.tensor(0.0)  # register stat variable
 
-    def _inject_dist_norm(self):
-        """
-        Inject dist_norm into the first submodule's forward.
-
-        Wraps the first actual layer that processes images (e.g., backbone, conv1, stem).
-        Handles pre-normalized inputs (e.g. Detectron2) by dynamically inspecting
-        input statistics and applying reversible normalization.
-        """
-        # Find first submodule
-        first_module = self._find_first_image_module()
-
-        if first_module is None:
-            if self.config.verbose:
-                print("[Warning] No suitable first module found, falling back to base_model.forward wrapping")
-            
-            # Fallback: wrap base_model.forward (Legacy V1 method)
-            original_forward = self.base_model.forward
-            def preprocessing_forward(x, *args, **kwargs):
-                if self.adapting:
-                    # Handle tensor input (Raw Image usually)
-                    if isinstance(x, torch.Tensor) and x.ndim == 4:
-                        original_scale = x.max() <= 1.0
-                        if original_scale:
-                            x = x * 255.0
-                        
-                        transformed_list = []
-                        for i in range(x.shape[0]):
-                            clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-                            transformed = self.cascaded_norm.transform_controller.stretcher(x[i], clip_low, clip_high, gamma)
-                            transformed_list.append(transformed)
-                        x = torch.stack(transformed_list, dim=0)
-                        
-                        if original_scale:
-                            x = x / 255.0
-                    
-                    # Handle dict_list input (Detectron2 format)
-                    elif isinstance(x, list) and len(x) > 0 and isinstance(x[0], dict):
-                        transformed_inputs = []
-                        for input_dict in x:
-                            if 'image' not in input_dict:
-                                transformed_inputs.append(input_dict)
-                                continue
-                            
-                            img = input_dict['image'].to(self._device)
-                            original_scale = img.max() <= 1.0
-                            if original_scale:
-                                img = img * 255.0
-                            
-                            clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-                            img_transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
-                            
-                            new_input = input_dict.copy()
-                            new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
-                            transformed_inputs.append(new_input)
-                        x = transformed_inputs
-                
-                return original_forward(x, *args, **kwargs)
-            
-            self.base_model.forward = preprocessing_forward
-            return
-
-        # Wrap the first module's forward
-        original_forward = first_module.forward
-
-        def preprocessing_forward(x, *args, **kwargs):
-            if self.adapting and isinstance(x, torch.Tensor) and x.ndim == 4:
-                # Dynamic Range Normalization
-                # Input x might be already normalized (e.g. mean=0, std=1, containing negative values)
-                # But Stretcher expects [0, 255] distribution.
-                
-                transformed_list = []
-                for i in range(x.shape[0]):
-                    img = x[i]
-                    
-                    # 1. Capture dynamic range per image
-                    img_min = img.min()
-                    img_max = img.max()
-                    img_range = img_max - img_min + 1e-6
-                    
-                    # 2. Normalize to [0, 1]
-                    img_norm = (img - img_min) / img_range
-                    
-                    # 3. Scale to [0, 255] for Stretcher
-                    img_255 = img_norm * 255.0
-                    
-                    # 4. Transform
-                    clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-                    t_255 = self.cascaded_norm.transform_controller.stretcher(img_255, clip_low, clip_high, gamma)
-                    
-                    # 5. Restore original scale
-                    t_norm = t_255 / 255.0
-                    t_restored = t_norm * img_range + img_min
-                    
-                    transformed_list.append(t_restored)
-                    
-                x = torch.stack(transformed_list, dim=0)
-
-            return original_forward(x, *args, **kwargs)
-
-        first_module.forward = preprocessing_forward
-        
-        if self.config.verbose:
-            print(f"[CascadedNorm] Injected dist_norm into: {first_module.__class__.__name__}")
-
-
-
-    def _find_first_image_module(self) -> nn.Module:
-        """
-        Find the first module that directly processes images.
-
-        Searches for common patterns:
-        1. Named modules: 'backbone', 'stem', 'conv1', 'patch_embed', 'model'
-        2. First Conv2d or Linear layer
-        3. First child module
-
-        Returns:
-            First module that likely receives image tensors, or None if not found
-        """
-        # Strategy 1: Check for common named attributes
-        common_names = ["backbone", "stem", "conv1", "patch_embed", "features", "model"]
-        for name in common_names:
-            if hasattr(self.base_model, name):
-                module = getattr(self.base_model, name)
-                if isinstance(module, nn.Module):
-                    return module
-
-        # Strategy 2: Find first Conv2d or Linear
-        for module in self.base_model.modules():
-            if isinstance(module, (nn.Conv2d, nn.Linear)) and module is not self.base_model:
-                return module
-
-        # Strategy 3: First child
-        try:
-            first_child = next(self.base_model.children())
-            if isinstance(first_child, nn.Module):
-                return first_child
-        except StopIteration:
-            pass
-
-        return None
-
     def online_parameters(self):
         """Only transformation parameters."""
         return self.cascaded_norm.online_parameters()
+
+    def _transform_image(self, img):
+        """Transform single image with gamma correction."""
+        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
+        transformed = self.cascaded_norm.transform_controller.stretcher(img, clip_low, clip_high, gamma)
+        return transformed, (clip_low, clip_high, gamma)
+
+    def _transform_batch(self, imgs):
+        """Transform batch."""
+        transformed_list = []
+        params_list = []
+
+        for i in range(imgs.shape[0]):
+            transformed, params = self._transform_image(imgs[i])
+            transformed_list.append(transformed)
+            params_list.append(params)
+
+        return torch.stack(transformed_list, dim=0), params_list
 
     def _compute_regularization_loss(self):
         """L2 regularization."""
@@ -465,38 +326,77 @@ class CascadedNormEngine(AdaptationEngine):
             reg_loss = reg_loss + param.pow(2).sum()
         return self.config.param_regularization * reg_loss
 
-    def forward(self, *args, **kwargs):
-        """Forward pass with adaptation."""
+    def forward(self, batched_inputs):
+        """Forward with transformation and alignment."""
         if not self.adapting:
-            return self.base_model(*args, **kwargs)
+            return self.base_model(batched_inputs)
 
-        # Zero gradients
-        self.optimizer.zero_grad()
+        if isinstance(batched_inputs, torch.Tensor):
+            return self._forward_tensor(batched_inputs)
+        return self._forward_dict_list(batched_inputs)
 
-        # Forward (transformation happens in _inject_dist_norm wrapper)
-        result = self.base_model(*args, **kwargs)
+    def _forward_tensor(self, imgs):
+        """Handle tensor input."""
+        imgs = imgs.to(self._device)
 
-        # Compute alignment loss
+        original_scale = imgs.max() <= 1.0
+        if original_scale:
+            imgs = imgs * 255.0
+
+        imgs_transformed, params_list = self._transform_batch(imgs)
+
+        for params in params_list:
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
+
+        model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
+        outputs = self.base_model(model_input)
+
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         total_loss = alignment_loss + reg_loss
 
-        self._stats['alignment_losses'].append(total_loss.item())
-
-        # Backward and update
+        self.optimizer.zero_grad()
         total_loss.backward()
         self.optimizer.step()
 
+        self._stats['alignment_losses'].append(total_loss.item())
 
-        # Log transform parameters
-        clip_low, clip_high, gamma = self.cascaded_norm.transform_controller()
-        self._stats['transform_params'].append({
-            'clip_low': clip_low.item(),
-            'clip_high': clip_high.item(),
-            'gamma': gamma.item() if gamma.dim() == 0 else gamma.mean().item()
-        })
+        return outputs
 
-        return result
+    def _forward_dict_list(self, batched_inputs):
+        """Handle list of dicts."""
+        transformed_inputs = []
+
+        for input_dict in batched_inputs:
+            if 'image' not in input_dict:
+                transformed_inputs.append(input_dict)
+                continue
+
+            img = input_dict['image'].to(self._device)
+            original_scale = img.max() <= 1.0
+            if original_scale:
+                img = img * 255.0
+
+            img_transformed, params = self._transform_image(img)
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
+
+            new_input = input_dict.copy()
+            new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
+            transformed_inputs.append(new_input)
+
+        outputs = self.base_model(transformed_inputs)
+
+        alignment_loss = self.cascaded_norm.compute_alignment_loss()
+        reg_loss = self._compute_regularization_loss()
+        total_loss = alignment_loss + reg_loss
+
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+
+        self._stats['alignment_losses'].append(total_loss.item())
+
+        return outputs
 
     def reset(self, reset_stats=False):
         """Reset model to initial state."""
@@ -518,22 +418,14 @@ class CascadedNormEngine(AdaptationEngine):
             return None
 
         params_array = np.array(self._stats['transform_params'])
-        
-        # Safe mean calculation
-        if len(params_array) > 0:
-            mean_clip_low = np.mean(params_array[:, 0])
-            mean_clip_high = np.mean(params_array[:, 1])
-            mean_gamma = np.mean(params_array[:, 2])
-        else:
-            mean_clip_low = mean_clip_high = mean_gamma = 0.0
 
         return {
             'num_steps': len(self._stats['alignment_losses']),
             'mean_loss': np.mean(self._stats['alignment_losses']),
             'final_loss': self._stats['alignment_losses'][-1],
-            'mean_clip_low': mean_clip_low,
-            'mean_clip_high': mean_clip_high,
-            'mean_gamma': mean_gamma,
+            'mean_clip_low': np.mean(params_array[:, 0]),
+            'mean_clip_high': np.mean(params_array[:, 1]),
+            'mean_gamma': np.mean(params_array[:, 2]),
         }
 
     def to(self, *args, **kwargs):
