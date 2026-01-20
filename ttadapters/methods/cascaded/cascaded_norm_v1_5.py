@@ -212,21 +212,25 @@ class GammaTransform(nn.Module):
         momentum_beta = self.momentum_predictor(img_features).squeeze(-1)  # scalar or (B,)
         
         # Associative memory with adaptive momentum (EMA)
-        # High beta → strong memory (Clear, stable)
-        # Low beta → reactive (Night, variable)
-        if self.training:
-            gating = momentum_beta * self.gating_ema + (1 - momentum_beta) * gating_pred
-            self.gating_ema = gating.detach()  # Update memory
-        else:
-            gating = gating_pred  # No momentum during evaluation
+        # Always apply momentum (not gated by training mode)
+        gating_pred = momentum_beta * self.gating_ema + (1 - momentum_beta) * gating_pred
+        self.gating_ema = gating_pred.detach()  # Update memory
+        
+        # Sharpening for application (stop gradient)
+        # Predictor learns moderate values (0.3-0.7) for exploration
+        # But application uses sharp values (≈0 or ≈1) for clear decisions
+        sharpening_temp = 0.1  # Low temperature = sharper
+        gating_sharp = torch.sigmoid((gating_pred - 0.5) / sharpening_temp)
         
         # Apply transformation
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
         
-        # Adaptive blending: gating=0 → original, gating=1 → transformed
-        output = gating * transformed + (1 - gating) * img
+        # Adaptive blending: Use sharpened gating (detached) for application
+        # Gradient flows through gating_pred for exploration
+        output = gating_sharp.detach() * transformed + (1 - gating_sharp.detach()) * img
         
-        return output, (clip_low, clip_high, gamma, gating, momentum_beta)
+        # Return gating_pred for loss computation (exploration)
+        return output, (clip_low, clip_high, gamma, gating_pred, momentum_beta)
 
 
 class CascadedNorm(nn.Module):
@@ -462,12 +466,9 @@ class CascadedNormEngine(AdaptationEngine):
                           (1 - gatings) * torch.log(1 - gatings + eps))
         exploration_loss = -gating_entropy.mean()  # Negative = maximize entropy
         
-        # 2. Weak polarization (gentle push when BN alignment is satisfied)
-        polarization_loss = (gatings * (1 - gatings)).mean()
         
-        # Combined: exploration >> polarization
-        # Strong exploration to prevent saturation (competing with BN alignment)
-        gating_loss = 1.0 * exploration_loss + 0.01 * polarization_loss
+        # Pure exploration loss (no polarization that fights it)
+        gating_loss = 1.0 * exploration_loss
         
         return gating_loss
 
