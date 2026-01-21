@@ -372,16 +372,6 @@ class CascadedNormEngine(AdaptationEngine):
 
         return torch.stack(transformed_list, dim=0), params_list
     
-    def _compute_memory_loss(self, params_list):
-        """Extract memory loss from parameters."""
-        if not params_list:
-            return torch.tensor(0.0, device=self._device)
-        
-        # params: (clip_low, clip_high, gamma, gating, temperature, loss_mem)
-        memory_losses = [p[5] if isinstance(p[5], torch.Tensor) else torch.tensor(p[5])
-                        for p in params_list]
-        return torch.stack(memory_losses).mean().to(self._device)
-
     def _compute_regularization_loss(self):
         """L2 regularization."""
         reg_loss = torch.tensor(0.0, device=self._device)
@@ -416,8 +406,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        memory_loss = self._compute_memory_loss(params_list)
-        total_loss = alignment_loss + reg_loss + 0.1 * memory_loss
+        total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -453,11 +442,7 @@ class CascadedNormEngine(AdaptationEngine):
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
         
-        # Collect params for memory loss
-        all_params = [p for p in self._stats['transform_params'][-len(batched_inputs):]]
-        memory_loss = self._compute_memory_loss(all_params) if all_params else torch.tensor(0.0, device=self._device)
-        
-        total_loss = alignment_loss + reg_loss + 0.1 * memory_loss
+        total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
