@@ -47,19 +47,16 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-
-
 class AssociativeMemory(nn.Module):
     """
     TTT-Linear inspired associative memory for adaptive parameter retrieval.
     
-    Key idea: Store K-V pairs of image features and optimal parameters.
-    At test-time, query similar samples to retrieve domain-specific params.
+    Key idea: Weight matrix W acts as memory. Train W such that K @ W ≈ V.
+    At test-time, Q @ W retrieves parameters based on similarity.
     """
     
-    def __init__(self, mem_size=1000, feat_dim=128):
+    def __init__(self, feat_dim=128):
         super().__init__()
-        self.mem_size = mem_size
         self.feat_dim = feat_dim
         
         # QKV projections (16x16x3 = 768 → feat_dim)
@@ -67,24 +64,23 @@ class AssociativeMemory(nn.Module):
         self.k_proj = nn.Linear(768, feat_dim)
         self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
         
+        # Memory weight matrix (THE memory itself!)
+        self.W = nn.Linear(feat_dim, feat_dim, bias=False)
+        nn.init.eye_(self.W.weight)  # Initialize to identity
+        
         # Output projection (feat_dim → 3 parameters)
         self.out_proj = nn.Linear(feat_dim, 3)  # [gating_logit, log_temp, gamma_logit]
         
         # Initialize output projection to reasonable values
         nn.init.normal_(self.out_proj.weight, 0, 0.01)
         nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0, gamma≈1.0
-        
-        # Memory buffers (circular queue)
-        self.register_buffer('K_mem', torch.zeros(mem_size, feat_dim))
-        self.register_buffer('V_mem', torch.zeros(mem_size, feat_dim))  # Same dim!
-        self.register_buffer('ptr', torch.tensor(0))
     
     def forward(self, img):
         """
         Args:
             img: (C, H, W) or (B, C, H, W) image tensor in [0, 255]
         Returns:
-            params: (2,) or (B, 2) [gating_logit, log_temp]
+            params: (3,) or (B, 3) [gating_logit, log_temp, gamma_logit]
             loss_mem: memory alignment loss
         """
         # Handle batch dimension
@@ -101,23 +97,18 @@ class AssociativeMemory(nn.Module):
         # QKV projections
         Q = self.q_proj(feat)  # (B, feat_dim)
         K = self.k_proj(feat)  # (B, feat_dim)
-        V = self.v_proj(feat)  # (B, feat_dim) - same as K!
+        V = self.v_proj(feat)  # (B, feat_dim)
         
-        # Retrieve from memory via attention
-        attn = F.softmax(Q @ self.K_mem.T / (self.feat_dim ** 0.5), dim=-1)  # (B, mem_size)
-        retrieved_v = attn @ self.V_mem  # (B, feat_dim)
+        # Memory alignment loss: K @ W should equal V
+        # This trains W to map K to V
+        K_transformed = self.W(K)  # (B, feat_dim)
+        loss_mem = F.mse_loss(K_transformed, V.detach())
+        
+        # Retrieval: Q @ W gets parameters
+        retrieved = self.W(Q)  # (B, feat_dim)
         
         # Project to output parameters
-        params = self.out_proj(retrieved_v)  # (B, 3)
-        
-        # Update memory (circular buffer, detached)
-        self.K_mem[self.ptr] = K[0].detach()
-        self.V_mem[self.ptr] = V[0].detach()
-        self.ptr.copy_(torch.tensor((self.ptr.item() + 1) % self.mem_size))
-        
-        # Memory alignment loss: K should be close to V (same dimension now!)
-        # This enforces "memorization" of image features
-        loss_mem = F.mse_loss(K, V.detach())
+        params = self.out_proj(retrieved)  # (B, 3)
         
         if squeeze_output:
             params = params.squeeze(0)  # (3,)
