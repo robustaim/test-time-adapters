@@ -203,6 +203,10 @@ class GammaTransform(nn.Module):
         # Global parameters
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
+
+        # Retrieve adaptive parameters from memory
+        mem_params, loss_mem = self.memory(img)  # (2,): [log_gamma, log_temp]
+
         # Gamma: predicted by memory
         # logic: 0 -> sigmoid(0)=0.5 -> 0.5*1.5 + 0.5 = 1.25? 
         # let's aim for range [0.5, 2.5] centered at 1.0?
