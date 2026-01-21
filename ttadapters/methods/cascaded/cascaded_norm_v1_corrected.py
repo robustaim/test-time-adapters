@@ -107,6 +107,11 @@ class GammaTransform(nn.Module):
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
+        # Gradient Scaling: Slow down clip parameters (High Momentum / EMA effect)
+        # User requested EMA-like behavior (5% learning speed) to let gamma adapt faster
+        self.clip_low.register_hook(lambda grad: grad * 0.05)
+        self.clip_high.register_hook(lambda grad: grad * 0.05)
+
     def forward(self, img):
         """Get constrained parameters and apply transform."""
         clip_low = self.clip_low.clamp(min=0.0, max=48.0)
