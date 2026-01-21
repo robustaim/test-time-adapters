@@ -169,7 +169,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
         # Compute weights: (N,) broadcast to (B, C, N)
         weights = F.softmax(
-            -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N), 
+            -(indices.unsqueeze(0).unsqueeze(0) - idx).abs() / (self.temperature * N),
             dim=-1
         )  # (1, 1, N) -> (B, C, N) after broadcast
 
@@ -692,6 +692,14 @@ class CascadedNormEngine(AdaptationEngine):
                 'clip_low': clip_low.item(),
                 'clip_high': clip_high.item(),
                 'gamma': gamma.item() if gamma.dim() == 0 else gamma.mean().item()
+            })
+        elif self.config.adaptation_method == "lut":
+            lut = self.dist_norm.transform_controller.forward()
+            self._stats['transform_params'].append({
+                'lut_min': lut.min().item(),
+                'lut_max': lut.max().item(),
+                'lut_mean': lut.mean().item(),
+                'lut_std': lut.std().item(),
             })
 
         return result

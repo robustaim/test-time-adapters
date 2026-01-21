@@ -47,85 +47,6 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-class AssociativeMemory(nn.Module):
-    """
-    TTT-Linear inspired associative memory for adaptive parameter retrieval.
-    
-    Key idea: Weight matrix W acts as memory. Train W such that K @ W ≈ V.
-    At test-time, Q @ W retrieves parameters based on similarity.
-    """
-    
-    def __init__(self, feat_dim=128):
-        super().__init__()
-        self.feat_dim = feat_dim
-        
-        # QK projection (Shared!) - 16x16x3 = 768 → feat_dim
-        # Shared QK aligns the "write" and "read" spaces
-        self.qk_proj = nn.Linear(768, feat_dim)
-        self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
-        
-        # Memory weight matrix (THE memory itself!)
-        self.W = nn.Linear(feat_dim, feat_dim, bias=False)
-        nn.init.eye_(self.W.weight)  # Initialize to identity
-        
-        # Output projection (feat_dim → 2 parameters)
-        self.out_proj = nn.Linear(feat_dim, 2)  # [log_gamma, log_temp]
-        
-        # Initialize output projection to reasonable values
-        # Gamma: target 1.0 -> 0.5 + 1.5*sigmoid(b) = 1.0 -> sigmoid(b) = 1/3 -> b ≈ -0.69
-        # Temp: target 0.01 -> exp(b) = 0.01 -> b ≈ -4.6
-        nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        with torch.no_grad():
-            self.out_proj.bias[0].fill_(-0.69)
-            self.out_proj.bias[1].fill_(-4.6)
-    
-    def forward(self, img):
-        """
-        Args:
-            img: (C, H, W) or (B, C, H, W) image tensor in [0, 255]
-        Returns:
-            params: (2,) or (B, 2) [gating_logit, log_temp]
-            loss_mem: memory alignment loss
-        """
-        # Handle batch dimension
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        # Downsample to 16x16 for efficiency
-        img_tiny = F.interpolate(img, size=16, mode='bilinear', align_corners=False)
-        feat = img_tiny.flatten(1)  # (B, 768)
-        
-        # Projections
-        QK = self.qk_proj(feat)  # (B, feat_dim)
-        V = self.v_proj(feat)  # (B, feat_dim)
-        
-        # Memory alignment loss: K @ W should equal V
-        # This trains W to map K to V. V is NOT detached now!
-        QK_transformed = self.W(QK)
-        loss_mem = F.mse_loss(QK_transformed, V)
-        
-        # Orthogonality constraint (QK ⊥ V)
-        cos_sim = F.cosine_similarity(QK.flatten(), V.flatten(), dim=0)
-        loss_orth = -(cos_sim.abs())
-        
-        # Combined loss
-        loss_total = loss_mem + 0.3 * loss_orth
-        
-        # Retrieval: Q @ W gets parameters
-        retrieved = self.W(QK)  # (B, feat_dim)
-        
-        # Project to output parameters
-        params = self.out_proj(retrieved)  # (B, 2)
-        
-        if squeeze_output:
-            params = params.squeeze(0)  # (2,)
-        
-        return params, loss_total
-
-
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
@@ -174,77 +95,51 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters with associative memory for adaptive gating and temperature."""
+    """Learnable parameters for histogram stretching with gamma correction."""
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        # Global parameters
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
-        # self.gamma: REMOVED (Predicted by memory)
-        
-        # Associative memory for adaptive parameters
-        self.memory = AssociativeMemory(feat_dim=128)
-        
+        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
+
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-    def forward(self, img):
-        """
-        Forward pass with memory-based adaptive parameters.
-        
-        Args:
-            img: (C, H, W) image tensor in [0, 255]
-        Returns:
-            transformed: (C, H, W) transformed image
-            params: tuple of (clip_low, clip_high, gamma, gating, temperature, loss_mem)
-        """
-        # Global parameters
+    def forward(self):
+        """Get constrained parameters."""
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        # Gamma: predicted by memory
-        # logic: 0 -> sigmoid(0)=0.5 -> 0.5*1.5 + 0.5 = 1.25? 
-        # let's aim for range [0.5, 2.5] centered at 1.0?
-        # if bias=0, sigmoid=0.5. 0.5*3 + 0.5 = 2.0? No.
-        # Range [0.5, 2.0]: 0.5 + 1.5 * sigmoid(x)
-        # if x=0 -> 1.25. Let's adjust bias in AssociativeMemory if needed, or just let it learn.
-        gamma = 0.5 + torch.sigmoid(mem_params[0]) * 1.5  # [0.5, 2.0]
-        
-        # Gating: FIXED at 0.5 (Baseline stability)
-        gating = torch.tensor(0.5, device=img.device)
-        
-        temperature = torch.exp(mem_params[1]).clamp(1e-4, 0.1)  # [0.0001, 0.1]
-        
-        # Transform image
+        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
+
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        
-        # Adaptive blending (memory determines this!)
-        output = gating * transformed + (1 - gating) * img
-        
-        return output, (clip_low, clip_high, gamma, gating, temperature, loss_mem)
+        output = 0.5 * transformed + 0.5 * img  # residual form
+
+        return output, (clip_low, clip_high, gamma)
 
 
 class CascadedNorm(nn.Module):
     """
     CascadedNorm: Manages transformation and norm layer statistics.
-    
+
     Integrates GammaTransform controller and tracks normalization layers.
     """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
-        
+
         # Transform controller with integrated stretcher
         self.transform_controller = GammaTransform(config)
-        
+
         # Norm layer tracking (will be populated by Engine)
         self.norm_layers: List[nn.Module] = []
         self.norm_types: List[str] = []  # 'bn' or 'ln'
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
+
+    def forward(self, img):
+        return self.transform_controller(img)
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
@@ -271,7 +166,7 @@ class CascadedNorm(nn.Module):
             total_loss = total_loss + loss_mean + loss_var
 
         return total_loss
-    
+
     def online_parameters(self):
         """Get learnable parameters for optimization."""
         return self.transform_controller.parameters()
@@ -326,17 +221,17 @@ class CascadedNormEngine(AdaptationEngine):
                     module.running_var.mean().clone()   # Scalar source var
                 ))
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
-                 # LN: Target normalized distribution (mean=0, var=1)
+                # LN: Target normalized distribution (mean=0, var=1)
                 found.append((
                     name, "LN", module,
                     torch.tensor(0.0),
                     torch.tensor(1.0)
                 ))
-        
+
         # Filtering & Wrapping
         filtered = self._filter_by_cascade_mode(found)
         self._cascade_wrap(filtered)
-        
+
         # Populate to CascadedNorm
         for _, norm_type, module, running_mean, running_var in filtered:
             self.cascaded_norm.norm_layers.append(module)
@@ -351,8 +246,8 @@ class CascadedNormEngine(AdaptationEngine):
     def _filter_by_cascade_mode(self, norm_list):
         """Filter normalization layers based on cascade mode."""
         if not hasattr(self.config, 'cascade_mode'):
-             return norm_list
-             
+            return norm_list
+
         match self.config.cascade_mode:
             case "single":
                 return [norm_list[0]]
@@ -413,32 +308,17 @@ class CascadedNormEngine(AdaptationEngine):
         """Only transformation parameters."""
         return self.cascaded_norm.online_parameters()
 
-    def _transform_image(self, img):
-        """Transform single image with memory-based adaptive gating."""
-        transformed, params = self.cascaded_norm.transform_controller(img)
-        return transformed, params
-
     def _transform_batch(self, imgs):
         """Transform batch."""
         transformed_list = []
         params_list = []
 
         for i in range(imgs.shape[0]):
-            transformed, params = self._transform_image(imgs[i])
+            transformed, params = self.cascaded_norm(imgs[i])
             transformed_list.append(transformed)
             params_list.append(params)
 
         return torch.stack(transformed_list, dim=0), params_list
-    
-    def _compute_memory_loss(self, params_list):
-        """Extract memory loss from parameters."""
-        if not params_list:
-            return torch.tensor(0.0, device=self._device)
-        
-        # params: (clip_low, clip_high, gamma, gating, temperature, loss_mem)
-        memory_losses = [p[5] if isinstance(p[5], torch.Tensor) else torch.tensor(p[5])
-                        for p in params_list]
-        return torch.stack(memory_losses).mean().to(self._device)
 
     def _compute_regularization_loss(self):
         """L2 regularization."""
@@ -474,11 +354,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        alignment_loss = self.cascaded_norm.compute_alignment_loss()
-        reg_loss = self._compute_regularization_loss()
-        memory_loss = self._compute_memory_loss(params_list)
-        
-        total_loss = alignment_loss + reg_loss + 0.1 * memory_loss
+        total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -502,7 +378,7 @@ class CascadedNormEngine(AdaptationEngine):
             if original_scale:
                 img = img * 255.0
 
-            img_transformed, params = self._transform_image(img)
+            img_transformed, params = self.cascaded_norm(img)
             self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
@@ -513,12 +389,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         reg_loss = self._compute_regularization_loss()
-        
-        # Collect params for memory loss
-        all_params = [p for p in self._stats['transform_params'][-len(batched_inputs):]]
-        memory_loss = self._compute_memory_loss(all_params) if all_params else torch.tensor(0.0, device=self._device)
-        
-        total_loss = alignment_loss + reg_loss + 0.1 * memory_loss
+        total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
