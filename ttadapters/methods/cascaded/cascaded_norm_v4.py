@@ -47,71 +47,60 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-class AssociativeMemory(nn.Module):
+class ContentAgnosticMemory(nn.Module):
     """
-    TTT-Linear inspired associative memory for adaptive parameter retrieval.
+    Content-Agnostic Memory: Predicts parameters based on GLOBAL image statistics only.
     
-    Key idea: Weight matrix W acts as memory. Train W such that K @ W ≈ V.
-    At test-time, Q @ W retrieves parameters based on similarity.
+    Inputs: [Mean(R,G,B), Std(R,G,B)] (6 dims)
+    Outputs: Gamma Residual (1 dim)
+    
+    Rationale:
+    - Spatial features (16x16) contained too much content info, causing overfitting.
+    - Global stats represent "Style" (fog/rain/illumination) more purely.
+    - Extremely lightweight (MLP).
     """
     
-    def __init__(self, feat_dim=128):
+    def __init__(self, input_dim=6, hidden_dim=32):
         super().__init__()
-        self.feat_dim = feat_dim
         
-        # QKV projections (16x16x3 = 768 → feat_dim)
-        self.q_proj = nn.Linear(768, feat_dim)  # 16*16*3
-        self.k_proj = nn.Linear(768, feat_dim)
-        self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)  # [gamma_residual_logit]
+        )
         
-        # Memory weight matrix (THE memory itself!)
-        self.W = nn.Linear(feat_dim, feat_dim, bias=False)
-        nn.init.eye_(self.W.weight)  # Initialize to identity
-        
-        # Output projection (feat_dim → 1 parameter)
-        self.out_proj = nn.Linear(feat_dim, 1)  # [gamma_residual_logit] only
-        
-        # Initialize output projection
-        nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        nn.init.constant_(self.out_proj.bias, 0.0)  # residual starts at 0
+        # Initialize output to 0 (start as Identity)
+        nn.init.constant_(self.net[-1].weight, 0.0)
+        nn.init.constant_(self.net[-1].bias, 0.0)
     
     def forward(self, img):
         """
         Args:
-            img: (C, H, W) or (B, C, H, W) image tensor in [0, 255]
+            img: (B, C, H, W) image tensor
         Returns:
-            gamma_residual: (1,) or (B, 1) logits
-            loss_mem: memory alignment loss
+            gamma_residual: (B, 1)
+            loss_mem: CONSTANT 0 (No specific memory loss needed for MLP training)
         """
-        # Handle batch dimension
-        if img.dim() == 3:
-            img = img.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
+        # 1. Compute Global Stats (Mean, Std)
+        # img: (B, 3, H, W)
+        B, C, H, W = img.shape
         
-        # Downsample to 16x16 for efficiency
-        img_tiny = F.interpolate(img, size=16, mode='bilinear', align_corners=False)
-        feat = img_tiny.flatten(1)  # (B, 768)
+        # Flatten pixels: (B, C, H*W)
+        flat = img.view(B, C, -1)
         
-        # QKV projections
-        Q = self.q_proj(feat)  # (B, feat_dim)
-        K = self.k_proj(feat)  # (B, feat_dim)
-        V = self.v_proj(feat)  # (B, feat_dim)
+        mu = flat.mean(dim=2)  # (B, 3)
+        std = flat.std(dim=2)  # (B, 3)
         
-        # Memory alignment loss: K @ W should equal V
-        # This trains W to map K to V
-        K_transformed = self.W(K)  # (B, feat_dim)
-        loss_mem = F.mse_loss(K_transformed, V.detach())
+        # Concat: (B, 6)
+        stats = torch.cat([mu, std], dim=1)
         
-        # Retrieval: Q @ W gets parameters
-        retrieved = self.W(Q)  # (B, feat_dim)
+        # 2. Predict Residual
+        gamma_residual = self.net(stats)  # (B, 1)
         
-        # Project to output parameters
-        gamma_residual = self.out_proj(retrieved)  # (B, 1)
-        
-        if squeeze_output:
-            gamma_residual = gamma_residual.squeeze(0)  # (1,)
+        # 3. Dummy Loss (to keep interface consistent with previous architecture)
+        loss_mem = torch.tensor(0.0, device=img.device)
         
         return gamma_residual, loss_mem
 
@@ -164,7 +153,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters with associative memory for adaptive gating and temperature."""
+    """Learnable parameters with Content-Agnostic Memory for adaptive gamma."""
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
@@ -174,16 +163,15 @@ class GammaTransform(nn.Module):
         
         # Hybrid Gamma: Global Base + Memory Residual
         self.gamma_base = nn.Parameter(torch.tensor(1.0))  # Base (Global)
-        self.temperature = nn.Parameter(torch.tensor(0.0)) # Global Learnable (log scale, init e^0=1.0 -> adjusted later)
+        self.temperature = nn.Parameter(torch.tensor(0.0)) # Global Learnable
         
-        # Associative memory for adaptive gamma residual
-        self.memory = AssociativeMemory(feat_dim=128)
+        # Content-Agnostic Memory (Stats -> Residual)
+        self.memory = ContentAgnosticMemory(input_dim=6, hidden_dim=32)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
         # Init temperature to config value (approx)
-        # target 0.01 -> exp(b) = 0.01 -> b = -4.6
         with torch.no_grad():
             self.temperature.fill_(-4.6)
 
@@ -204,7 +192,7 @@ class GammaTransform(nn.Module):
         # Temperature: Global only
         temperature = torch.exp(self.temperature).clamp(1e-4, 0.1)
         
-        # Retrieve adaptive residual from memory
+        # Retrieve adaptive residual from memory (Using Stats!)
         gamma_res_logit, loss_mem = self.memory(img)  # (1,)
         
         # Hybrid Gamma
