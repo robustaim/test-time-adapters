@@ -154,7 +154,7 @@ class GammaTransform(nn.Module):
             B, C, H, W = img.shape
             flat = img.view(B, C, -1)
 
-        stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1)  # (B, 6)
+        stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1) / 255.0  # (B, 6) Normalized
         
         gamma_delta = self.gamma_delta(stats) # (B, 1)
         
