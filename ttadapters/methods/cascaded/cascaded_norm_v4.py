@@ -152,7 +152,7 @@ class GammaTransform(nn.Module):
 
         stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1) / 255.0  # (B, 6) Normalized
         
-        gamma_delta = self.gamma_delta(stats) # (B, 1)
+        gamma_delta = self.gamma_delta(stats) * 0.0 # [DIAGNOSTIC] Force Disable Predictor to check v3 parity
         
         # Final Gamma: Base + Residual (tanh scaled to +/- 0.5)
         raw_gamma = gamma_base + 0.5 * torch.tanh(gamma_delta)
