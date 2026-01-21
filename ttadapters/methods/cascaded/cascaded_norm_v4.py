@@ -114,17 +114,13 @@ class GammaTransform(nn.Module):
         
         # Gamma Delta Predictor (MLP: 6 -> 32 -> 1)
         # Input: Mean(3) + Std(3) = 6
-        self.gamma_delta = nn.Sequential(
-            nn.Linear(6, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
+        # Gamma Delta Predictor (Linear: 6 -> 1)
+        # Simplify to Linear to prevent overfitting/instability
+        self.gamma_delta = nn.Linear(6, 1)
         
         # Initialize Delta Predictor to 0 (Identity Start)
-        nn.init.constant_(self.gamma_delta[-1].weight, 0.0)
-        nn.init.constant_(self.gamma_delta[-1].bias, 0.0)
+        nn.init.constant_(self.gamma_delta.weight, 0.0)
+        nn.init.constant_(self.gamma_delta.bias, 0.0)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
