@@ -43,7 +43,6 @@ class CascadedNormConfig(AdaptationConfig):
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
 
-    param_regularization: float = 0.01
     temperature: float = 0.01
 
 
@@ -113,9 +112,8 @@ class GammaTransform(nn.Module):
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
 
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        output = 0.5 * transformed + 0.5 * img  # residual form
 
-        return output, (clip_low, clip_high, gamma)
+        return transformed, (clip_low, clip_high, gamma)
 
 
 class CascadedNorm(nn.Module):
@@ -139,7 +137,12 @@ class CascadedNorm(nn.Module):
         self.source_vars: List[torch.Tensor] = []
 
     def forward(self, img):
-        return self.transform_controller(img)
+        transformed, params = self.transform_controller(img)
+
+        # Residual Form
+        output = 0.5 * transformed + 0.5 * img
+
+        return output, params
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""

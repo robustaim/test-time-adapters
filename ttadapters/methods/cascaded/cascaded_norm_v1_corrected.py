@@ -109,15 +109,13 @@ class GammaTransform(nn.Module):
 
     def forward(self, img):
         """Get constrained parameters and apply transform."""
-        # Simple clamping - prevents gradient saturation from sigmoid
         clip_low = self.clip_low.clamp(min=0.0, max=48.0)
         clip_high = self.clip_high.clamp(min=52.0, max=100.0)
         gamma = self.gamma.clamp(min=0.1, max=5.0)
 
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        output = 0.5 * transformed + 0.5 * img  # residual form
 
-        return output, (clip_low, clip_high, gamma)
+        return transformed, (clip_low, clip_high, gamma)
 
 
 class CascadedNorm(nn.Module):
@@ -141,7 +139,12 @@ class CascadedNorm(nn.Module):
         self.source_vars: List[torch.Tensor] = []
 
     def forward(self, img):
-        return self.transform_controller(img)
+        transformed, params = self.transform_controller(img)
+
+        # Residual Form
+        output = 0.5 * transformed + 0.5 * img
+
+        return output, params
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """Compute alignment loss between batch and source statistics."""
