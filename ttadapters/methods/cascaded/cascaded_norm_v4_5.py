@@ -59,16 +59,15 @@ class AssociativeMemory(nn.Module):
         super().__init__()
         self.feat_dim = feat_dim
         
-        # QKV projections (16x16x3 = 768 → feat_dim)
-        self.q_proj = nn.Linear(768, feat_dim)  # 16*16*3
-        self.k_proj = nn.Linear(768, feat_dim)
+        # QK projection (Shared!) - 16x16x3 = 768 → feat_dim
+        # Shared QK aligns the "write" and "read" spaces
+        self.qk_proj = nn.Linear(768, feat_dim)
         self.v_proj = nn.Linear(768, feat_dim)  # Same dim as K!
         
         # Memory weight matrix (THE memory itself!)
         self.W = nn.Linear(feat_dim, feat_dim, bias=False)
         nn.init.eye_(self.W.weight)  # Initialize to identity
         
-        # Output projection (feat_dim → 2 parameters)
         # Output projection (feat_dim → 2 parameters)
         self.out_proj = nn.Linear(feat_dim, 2)  # [log_gamma, log_temp]
         
@@ -79,10 +78,6 @@ class AssociativeMemory(nn.Module):
         with torch.no_grad():
             self.out_proj.bias[0].fill_(-0.69)
             self.out_proj.bias[1].fill_(-4.6)
-        
-        # Initialize output projection to reasonable values
-        nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
     
     def forward(self, img):
         """
@@ -103,9 +98,8 @@ class AssociativeMemory(nn.Module):
         img_tiny = F.interpolate(img, size=16, mode='bilinear', align_corners=False)
         feat = img_tiny.flatten(1)  # (B, 768)
         
-        # QKV projections
-        Q = self.q_proj(feat)  # (B, feat_dim)
-        K = self.k_proj(feat)  # (B, feat_dim)
+        # Projections
+        Q = K = QK = self.qk_proj(feat)  # (B, feat_dim)
         V = self.v_proj(feat)  # (B, feat_dim)
         
         # Memory alignment loss: K @ W should equal V
@@ -203,10 +197,6 @@ class GammaTransform(nn.Module):
         # Global parameters
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-
-        # Retrieve adaptive parameters from memory
-        mem_params, loss_mem = self.memory(img)  # (2,): [log_gamma, log_temp]
-
         # Gamma: predicted by memory
         # logic: 0 -> sigmoid(0)=0.5 -> 0.5*1.5 + 0.5 = 1.25? 
         # let's aim for range [0.5, 2.5] centered at 1.0?
