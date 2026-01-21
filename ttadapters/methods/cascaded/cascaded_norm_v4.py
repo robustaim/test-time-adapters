@@ -47,64 +47,6 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
 
 
-class ContentAgnosticMemory(nn.Module):
-    """
-    Content-Agnostic Memory: Predicts parameters based on GLOBAL image statistics only.
-    
-    Inputs: [Mean(R,G,B), Std(R,G,B)] (6 dims)
-    Outputs: Gamma Residual (1 dim)
-    
-    Rationale:
-    - Spatial features (16x16) contained too much content info, causing overfitting.
-    - Global stats represent "Style" (fog/rain/illumination) more purely.
-    - Extremely lightweight (MLP).
-    """
-    
-    def __init__(self, input_dim=6, hidden_dim=32):
-        super().__init__()
-        
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)  # [gamma_residual_logit]
-        )
-        
-        # Initialize output to 0 (start as Identity)
-        nn.init.constant_(self.net[-1].weight, 0.0)
-        nn.init.constant_(self.net[-1].bias, 0.0)
-    
-    def forward(self, img):
-        """
-        Args:
-            img: (B, C, H, W) image tensor
-        Returns:
-            gamma_residual: (B, 1)
-            loss_mem: CONSTANT 0 (No specific memory loss needed for MLP training)
-        """
-        # 1. Compute Global Stats (Mean, Std)
-        # img: (B, 3, H, W)
-        B, C, H, W = img.shape
-        
-        # Flatten pixels: (B, C, H*W)
-        flat = img.view(B, C, -1)
-        
-        mu = flat.mean(dim=2)  # (B, 3)
-        std = flat.std(dim=2)  # (B, 3)
-        
-        # Concat: (B, 6)
-        stats = torch.cat([mu, std], dim=1)
-        
-        # 2. Predict Residual
-        gamma_residual = self.net(stats)  # (B, 1)
-        
-        # 3. Dummy Loss (to keep interface consistent with previous architecture)
-        loss_mem = torch.tensor(0.0, device=img.device)
-        
-        return gamma_residual, loss_mem
-
-
 class DifferentiableHistogramStretcher(nn.Module):
     """Differentiable histogram stretching."""
 
@@ -153,68 +95,71 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters with Content-Agnostic Memory for adaptive gamma."""
+    """
+    Learnable parameters for adaptive gamma with delta prediction from stats.
+    
+    Architecture:
+        - Gamma = Global Base + Predicted Delta (from Image Stats)
+        - Temperature = Fixed (Config)
+        - Gating = Global Base (0.5) + Residual (Learnable)
+    """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        # Global parameters
+        # Global Parameters (Anchors)
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         
-        # Hybrid Gamma: Global Base + Memory Residual
-        self.gamma_base = nn.Parameter(torch.tensor(1.0))  # Base (Global)
-        self.temperature = nn.Parameter(torch.tensor(0.0)) # Global Learnable
+        self.gamma_base = nn.Parameter(torch.tensor(1.0))  # Global Gamma Base
         
-        # Content-Agnostic Memory (Stats -> Residual)
-        self.memory = ContentAgnosticMemory(input_dim=6, hidden_dim=32)
+        # Gamma Delta Predictor (MLP: 6 -> 32 -> 1)
+        # Input: Mean(3) + Std(3) = 6
+        self.gamma_delta = nn.Sequential(
+            nn.Linear(6, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+        
+        # Initialize Delta Predictor to 0 (Identity Start)
+        nn.init.constant_(self.gamma_delta[-1].weight, 0.0)
+        nn.init.constant_(self.gamma_delta[-1].bias, 0.0)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-        # Init temperature to config value (approx)
-        with torch.no_grad():
-            self.temperature.fill_(-4.6)
-
     def forward(self, img):
         """
-        Forward pass with memory-based adaptive parameters.
-        
         Args:
-            img: (C, H, W) image tensor in [0, 255]
+            img: (B, C, H, W) image tensor
         Returns:
-            transformed: (C, H, W) transformed image
-            params: tuple of (clip_low, clip_high, gamma, gating, temperature, loss_mem)
+            transformed: (B, C, H, W)
+            params: tuple for logging
         """
-        # Global parameters
+        # 1. Global Parameters
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
         
-        # Temperature: Global only
-        temperature = torch.exp(self.temperature).clamp(1e-4, 0.1)
-        
-        # Retrieve adaptive residual from memory (Using Stats!)
-        gamma_res_logit, loss_mem = self.memory(img)  # (1,)
-        
-        # Hybrid Gamma
-        # Base: [0.5, 2.0] driven by global param
+        # 2. Compute Gamma (Global + Delta)
+        # Global Base: Anchored at v3 optimum (init 1.25 range [0.5, 2.0])
         gamma_base = 0.5 + torch.sigmoid(self.gamma_base) * 1.5 
         
-        # Residual: [-0.5, 0.5] driven by memory
-        gamma_res = 0.5 * torch.tanh(gamma_res_logit)
+        # Delta Prediction: From Image Stats (Mean, Std)
+        B, C, H, W = img.shape
+        flat = img.view(B, C, -1)
+        stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1)  # (B, 6)
         
-        # Combined Gamma
-        gamma = gamma_base + gamma_res
+        gamma_delta = self.gamma_delta(stats) # (B, 1)
         
-        # Gating: FIXED at 0.5
-        gating = torch.tensor(0.5, device=img.device)
+        # Final Gamma: Base + Residual (tanh scaled to +/- 0.5)
+        gamma = gamma_base + 0.5 * torch.tanh(gamma_delta)
         
-        # Transform image
+        # 3. Transform
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        
-        # Adaptive blending (memory determines this!)
-        output = gating * transformed + (1 - gating) * img
-        
-        return output, (clip_low, clip_high, gamma, gating, temperature, loss_mem)
+        output = 0.5 * transformed + 0.5 * img  # residual form
+
+        return output, (clip_low, clip_high, gamma)
 
 
 class CascadedNorm(nn.Module):
