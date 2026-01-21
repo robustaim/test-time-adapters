@@ -146,8 +146,14 @@ class GammaTransform(nn.Module):
         gamma_base = 0.5 + torch.sigmoid(self.gamma_base) * 1.5 
         
         # Delta Prediction: From Image Stats (Mean, Std)
-        B, C, H, W = img.shape
-        flat = img.view(B, C, -1)
+        if img.dim() == 3:
+            C, H, W = img.shape
+            B = 1
+            flat = img.view(1, C, -1)
+        else:
+            B, C, H, W = img.shape
+            flat = img.view(B, C, -1)
+
         stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1)  # (B, 6)
         
         gamma_delta = self.gamma_delta(stats) # (B, 1)
