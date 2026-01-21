@@ -113,7 +113,7 @@ class AssociativeMemory(nn.Module):
         # Update memory (circular buffer, detached)
         self.K_mem[self.ptr] = K[0].detach()
         self.V_mem[self.ptr] = V[0].detach()
-        self.ptr = (self.ptr + 1) % self.mem_size
+        self.ptr.copy_(torch.tensor((self.ptr.item() + 1) % self.mem_size))
         
         # Memory alignment loss: K should be close to V (same dimension now!)
         # This enforces "memorization" of image features
@@ -182,7 +182,7 @@ class GammaTransform(nn.Module):
         self.clip_high = nn.Parameter(torch.tensor(98.0))
         
         # Associative memory for adaptive parameters
-        self.memory = AssociativeMemory(mem_size=1000, feat_dim=128)
+        self.memory = AssociativeMemory(feat_dim=128)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
