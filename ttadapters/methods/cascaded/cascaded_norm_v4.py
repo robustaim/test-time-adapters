@@ -199,7 +199,7 @@ class GammaTransform(nn.Module):
         
         # Gating: centered at 0.5 with small adjustments
         gating_delta = torch.tanh(mem_params[0])  # [-1, 1]
-        gating = 0.5 + 0.3 * gating_delta  # [0.2, 0.8] centered at 0.5
+        gating = 0.5 + 0.1 * gating_delta  # [0.4, 0.6] centered at 0.5 (tighter!)
         
         temperature = torch.exp(mem_params[1]).clamp(1e-4, 0.1)  # [0.0001, 0.1]
         
