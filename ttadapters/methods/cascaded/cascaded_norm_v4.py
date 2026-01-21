@@ -68,19 +68,19 @@ class AssociativeMemory(nn.Module):
         self.W = nn.Linear(feat_dim, feat_dim, bias=False)
         nn.init.eye_(self.W.weight)  # Initialize to identity
         
-        # Output projection (feat_dim → 2 parameters)
-        self.out_proj = nn.Linear(feat_dim, 2)  # [gating_logit, log_temp] only
+        # Output projection (feat_dim → 1 parameter)
+        self.out_proj = nn.Linear(feat_dim, 1)  # [gamma_residual_logit] only
         
-        # Initialize output projection to reasonable values
+        # Initialize output projection
         nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
+        nn.init.constant_(self.out_proj.bias, 0.0)  # residual starts at 0
     
     def forward(self, img):
         """
         Args:
             img: (C, H, W) or (B, C, H, W) image tensor in [0, 255]
         Returns:
-            params: (2,) or (B, 2) [gating_logit, log_temp]
+            gamma_residual: (1,) or (B, 1) logits
             loss_mem: memory alignment loss
         """
         # Handle batch dimension
@@ -108,12 +108,12 @@ class AssociativeMemory(nn.Module):
         retrieved = self.W(Q)  # (B, feat_dim)
         
         # Project to output parameters
-        params = self.out_proj(retrieved)  # (B, 2)
+        gamma_residual = self.out_proj(retrieved)  # (B, 1)
         
         if squeeze_output:
-            params = params.squeeze(0)  # (2,)
+            gamma_residual = gamma_residual.squeeze(0)  # (1,)
         
-        return params, loss_mem
+        return gamma_residual, loss_mem
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -171,13 +171,21 @@ class GammaTransform(nn.Module):
         # Global parameters
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma: global (not adaptive)
         
-        # Associative memory for adaptive parameters
+        # Hybrid Gamma: Global Base + Memory Residual
+        self.gamma_base = nn.Parameter(torch.tensor(1.0))  # Base (Global)
+        self.temperature = nn.Parameter(torch.tensor(0.0)) # Global Learnable (log scale, init e^0=1.0 -> adjusted later)
+        
+        # Associative memory for adaptive gamma residual
         self.memory = AssociativeMemory(feat_dim=128)
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
+
+        # Init temperature to config value (approx)
+        # target 0.01 -> exp(b) = 0.01 -> b = -4.6
+        with torch.no_grad():
+            self.temperature.fill_(-4.6)
 
     def forward(self, img):
         """
@@ -192,16 +200,25 @@ class GammaTransform(nn.Module):
         # Global parameters
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0] - global!
         
-        # Retrieve adaptive parameters from memory
-        mem_params, loss_mem = self.memory(img)  # (2,): [gating_delta, log_temp]
+        # Temperature: Global only
+        temperature = torch.exp(self.temperature).clamp(1e-4, 0.1)
         
-        # Gating: centered at 0.5 with small adjustments
-        gating_delta = torch.tanh(mem_params[0])  # [-1, 1]
-        gating = 0.5 + 0.1 * gating_delta  # [0.4, 0.6] centered at 0.5 (tighter!)
+        # Retrieve adaptive residual from memory
+        gamma_res_logit, loss_mem = self.memory(img)  # (1,)
         
-        temperature = torch.exp(mem_params[1]).clamp(1e-4, 0.1)  # [0.0001, 0.1]
+        # Hybrid Gamma
+        # Base: [0.5, 2.0] driven by global param
+        gamma_base = 0.5 + torch.sigmoid(self.gamma_base) * 1.5 
+        
+        # Residual: [-0.5, 0.5] driven by memory
+        gamma_res = 0.5 * torch.tanh(gamma_res_logit)
+        
+        # Combined Gamma
+        gamma = gamma_base + gamma_res
+        
+        # Gating: FIXED at 0.5
+        gating = torch.tensor(0.5, device=img.device)
         
         # Transform image
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
