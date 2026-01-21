@@ -137,7 +137,7 @@ class CascadedNorm(nn.Module):
         self.source_means: List[torch.Tensor] = []
         self.source_vars: List[torch.Tensor] = []
 
-    def foward(self, img):
+    def forward(self, img):
         """Transform single image with gamma correction and 50% blending."""
         clip_low, clip_high, gamma = self.transform_controller()
         transformed = self.transform_controller.stretcher(img, clip_low, clip_high, gamma)
@@ -326,12 +326,27 @@ class CascadedNormEngine(AdaptationEngine):
 
         return torch.stack(transformed_list, dim=0), params_list
 
-    def _compute_regularization_loss(self):
-        """L2 regularization."""
-        reg_loss = torch.tensor(0.0, device=self._device)
-        for param in self.cascaded_norm.transform_controller.parameters():
-            reg_loss = reg_loss + param.pow(2).sum()
-        return self.config.param_regularization * reg_loss
+    def _compute_regularization_loss(self, params_list):
+        """
+        Functional Regularization (Identity Prior).
+        
+        Targets:
+        - Clip Low: 2.0
+        - Clip High: 98.0
+        - Gamma: 1.0
+        """
+        if not params_list:
+             return torch.tensor(0.0, device=self._device)
+             
+        loss = torch.tensor(0.0, device=self._device)
+        
+        for params in params_list:
+            clip_low, clip_high, gamma = params
+            loss += (clip_low - 2.0).pow(2)
+            loss += (clip_high - 98.0).pow(2)
+            loss += (gamma - 1.0).pow(2)
+            
+        return self.config.param_regularization * (loss / len(params_list))
 
     def forward(self, batched_inputs):
         """Forward with transformation and alignment."""
@@ -359,7 +374,7 @@ class CascadedNormEngine(AdaptationEngine):
         outputs = self.base_model(model_input)
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
-        reg_loss = self._compute_regularization_loss()
+        reg_loss = self._compute_regularization_loss(params_list)
         total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
@@ -373,6 +388,7 @@ class CascadedNormEngine(AdaptationEngine):
     def _forward_dict_list(self, batched_inputs):
         """Handle list of dicts."""
         transformed_inputs = []
+        tensor_params_list = []
 
         for input_dict in batched_inputs:
             if 'image' not in input_dict:
@@ -385,6 +401,9 @@ class CascadedNormEngine(AdaptationEngine):
                 img = img * 255.0
 
             img_transformed, params = self.cascaded_norm(img)
+            
+            # Store tensor params
+            tensor_params_list.append(params)
             self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
@@ -394,7 +413,7 @@ class CascadedNormEngine(AdaptationEngine):
         outputs = self.base_model(transformed_inputs)
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
-        reg_loss = self._compute_regularization_loss()
+        reg_loss = self._compute_regularization_loss(tensor_params_list)
         total_loss = alignment_loss + reg_loss
 
         self.optimizer.zero_grad()
