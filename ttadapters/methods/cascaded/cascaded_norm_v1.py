@@ -106,7 +106,7 @@ class GammaTransform(nn.Module):
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-    def forward(self):
+    def forward(self, img):
         """Get constrained parameters."""
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
