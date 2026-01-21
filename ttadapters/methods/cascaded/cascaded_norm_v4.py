@@ -159,7 +159,8 @@ class GammaTransform(nn.Module):
         gamma_delta = self.gamma_delta(stats) # (B, 1)
         
         # Final Gamma: Base + Residual (tanh scaled to +/- 0.5)
-        gamma = gamma_base + 0.5 * torch.tanh(gamma_delta)
+        raw_gamma = gamma_base + 0.5 * torch.tanh(gamma_delta)
+        gamma = raw_gamma.clamp(0.5, 3.0)  # Safety Clamp (Critical for Stability)
         
         # 3. Transform
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
