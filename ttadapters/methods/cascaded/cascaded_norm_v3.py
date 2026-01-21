@@ -342,9 +342,9 @@ class CascadedNormEngine(AdaptationEngine):
         
         for params in params_list:
             clip_low, clip_high, gamma = params
-            loss += (clip_low - 2.0).pow(2)
-            loss += (clip_high - 98.0).pow(2)
-            loss += (gamma - 1.0).pow(2)
+            loss = loss + (clip_low - 2.0).pow(2).sum()
+            loss = loss + (clip_high - 98.0).pow(2).sum()
+            loss = loss + (gamma - 1.0).pow(2).sum()
             
         return self.config.param_regularization * (loss / len(params_list))
 

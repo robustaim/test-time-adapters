@@ -413,16 +413,14 @@ class CascadedNormEngine(AdaptationEngine):
         # But we iterate the list corresponding to the batch.
         
         for params in params_list:
-            clip_low, clip_high, gamma = params
+            clip_low, clip_high, gamma, gating = params
             
-            # 1. Clip Low -> Target 2.0
-            loss += (clip_low - 2.0).pow(2)
-            
-            # 2. Clip High -> Target 98.0
-            loss += (clip_high - 98.0).pow(2)
-            
-            # 3. Gamma -> Target 1.0 (Neutral)
-            loss += (gamma - 1.0).pow(2)
+            # Use out-of-place addition to verify shapes
+            # .sum() ensures we reduce to scalar even if params are (B, 1) or (1, 1)
+            loss = loss + (clip_low - 2.0).pow(2).sum()
+            loss = loss + (clip_high - 98.0).pow(2).sum()
+            loss = loss + (gamma - 1.0).pow(2).sum()
+            loss = loss + (gating - 0.5).pow(2).sum()
             
         # Normalize by batch size to keep scale consistent
         return self.config.param_regularization * (loss / len(params_list))
