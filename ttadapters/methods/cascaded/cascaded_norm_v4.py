@@ -68,19 +68,19 @@ class AssociativeMemory(nn.Module):
         self.W = nn.Linear(feat_dim, feat_dim, bias=False)
         nn.init.eye_(self.W.weight)  # Initialize to identity
         
-        # Output projection (feat_dim → 3 parameters)
-        self.out_proj = nn.Linear(feat_dim, 3)  # [gating_logit, log_temp, gamma_logit]
+        # Output projection (feat_dim → 2 parameters)
+        self.out_proj = nn.Linear(feat_dim, 2)  # [gating_logit, log_temp] only
         
         # Initialize output projection to reasonable values
         nn.init.normal_(self.out_proj.weight, 0, 0.01)
-        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0, gamma≈1.0
+        nn.init.constant_(self.out_proj.bias, 0.0)  # gating≈0.5, temp≈1.0
     
     def forward(self, img):
         """
         Args:
             img: (C, H, W) or (B, C, H, W) image tensor in [0, 255]
         Returns:
-            params: (3,) or (B, 3) [gating_logit, log_temp, gamma_logit]
+            params: (2,) or (B, 2) [gating_logit, log_temp]
             loss_mem: memory alignment loss
         """
         # Handle batch dimension
@@ -108,10 +108,10 @@ class AssociativeMemory(nn.Module):
         retrieved = self.W(Q)  # (B, feat_dim)
         
         # Project to output parameters
-        params = self.out_proj(retrieved)  # (B, 3)
+        params = self.out_proj(retrieved)  # (B, 2)
         
         if squeeze_output:
-            params = params.squeeze(0)  # (3,)
+            params = params.squeeze(0)  # (2,)
         
         return params, loss_mem
 
@@ -168,9 +168,10 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        # Global parameters (clip only - gamma is now adaptive!)
+        # Global parameters
         self.clip_low = nn.Parameter(torch.tensor(2.0))
         self.clip_high = nn.Parameter(torch.tensor(98.0))
+        self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma: global (not adaptive)
         
         # Associative memory for adaptive parameters
         self.memory = AssociativeMemory(feat_dim=128)
@@ -188,15 +189,19 @@ class GammaTransform(nn.Module):
             transformed: (C, H, W) transformed image
             params: tuple of (clip_low, clip_high, gamma, gating, temperature, loss_mem)
         """
-        # Global parameters (clip only - gamma now from memory!)
+        # Global parameters
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
+        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0] - global!
         
         # Retrieve adaptive parameters from memory
-        mem_params, loss_mem = self.memory(img)  # (3,): [gating_logit, log_temp, gamma_logit]
-        gating = torch.sigmoid(mem_params[0])  # [0, 1]
+        mem_params, loss_mem = self.memory(img)  # (2,): [gating_delta, log_temp]
+        
+        # Gating: centered at 0.5 with small adjustments
+        gating_delta = torch.tanh(mem_params[0])  # [-1, 1]
+        gating = 0.5 + 0.3 * gating_delta  # [0.2, 0.8] centered at 0.5
+        
         temperature = torch.exp(mem_params[1]).clamp(1e-4, 0.1)  # [0.0001, 0.1]
-        gamma = 0.5 + torch.sigmoid(mem_params[2]) * 1.5  # [0.5, 2.0] - adaptive!
         
         # Transform image
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
