@@ -99,16 +99,23 @@ class AssociativeMemory(nn.Module):
         feat = img_tiny.flatten(1)  # (B, 768)
         
         # Projections
-        Q = K = QK = self.qk_proj(feat)  # (B, feat_dim)
+        QK = self.qk_proj(feat)  # (B, feat_dim)
         V = self.v_proj(feat)  # (B, feat_dim)
         
         # Memory alignment loss: K @ W should equal V
-        # This trains W to map K to V
-        K_transformed = self.W(K)  # (B, feat_dim)
-        loss_mem = F.mse_loss(K_transformed, V.detach())
+        # This trains W to map K to V. V is NOT detached now!
+        QK_transformed = self.W(QK)
+        loss_mem = F.mse_loss(QK_transformed, V)
+        
+        # Orthogonality constraint (QK ⊥ V)
+        cos_sim = F.cosine_similarity(QK.flatten(), V.flatten(), dim=0)
+        loss_orth = -(cos_sim.abs())
+        
+        # Combined loss
+        loss_total = loss_mem + 0.3 * loss_orth
         
         # Retrieval: Q @ W gets parameters
-        retrieved = self.W(Q)  # (B, feat_dim)
+        retrieved = self.W(QK)  # (B, feat_dim)
         
         # Project to output parameters
         params = self.out_proj(retrieved)  # (B, 2)
@@ -116,7 +123,7 @@ class AssociativeMemory(nn.Module):
         if squeeze_output:
             params = params.squeeze(0)  # (2,)
         
-        return params, loss_mem
+        return params, loss_total
 
 
 class DifferentiableHistogramStretcher(nn.Module):
