@@ -107,41 +107,11 @@ class GammaTransform(nn.Module):
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         # Global Parameters (Anchors)
-        # Init with inverse_sigmoid for correct starting values
-        # clip_low: Target 2.0 (in 0-10 range) -> sigmoid(x)=0.2 -> x = -1.386
-        self.clip_low = nn.Parameter(torch.tensor(-1.386))
+        self.clip_low = nn.Parameter(torch.tensor(2.0))
+        self.clip_high = nn.Parameter(torch.tensor(98.0))
         
-        # clip_high: Target 98.0 (in 90-100 range) -> sigmoid(x)=0.8 -> x = 1.386
-        # Previous init (98.0) caused sigmoid saturation (grad=0) and stuck at 100.
-        self.clip_high = nn.Parameter(torch.tensor(1.386))
-        
-        self.gamma_base = nn.Parameter(torch.tensor(0.0))  # Target 1.0 -> sigmoid(x)=0.33 -> x=-0.69 (if range 0.5-2.0). 
-                                                           # Wait, gamma formula is 0.5 + sig(x)*1.5. 
-                                                           # Target 1.0 => 0.5 + 0.5 = 1.0 => sig(x)=0.333 => x=-0.693.
-                                                           # If prev init was 1.0: 0.5 + 0.73*1.5 = 1.6.  
-                                                           # Let's align gamma too? User didn't ask but good practice.
-                                                           # User code had self.gamma_base = 1.0. 
-                                                           # Let's stick to user's Gamma init if not broken, but fix Clips primarily.
-                                                           # Actually, I'll just fix Clips 2.0/98.0.
-                                                           
-        self.gamma_base = nn.Parameter(torch.tensor(0.0)) # Let's set Gamma Base to start at ~1.25 (Center) or 1.0?
-                                                          # v3 init was 1.0 -> 0.5 + 0.73*1.5 = 1.6. 
-                                                          # Let's stick to 1.0 if user liked v3 start. 
-                                                          # Wait, I am replacing lines 110-112. I should carefully modify gamma too if needed.
-                                                          # User's v4 currently has gamma_base = 1.0. 
-                                                          # Leave Gamma as is to minimize variables changed, focus on Fixing Clips.
-                                                          
-        self.gamma_base = nn.Parameter(torch.tensor(1.0))
-        
-        # Gamma Delta Predictor (MLP: 6 -> 32 -> 1)
-        # Input: Mean(3) + Std(3) = 6
-        # Gamma Delta Predictor (Linear: 6 -> 1)
-        # Simplify to Linear to prevent overfitting/instability
-        self.gamma_delta = nn.Linear(6, 1)
-        
-        # Initialize Delta Predictor to 0 (Identity Start)
-        nn.init.constant_(self.gamma_delta.weight, 0.0)
-        nn.init.constant_(self.gamma_delta.bias, 0.0)
+        self.gamma_base = nn.Parameter(torch.tensor(1.0))  # Global Gamma Base
+        self.gating_delta = nn.Parameter(torch.tensor(0.0)) # Global Gating Residual
         
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
@@ -158,32 +128,21 @@ class GammaTransform(nn.Module):
         clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
         clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
         
-        # 2. Compute Gamma (Global + Delta)
-        # Global Base: Anchored at v3 optimum (init 1.25 range [0.5, 2.0])
+        # 2. Compute Gamma (Global Only)
+        # Global Base: Anchored at v3 optimum (init 1.0 range [0.5, 2.0])
+        # Clamped to [0.5, 3.0] for stability
         gamma_base = 0.5 + torch.sigmoid(self.gamma_base) * 1.5 
+        gamma = gamma_base.clamp(0.5, 3.0)
         
-        # Delta Prediction: From Image Stats (Mean, Std)
-        if img.dim() == 3:
-            C, H, W = img.shape
-            B = 1
-            flat = img.view(1, C, -1)
-        else:
-            B, C, H, W = img.shape
-            flat = img.view(B, C, -1)
-
-        stats = torch.cat([flat.mean(dim=2), flat.std(dim=2)], dim=1) / 255.0  # (B, 6) Normalized
+        # 3. Compute Gating (Global Linear Residual)
+        # Centered at 0.5, Linear Delta, Clamped [0, 1]
+        gating = (0.5 + self.gating_delta).clamp(0.0, 1.0)
         
-        gamma_delta = self.gamma_delta(stats) # (B, 1)
-        
-        # Final Gamma: Base + Residual (tanh scaled to +/- 0.5)
-        raw_gamma = gamma_base + 0.5 * torch.tanh(gamma_delta)
-        gamma = raw_gamma.clamp(0.5, 3.0)  # Safety Clamp (Critical for Stability)
-        
-        # 3. Transform
+        # 4. Transform
         transformed = self.stretcher(img, clip_low, clip_high, gamma)
-        output = 0.5 * transformed + 0.5 * img  # residual form
+        output = gating * transformed + (1 - gating) * img
 
-        return output, (clip_low, clip_high, gamma)
+        return output, (clip_low, clip_high, gamma, gating)
 
 
 class CascadedNorm(nn.Module):
