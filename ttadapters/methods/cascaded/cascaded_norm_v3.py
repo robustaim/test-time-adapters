@@ -99,8 +99,11 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
+        # Init with inverse_sigmoid for correct starting values (prevents saturation)
+        # Target 2.0 (in range 0-10) -> sig(x)=0.2 -> x=-1.386
+        self.clip_low = nn.Parameter(torch.tensor(-1.386))
+        # Target 98.0 (in range 90-100) -> sig(x)=0.8 -> x=1.386
+        self.clip_high = nn.Parameter(torch.tensor(1.386))
         self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
 
         # Integrated stretcher
