@@ -99,28 +99,38 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        # Direct initialization to effective values
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
+        # Parameter renaming based on theoretical roles:
+        # noise_floor: High Plasticity (Fast Adaptation) - adapts to sensor noise/fog
+        self.noise_floor = nn.Parameter(torch.tensor(2.0))
+        # saturation_limit: High Stability (Anchor) - preserves white point structure
+        self.saturation_limit = nn.Parameter(torch.tensor(98.0))
+        # gamma: High Plasticity (Fast Adaptation) - controls contrast
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-        # Gradient Scaling: Slow down clip parameters (High Momentum / EMA effect)
-        # User requested EMA-like behavior (5% learning speed) to let gamma adapt faster
-        self.clip_low.register_hook(lambda grad: grad * 0.05)
-        self.clip_high.register_hook(lambda grad: grad * 0.05)
+        # Gradient Scaling: Only anchor the saturation_limit (White Point)
+        # Allow noise_floor to move fast (Standard LR) to catch domain-specific noise (like Night/Dawn)
+        self.saturation_limit.register_hook(lambda grad: grad * 0.05)
 
     def forward(self, img):
         """Get constrained parameters and apply transform."""
-        clip_low = self.clip_low.clamp(min=0.0, max=48.0)
-        clip_high = self.clip_high.clamp(min=52.0, max=100.0)
+        noise_floor = self.noise_floor.clamp(min=0.0, max=48.0)
+        saturation_limit = self.saturation_limit.clamp(min=52.0, max=100.0)
         gamma = self.gamma.clamp(min=0.1, max=5.0)
 
-        transformed = self.stretcher(img, clip_low, clip_high, gamma)
+        transformed = self.stretcher(img, noise_floor, saturation_limit, gamma)
+        
+        return transformed, (noise_floor, saturation_limit, gamma)
 
-        return transformed, (clip_low, clip_high, gamma)
+    def get_regularization_loss(self):
+        """Compute regularization loss relative to initialization anchors."""
+        # Matches initialization values (2.0, 98.0, 1.0)
+        loss = (self.noise_floor - 2.0).pow(2) + \
+               (self.saturation_limit - 98.0).pow(2) + \
+               (self.gamma - 1.0).pow(2)
+        return loss
 
 
 class CascadedNorm(nn.Module):
@@ -174,6 +184,11 @@ class CascadedNorm(nn.Module):
             loss_var = F.mse_loss(batch_var, source_var)
 
             total_loss = total_loss + loss_mean + loss_var
+
+        # Regularization Loss (Stability)
+        if self.config.param_regularization > 0:
+            reg_loss = self.transform_controller.get_regularization_loss()
+            total_loss = total_loss + reg_loss * self.config.param_regularization
 
         return total_loss
 
@@ -425,8 +440,8 @@ class CascadedNormEngine(AdaptationEngine):
             'num_steps': len(self._stats['alignment_losses']),
             'mean_loss': np.mean(self._stats['alignment_losses']),
             'final_loss': self._stats['alignment_losses'][-1],
-            'mean_clip_low': np.mean(params_array[:, 0]),
-            'mean_clip_high': np.mean(params_array[:, 1]),
+            'mean_noise_floor': np.mean(params_array[:, 0]),
+            'mean_saturation_limit': np.mean(params_array[:, 1]),
             'mean_gamma': np.mean(params_array[:, 2]),
         }
 
