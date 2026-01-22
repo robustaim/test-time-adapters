@@ -43,9 +43,9 @@ class CascadedNormConfig(AdaptationConfig):
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
 
-    param_regularization: float = 0.01
+    param_regularization: float = 0.05
     temperature: float = 0.01
-    saturation_limit: float = 98.0
+    saturation_limit: float = 100.0
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -97,12 +97,14 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 class GammaTransform(nn.Module):
     """Learnable parameters for histogram stretching with gamma correction."""
+    noise_init = 2.0
+    gamma_init = 1.0
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
-        self.noise_floor = nn.Parameter(torch.tensor(2.0))
-        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.noise_floor = nn.Parameter(torch.tensor(self.noise_init))
+        self.gamma = nn.Parameter(torch.tensor(self.gamma_init))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
@@ -117,8 +119,8 @@ class GammaTransform(nn.Module):
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
-        loss = (self.noise_floor - 2.0).pow(2) + \
-               (self.gamma - 1.0).pow(2)
+        loss = (self.noise_floor - self.noise_init).pow(2) + \
+               (self.gamma - self.gamma_init).pow(2)
         return loss
 
 
@@ -174,7 +176,6 @@ class CascadedNorm(nn.Module):
 
             total_loss = total_loss + loss_mean + loss_var
 
-        # Regularization Loss (Stability)
         if self.config.param_regularization > 0:
             reg_loss = self.transform_controller.get_regularization_loss()
             total_loss = total_loss + reg_loss * self.config.param_regularization
@@ -182,17 +183,7 @@ class CascadedNorm(nn.Module):
         return total_loss
 
     def online_parameters(self):
-        """Get learnable parameters for optimization with differential learning rates."""
-        return [
-            {
-                'params': [self.transform_controller.noise_floor],
-                'lr': self.config.adapt_lr * 1.5  # Boosted 1.5x: Needs to jump quickly for noise
-            },
-            {
-                'params': [self.transform_controller.gamma],
-                'lr': self.config.adapt_lr  # Standard speed
-            }
-        ]
+        return self.transform_controller.parameters()
 
 
 class CascadedNormEngine(AdaptationEngine):
