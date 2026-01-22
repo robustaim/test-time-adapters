@@ -341,9 +341,11 @@ class CascadedNormEngine(AdaptationEngine):
 
     def forward(self, batched_inputs):
         if not self.adapting: return self.base_model(batched_inputs)
-        if isinstance(batched_inputs, torch.Tensor): return self._forward_tensor(batched_inputs)
-        # Simplified for dict list (assuming tensor path is primary for test)
-        return self._forward_tensor(torch.stack([x['image'] for x in batched_inputs]))
+    def forward(self, batched_inputs):
+        if not self.adapting: return self.base_model(batched_inputs)
+        if isinstance(batched_inputs, torch.Tensor): 
+            return self._forward_tensor(batched_inputs)
+        return self._forward_dict_list(batched_inputs)
 
     def _forward_tensor(self, imgs):
         imgs = imgs.to(self._device)
@@ -357,7 +359,43 @@ class CascadedNormEngine(AdaptationEngine):
         model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
         outputs = self.base_model(model_input)
         
-        alignment_loss = self.cascaded_norm.compute_alignment_loss(mem_losses) # Pass mem_losses here!
+        alignment_loss = self.cascaded_norm.compute_alignment_loss(mem_losses)
+        total_loss = alignment_loss
+        
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+        
+        self._stats['alignment_losses'].append(total_loss.item())
+        return outputs
+
+    def _forward_dict_list(self, batched_inputs):
+        # 1. Extract Images
+        imgs = torch.stack([x['image'] for x in batched_inputs]).to(self._device)
+        
+        # 2. Check Scale & Transform
+        original_scale = imgs.max() <= 1.0
+        if original_scale: imgs = imgs * 255.0
+        
+        imgs_transformed, params_list, mem_losses = self._transform_batch(imgs)
+        
+        # 3. Stats & Repacking
+        for params in params_list: self._stats['transform_params'].append(tuple(p.item() for p in params))
+        
+        model_inputs = []
+        for i, input_dict in enumerate(batched_inputs):
+            new_input = input_dict.copy()
+            # Detectron2 expects (C, H, W) tensors in the list
+            transformed_img = imgs_transformed[i]
+            if original_scale: transformed_img = transformed_img / 255.0
+            new_input['image'] = transformed_img
+            model_inputs.append(new_input)
+            
+        # 4. Forward
+        outputs = self.base_model(model_inputs)
+        
+        # 5. Adapt
+        alignment_loss = self.cascaded_norm.compute_alignment_loss(mem_losses)
         total_loss = alignment_loss
         
         self.optimizer.zero_grad()
