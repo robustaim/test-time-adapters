@@ -99,10 +99,14 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
+        # noise_floor: High Plasticity (Fast Adaptation) - adapts to sensor noise/fog
         self.noise_floor = nn.Parameter(torch.tensor(2.0))
+        # saturation_limit: High Stability (Anchor) - preserves white point structure
         self.saturation_limit = nn.Parameter(torch.tensor(98.0))
+        # gamma: High Plasticity (Fast Adaptation) - controls contrast
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
+        # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
@@ -189,7 +193,7 @@ class CascadedNorm(nn.Module):
         return [
             {
                 'params': [self.transform_controller.noise_floor],
-                'lr': self.config.adapt_lr * 0.05
+                'lr': self.config.adapt_lr * 1.5  # Boosted 1.5x: Needs to jump quickly for noise
             },
             {
                 'params': [self.transform_controller.gamma],
@@ -197,7 +201,7 @@ class CascadedNorm(nn.Module):
             },
             {
                 'params': [self.transform_controller.saturation_limit],
-                'lr': self.config.adapt_lr * 0.05
+                'lr': self.config.adapt_lr * 0.05  # 20x slower for anchor stability
             }
         ]
 

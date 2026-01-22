@@ -100,7 +100,6 @@ class GammaTransform(nn.Module):
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.noise_floor = nn.Parameter(torch.tensor(2.0))
-        self.saturation_limit = nn.Parameter(torch.tensor(98.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
@@ -108,18 +107,15 @@ class GammaTransform(nn.Module):
     def forward(self, img):
         """Get constrained parameters and apply transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=48.0)
-        saturation_limit = self.saturation_limit.clamp(min=52.0, max=100.0)
         gamma = self.gamma.clamp(min=0.1, max=5.0)
 
-        transformed = self.stretcher(img, noise_floor, saturation_limit, gamma)
+        transformed = self.stretcher(img, noise_floor, 100, gamma)
         
-        return transformed, (noise_floor, saturation_limit, gamma)
+        return transformed, (noise_floor, 100, gamma)
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
-        # Matches initialization values (2.0, 98.0, 1.0)
         loss = (self.noise_floor - 2.0).pow(2) + \
-               (self.saturation_limit - 98.0).pow(2) + \
                (self.gamma - 1.0).pow(2)
         return loss
 
@@ -185,19 +181,14 @@ class CascadedNorm(nn.Module):
 
     def online_parameters(self):
         """Get learnable parameters for optimization with differential learning rates."""
-        # Split parameters into dynamic groups based on physical role
         return [
             {
                 'params': [self.transform_controller.noise_floor],
-                'lr': self.config.adapt_lr * 0.05
+                'lr': self.config.adapt_lr * 1.5  # Boosted 1.5x: Needs to jump quickly for noise
             },
             {
                 'params': [self.transform_controller.gamma],
                 'lr': self.config.adapt_lr  # Standard speed
-            },
-            {
-                'params': [self.transform_controller.saturation_limit],
-                'lr': self.config.adapt_lr * 0.05
             }
         ]
 
