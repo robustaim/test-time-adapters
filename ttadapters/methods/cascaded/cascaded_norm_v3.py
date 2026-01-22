@@ -45,6 +45,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     param_regularization: float = 0.01
     temperature: float = 0.01
+    saturation_limit: float = 98.0
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -99,6 +100,7 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
+        self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
         self.noise_floor = nn.Parameter(torch.tensor(2.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
@@ -109,9 +111,9 @@ class GammaTransform(nn.Module):
         noise_floor = self.noise_floor.clamp(min=0.0, max=48.0)
         gamma = self.gamma.clamp(min=0.1, max=5.0)
 
-        transformed = self.stretcher(img, noise_floor, 100, gamma)
+        transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
         
-        return transformed, (noise_floor, 100, gamma)
+        return transformed, (noise_floor, self.saturation_limit, gamma)
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
