@@ -97,21 +97,24 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 class GammaTransform(nn.Module):
     """Learnable parameters for histogram stretching with gamma correction."""
-    noise_init = 2.0
-    gamma_init = 1.0
+    noise_stop_range = (0.0, 20.0)  # pass range 80~100
+    gamma_range = (0.5, 1.5)  # gamma range 0.5~1.5
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
+        self.noise_floor_init = sum(self.noise_stop_range) / 2
+        self.gamma_init = sum(self.gamma_range) / 2
+
         self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
-        self.noise_floor = nn.Parameter(torch.tensor(self.noise_init))
+        self.noise_floor = nn.Parameter(torch.tensor(self.noise_floor_init))
         self.gamma = nn.Parameter(torch.tensor(self.gamma_init))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
         """Get constrained parameters and apply transform."""
-        noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)
-        gamma = self.gamma.clamp(min=0.5, max=2.0)
+        noise_floor = self.noise_floor.clamp(*self.noise_stop_range)
+        gamma = self.gamma.clamp(*self.gamma_range)
 
         transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
         
@@ -119,9 +122,7 @@ class GammaTransform(nn.Module):
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
-        loss = (self.noise_floor - self.noise_init).pow(2) + \
-               (self.gamma - self.gamma_init).pow(2)
-        return loss
+        return (self.noise_floor - self.noise_floor_init).pow(2) + (self.gamma - self.gamma_init).pow(2)
 
 
 class CascadedNorm(nn.Module):
