@@ -185,19 +185,15 @@ class CascadedNorm(nn.Module):
 
     def online_parameters(self):
         """Get learnable parameters for optimization with differential learning rates."""
-        # Split parameters into dynamic groups based on physical role
+        # Experiment: Clip parameters are extremely slow (LR^2), Gamma is fast.
         return [
             {
-                'params': [self.transform_controller.noise_floor],
-                'lr': self.config.adapt_lr * 0.05
+                'params': [self.transform_controller.noise_floor, self.transform_controller.saturation_limit],
+                'lr': self.config.adapt_lr ** 2  # Ultra-slow stability (1e-6)
             },
             {
                 'params': [self.transform_controller.gamma],
-                'lr': self.config.adapt_lr  # Standard speed
-            },
-            {
-                'params': [self.transform_controller.saturation_limit],
-                'lr': self.config.adapt_lr * 0.05
+                'lr': self.config.adapt_lr  # Gamma leads adaptation
             }
         ]
 
