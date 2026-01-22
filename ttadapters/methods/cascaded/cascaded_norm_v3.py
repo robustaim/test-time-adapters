@@ -45,7 +45,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.05
+    param_regularization: float = 0.1
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -97,7 +97,7 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 class GammaTransform(nn.Module):
     """Learnable parameters for histogram stretching with gamma correction."""
-    noise_stop_range = (0.0, 20.0)  # pass range 80~100
+    noise_stop_range = (0.0, 10.0)  # pass range 10~100
     gamma_range = (0.5, 1.5)  # gamma range 0.5~1.5
 
     def __init__(self, config: CascadedNormConfig):
