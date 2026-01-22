@@ -24,6 +24,11 @@ class MethodContainer(dict):
         return tuple(self.values())
 
 
+class OnlineMixin(nn.Module):
+    pass
+
+
+
 @dataclass
 class AdaptationConfig:
     adaptation_name: str = "AdaptationEngine"
@@ -138,8 +143,12 @@ class AdaptationEngine(BaseModel):
             self.eval()
             for param in self.parameters():
                 param.requires_grad = False
-            for param in self.online_parameters():
-                param.requires_grad = True
+            for param_group in self.online_parameters():
+                if isinstance(param_group, dict):
+                    for param in param_group['params']:
+                        param.requires_grad = True
+                else:
+                    param_group.requires_grad = True
         else:
             self.train()
             for param in self.parameters():
