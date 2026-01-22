@@ -110,10 +110,6 @@ class GammaTransform(nn.Module):
         # Integrated stretcher
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
-        # Gradient Scaling: Only anchor the saturation_limit (White Point)
-        # Allow noise_floor to move fast (Standard LR) to catch domain-specific noise (like Night/Dawn)
-        self.saturation_limit.register_hook(lambda grad: grad * 0.05)
-
     def forward(self, img):
         """Get constrained parameters and apply transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=48.0)
@@ -193,8 +189,18 @@ class CascadedNorm(nn.Module):
         return total_loss
 
     def online_parameters(self):
-        """Get learnable parameters for optimization."""
-        return self.transform_controller.parameters()
+        """Get learnable parameters for optimization with differential learning rates."""
+        # Split parameters into fast (plastic) and slow (stable) groups
+        return [
+            {
+                'params': [self.transform_controller.noise_floor, self.transform_controller.gamma],
+                'lr': self.config.adapt_lr
+            },
+            {
+                'params': [self.transform_controller.saturation_limit],
+                'lr': self.config.adapt_lr * 0.05  # 20x slower for anchor stability
+            }
+        ]
 
 
 class CascadedNormEngine(AdaptationEngine):
