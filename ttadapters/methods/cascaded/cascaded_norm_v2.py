@@ -43,7 +43,7 @@ class CascadedNormConfig(AdaptationConfig):
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
 
-    param_regularization: float = 0.01
+    param_regularization: float = 0.1
     temperature: float = 0.01
 
 
@@ -193,7 +193,7 @@ class CascadedNorm(nn.Module):
         return [
             {
                 'params': [self.transform_controller.noise_floor],
-                'lr': self.config.adapt_lr * 1.5  # Boosted 1.5x: Needs to jump quickly for noise
+                'lr': self.config.adapt_lr * 5.0  # Boosted 5.0x: Needs to jump quickly for noise
             },
             {
                 'params': [self.transform_controller.gamma],
