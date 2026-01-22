@@ -45,7 +45,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.1
+    param_regularization: float = 0.05
 
 
 class DifferentiableHistogramStretcher(nn.Module):
