@@ -110,7 +110,7 @@ class GammaTransform(nn.Module):
 
     def forward(self, img):
         """Get constrained parameters and apply transform."""
-        noise_floor = self.noise_floor.clamp(min=0.0, max=48.0)
+        noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)
         gamma = self.gamma.clamp(min=0.1, max=5.0)
 
         transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
