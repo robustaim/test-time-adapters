@@ -45,7 +45,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.01
+    param_regularization: float = 0.1
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -111,7 +111,7 @@ class GammaTransform(nn.Module):
     def forward(self, img):
         """Get constrained parameters and apply transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)
-        gamma = self.gamma.clamp(min=0.1, max=2.0)
+        gamma = self.gamma.clamp(min=0.5, max=2.0)
 
         transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
         
