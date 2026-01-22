@@ -44,6 +44,7 @@ class CascadedNormConfig(AdaptationConfig):
     adapt_lr: float = 1e-3
 
     temperature: float = 0.01
+    saturation_limit: float = 100.0
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -98,8 +99,8 @@ class GammaTransform(nn.Module):
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
-        self.clip_low = nn.Parameter(torch.tensor(2.0))
-        self.clip_high = nn.Parameter(torch.tensor(98.0))
+        self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
+        self.noise_floor = nn.Parameter(torch.tensor(2.0))
         self.gamma = nn.Parameter(torch.tensor(1.0))  # Gamma correction
 
         # Integrated stretcher
@@ -107,13 +108,12 @@ class GammaTransform(nn.Module):
 
     def forward(self, img):
         """Get constrained parameters."""
-        clip_low = torch.sigmoid(self.clip_low) * 10  # [0, 10]
-        clip_high = 90 + torch.sigmoid(self.clip_high) * 10  # [90, 100]
+        noise_floor = torch.sigmoid(self.noise_floor) * 10  # [0, 10]
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # [0.5, 2.0]
 
-        transformed = self.stretcher(img, clip_low, clip_high, gamma)
+        transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
 
-        return transformed, (clip_low, clip_high, gamma)
+        return transformed, (noise_floor, self.saturation_limit, gamma)
 
 
 class CascadedNorm(nn.Module):
