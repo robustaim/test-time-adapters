@@ -114,25 +114,29 @@ class AdaptationEngine(BaseModel):
     @property
     def optimizer(self) -> optim.Optimizer:
         if self._optimizer is None:
-            if self.config.optim == "SGD":
-                self._optimizer = optim.SGD(
-                    self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
-                )
-            if self.config.optim == "Adam":
-                self._optimizer = optim.Adam(self.online_parameters(), lr=self.config.adapt_lr)
-            elif self.config.optim == "AdamW":
-                self._optimizer = optim.AdamW(self.online_parameters(), lr=self.config.adapt_lr)
-            elif self.config.optim == "Muon":
-                self._optimizer = Muon(
-                    list(self.online_parameters()), lr=self.config.adapt_lr, momentum=self.config.momentum
-                )
-            elif self.config.optim == "MuonWithAuxAdam":
-                self._optimizer = MuonWithAuxAdam(
-                    list(self.online_parameters()),
-                    lr=self.config.adapt_lr, adam_lr=self.config.adapt_lr / 10, momentum=self.config.momentum
-                )
-            else:
-                raise NotImplementedError(f"Optimizer {self.config.optim} cannot be recognized or is not implemented yet.")
+            match self.config.optim:
+                case "SGD":
+                    self._optimizer = optim.SGD(
+                        self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
+                    )
+                case "Adam":
+                    self._optimizer = optim.Adam(self.online_parameters(), lr=self.config.adapt_lr)
+                case "AdamW":
+                    self._optimizer = optim.AdamW(self.online_parameters(), lr=self.config.adapt_lr)
+                case "Muon":
+                    self._optimizer = Muon(
+                        list(self.online_parameters()), lr=self.config.adapt_lr, momentum=self.config.momentum
+                    )
+                case "MuonWithAuxAdam":
+                    params = list(self.online_parameters())
+                    hidden_matrix_params = [p for p in params if p.ndim >= 2]  # matrix (apply muon)
+                    scalar_params = [p for p in params if p.ndim < 2]  # vector (apply adam)
+                    self._optimizer = MuonWithAuxAdam([
+                        dict(params=hidden_matrix_params, lr=self.config.adapt_lr, momentum=self.config.momentum, use_muon=True),  # Muon group (Main)
+                        dict(params=scalar_params, lr=self.config.adapt_lr / 10, betas=(0.9, 0.95), use_muon=False)  # Adam group (Auxiliary)
+                    ])
+                case _:
+                    raise NotImplementedError(f"Optimizer {self.config.optim} cannot be recognized or is not implemented yet.")
         return self._optimizer
 
     def online(self, mode=True) -> Self:
