@@ -114,7 +114,7 @@ class AdaptationEngine(BaseModel):
     @property
     def optimizer(self) -> optim.Optimizer:
         if self._optimizer is None:
-            if self.config.optim == "SDG":
+            if self.config.optim == "SGD":
                 self._optimizer = optim.SGD(
                     self.online_parameters(), lr=self.config.adapt_lr, momentum=self.config.momentum
                 )
