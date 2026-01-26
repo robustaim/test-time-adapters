@@ -282,6 +282,39 @@ class CascadedNormEngine(AdaptationEngine):
                 return norm_list
 
     @staticmethod
+    def _create_wrapped_class(original_class, module_type):
+        """Create a wrapped class with overridden forward method."""
+        if module_type == "BN":
+            def forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                if _input.dim() == 4:  # (B, C, H, W)
+                    dims = (0, 2, 3)
+                elif _input.dim() == 3:  # (B, C, L)
+                    dims = (0, 2)
+                else:  # (B, C)
+                    dims = (0,)
+                _self.current_mean = _input.mean(dim=dims)
+                _self.current_var = _input.var(dim=dims, unbiased=False)
+
+                return original_class.forward(_self, _input)
+        elif module_type == "LN":
+            def forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                if hasattr(_self, "normalized_shape"):
+                    dims = tuple(range(-len(_self.normalized_shape), 0))
+                    _self.current_mean = _input.mean(dim=dims)
+                    _self.current_var = _input.var(dim=dims, unbiased=False)
+                else:
+                    _self.current_mean = _input.mean()
+                    _self.current_var = _input.var(unbiased=False)
+
+                return original_class.forward(_self, _input)
+        else:
+            return original_class
+
+        return type(f"Cascaded{original_class.__name__}", (original_class,), {
+            "forward": forward
+        })
+
+    @staticmethod
     def _cascade_wrap(filtered: list[nn.Module]):
         """Wrap norm layer forward methods to capture batch statistics."""
         class_cache = {}
@@ -290,35 +323,7 @@ class CascadedNormEngine(AdaptationEngine):
             original_class = module.__class__
 
             if original_class not in class_cache:
-                # Define wrapped forward
-                if module_type == "BN":
-                    def new_forward(_self, _input: torch.Tensor, original_class=original_class) -> torch.Tensor:
-                        if _input.dim() == 4:  # (B, C, H, W)
-                            dims = (0, 2, 3)
-                        elif _input.dim() == 3:  # (B, C, L)
-                            dims = (0, 2)
-                        else:  # (B, C)
-                            dims = (0,)
-                        _self.current_mean = _input.mean(dim=dims)
-                        _self.current_var = _input.var(dim=dims, unbiased=False)
-
-                        return original_class.forward(_self, _input)
-                elif module_type == "LN":
-                    def new_forward(_self, _input: torch.Tensor, original_class=original_class) -> torch.Tensor:
-                        if hasattr(module, "normalized_shape"):
-                            dims = tuple(range(-len(module.normalized_shape), 0))
-                            _self.current_mean = _input.mean(dim=dims)
-                            _self.current_var = _input.var(dim=dims, unbiased=False)
-                        else:
-                            _self.current_mean = _input.mean()
-                            _self.current_var = _input.var(unbiased=False)
-
-                        return original_class.forward(_self, _input)
-
-                # Create new class
-                new_class = type("Cascaded"+original_class.__name__, (original_class,), {
-                    "forward": new_forward
-                })
+                new_class = CascadedNormEngine._create_wrapped_class(original_class, module_type)
                 class_cache[original_class] = new_class
             else:  # from class cache
                 new_class = class_cache[original_class]
