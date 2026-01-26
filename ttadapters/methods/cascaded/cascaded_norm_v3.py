@@ -292,7 +292,7 @@ class CascadedNormEngine(AdaptationEngine):
             if original_class not in class_cache:
                 # Define wrapped forward
                 if module_type == "BN":
-                    def new_forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                    def new_forward(_self, _input: torch.Tensor, original_class=original_class) -> torch.Tensor:
                         if _input.dim() == 4:  # (B, C, H, W)
                             dims = (0, 2, 3)
                         elif _input.dim() == 3:  # (B, C, L)
@@ -304,7 +304,7 @@ class CascadedNormEngine(AdaptationEngine):
 
                         return original_class.forward(_self, _input)
                 elif module_type == "LN":
-                    def new_forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                    def new_forward(_self, _input: torch.Tensor, original_class=original_class) -> torch.Tensor:
                         if hasattr(module, "normalized_shape"):
                             dims = tuple(range(-len(module.normalized_shape), 0))
                             _self.current_mean = _input.mean(dim=dims)
