@@ -343,15 +343,23 @@ class CascadedNormEngine(AdaptationEngine):
 
         return torch.stack(transformed_list, dim=0), params_list
 
-    def forward(self, batched_inputs):
+    def forward(self, batched_inputs=None, **kwargs):
         """Forward with transformation and alignment."""
+        # Handle case where inputs are passed as kwargs (e.g. model(**batch))
+        is_kwargs = False
+        if batched_inputs is None and kwargs:
+            batched_inputs = kwargs
+            is_kwargs = True
+
         if not self.adapting:
+            if is_kwargs:
+                return self.base_model(**batched_inputs)
             return self.base_model(batched_inputs)
 
         if isinstance(batched_inputs, torch.Tensor):
             return self._forward_tensor(batched_inputs)
         elif isinstance(batched_inputs, dict):
-            return self._forward_dict(batched_inputs)
+            return self._forward_dict(batched_inputs, unpack_args=is_kwargs)
         return self._forward_dict_list(batched_inputs)
 
     def _forward_tensor(self, imgs):
@@ -381,13 +389,15 @@ class CascadedNormEngine(AdaptationEngine):
 
         return outputs
 
-    def _forward_dict(self, input_dict):
+    def _forward_dict(self, input_dict, unpack_args=False):
         """Handle dictionary input (RT-DETR, YOLO)."""
         if 'pixel_values' in input_dict:
             img_key = 'pixel_values'
         elif 'img' in input_dict:
             img_key = 'img'
         else:
+            if unpack_args:
+                return self.base_model(**input_dict)
             return self.base_model(input_dict)
 
         imgs = input_dict[img_key].to(self._device)
@@ -406,7 +416,10 @@ class CascadedNormEngine(AdaptationEngine):
         new_input = input_dict.copy()
         new_input[img_key] = model_input
         
-        outputs = self.base_model(new_input)
+        if unpack_args:
+            outputs = self.base_model(**new_input)
+        else:
+            outputs = self.base_model(new_input)
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         total_loss = alignment_loss
