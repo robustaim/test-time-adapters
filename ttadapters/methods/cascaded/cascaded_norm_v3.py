@@ -350,6 +350,8 @@ class CascadedNormEngine(AdaptationEngine):
 
         if isinstance(batched_inputs, torch.Tensor):
             return self._forward_tensor(batched_inputs)
+        elif isinstance(batched_inputs, dict):
+            return self._forward_dict(batched_inputs)
         return self._forward_dict_list(batched_inputs)
 
     def _forward_tensor(self, imgs):
@@ -367,6 +369,44 @@ class CascadedNormEngine(AdaptationEngine):
 
         model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
         outputs = self.base_model(model_input)
+
+        alignment_loss = self.cascaded_norm.compute_alignment_loss()
+        total_loss = alignment_loss
+
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+
+        self._stats['alignment_losses'].append(total_loss.item())
+
+        return outputs
+
+    def _forward_dict(self, input_dict):
+        """Handle dictionary input (RT-DETR, YOLO)."""
+        if 'pixel_values' in input_dict:
+            img_key = 'pixel_values'
+        elif 'img' in input_dict:
+            img_key = 'img'
+        else:
+            return self.base_model(input_dict)
+
+        imgs = input_dict[img_key].to(self._device)
+        
+        original_scale = imgs.max() <= 1.0
+        if original_scale:
+            imgs = imgs * 255.0
+
+        imgs_transformed, params_list = self._transform_batch(imgs)
+
+        for params in params_list:
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
+
+        model_input = imgs_transformed / 255.0 if original_scale else imgs_transformed
+        
+        new_input = input_dict.copy()
+        new_input[img_key] = model_input
+        
+        outputs = self.base_model(new_input)
 
         alignment_loss = self.cascaded_norm.compute_alignment_loss()
         total_loss = alignment_loss
