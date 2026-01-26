@@ -164,10 +164,21 @@ class CascadedNorm(nn.Module):
             source_mean = self.source_means[i].to(batch_mean.device)
             source_var = self.source_vars[i].to(batch_var.device)
 
-            # For BN with multiple channels, average to scalar
-            if norm_type == 'BN' and batch_mean.ndim > 0:
+            # Ensure batch stats are scalars to match source stats
+            if batch_mean.numel() > 1:
                 batch_mean = batch_mean.mean()
+            if batch_var.numel() > 1:
                 batch_var = batch_var.mean()
+
+            # Ensure scalar shapes match
+            if batch_mean.ndim > 0:
+                batch_mean = batch_mean.squeeze()
+            if batch_var.ndim > 0:
+                batch_var = batch_var.squeeze()
+            if source_mean.ndim > 0:
+                source_mean = source_mean.squeeze()
+            if source_var.ndim > 0:
+                source_var = source_var.squeeze()
 
             loss_mean = F.mse_loss(batch_mean, source_mean)
             loss_var = F.mse_loss(batch_var, source_var)
