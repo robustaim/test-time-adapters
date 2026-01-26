@@ -5,8 +5,12 @@ from enum import Enum
 import gc
 
 from torch import nn, load, save, hub, cuda
+from tqdm.auto import tqdm
 
 from ..datasets import BaseDataset, DataPreparation
+
+
+hub.tqdm = tqdm  # override torch.hub.tqdm
 
 
 class ModelProvider(Enum):
