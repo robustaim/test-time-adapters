@@ -206,3 +206,10 @@ class AdaptationEngine(BaseModel):
 
     def forward(self, *args, **kwargs):
         return self.base_model(*args, **kwargs)
+
+    def __getattr__(self, name):
+        """Delegate attribute access to base_model."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
