@@ -8,7 +8,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from ..base import AdaptationEngine, AdaptationConfig
-from ...models.base import BaseModel
+from ...models.base import BaseModel, ModelProvider
 
 
 @dataclass
