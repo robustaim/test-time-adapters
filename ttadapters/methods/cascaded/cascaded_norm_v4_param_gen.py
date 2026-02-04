@@ -28,8 +28,8 @@ class CascadedNormV4Config(AdaptationConfig):
     saturation_limit: float = 100.0
     
     # Anchor / Consistency
-    anchor_loss_weight: float = 1.0  # Weight for keeping generator close to identity
-    
+    anchor_loss_weight: float = 10.0  # Increased 1.0 -> 10.0 to prevent drift/over-adaptation
+
     # Generator
     hidden_dim: int = 32
     
@@ -150,13 +150,13 @@ class GammaTransform(nn.Module):
         avg_delta = delta.mean(dim=0) # (2,)
         
         # Tanh Scaling to prevent explosion
-        # Delta 0 -> Noise +/- 10.0
-        # Delta 1 -> Gamma +/- 0.5
-        noise_delta = torch.tanh(avg_delta[0]) * 10.0 
-        gamma_delta = torch.tanh(avg_delta[1]) * 0.5
+        # Delta 0 -> Noise +/- 50.0 (Wide enough to cover V3's 17.0)
+        # Delta 1 -> Gamma +/- 0.9  (Wide enough to cover V3's 0.5)
+        noise_delta = torch.tanh(avg_delta[0]) * 50.0 
+        gamma_delta = torch.tanh(avg_delta[1]) * 0.9
         
-        noise_floor = (self.noise_floor_init + noise_delta).clamp(0.0, 20.0)
-        gamma = (self.gamma_init + gamma_delta).clamp(0.5, 1.5) # Safe range
+        noise_floor = (self.noise_floor_init + noise_delta).clamp(0.0, 50.0) # Expanded Clamp
+        gamma = (self.gamma_init + gamma_delta).clamp(0.1, 3.0) # Expanded Clamp
         
         if self.generator.training:
              print(f"[V4 Debug] Noise: {noise_floor.item():.2f}, Gamma: {gamma.item():.2f}")
