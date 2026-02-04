@@ -1,23 +1,3 @@
-"""
-CascadedNorm All-LN: Drift-Free Input Transformation
-
-Converts all BatchNorm layers to LayerNorm to eliminate parameter drift.
-
-Key Innovation:
-    1. Replace BN with LN (domain-agnostic normalization)
-    2. Initialize LN's gamma/beta from BN's running_mean/var (preserve source info)
-    3. All layers align to (mean=0, var=1) target (consistent across domains)
-    
-Why This Solves Drift:
-    - BN: Domain-specific target (Clear's running stats) → Drift when switching domains
-    - LN: Domain-agnostic target (0, 1) → Stable equilibrium across all domains
-    
-Pipeline:
-    [Input] → [Transform T(θ)] → [Model with LN (BN→LN converted)] → [Output]
-                    ↑
-              Update via (0, 1) alignment loss (all layers)
-"""
-
 from typing import List
 from dataclasses import dataclass
 
@@ -115,126 +95,25 @@ class GammaTransform(nn.Module):
         return (self.noise_floor - self.noise_floor_init).pow(2) + (self.gamma - self.gamma_init).pow(2)
 
 
-class CascadedAnchor(nn.Module):
-    """
-    Unified normalization anchor for drift-free adaptation.
-    
-    Preserves input→output relationship (like LN) by using batch stats + learned affine.
-    """
-    
-    def __init__(self, original_module, normalized_shape, is_from_bn=False):
-        """
-        Args:
-            original_module: Original BN/LN module
-            normalized_shape: Shape for normalization
-            is_from_bn: Whether converting from BN (True) or LN (False)
-        """
-        super().__init__()
-        
-        self.normalized_shape = normalized_shape
-        self.is_from_bn = is_from_bn
-        self.eps = 1e-5
-        
-        # Preserve learned affine for consistent input→output relationship
-        if is_from_bn:
-            # BN: Preserve learned gamma/beta
-            # This maintains "BN input → BN output" relationship
-            if hasattr(original_module, 'weight') and original_module.weight is not None:
-                self.weight = nn.Parameter(original_module.weight.clone())
-                self.bias = nn.Parameter(original_module.bias.clone())
-            else:
-                # No affine
-                num_features = original_module.num_features
-                self.weight = nn.Parameter(torch.ones(num_features))
-                self.bias = nn.Parameter(torch.zeros(num_features))
-        else:
-            # LN: Keep learned parameters
-            self.weight = nn.Parameter(original_module.weight.clone())
-            self.bias = nn.Parameter(original_module.bias.clone())
-        
-        # Stats tracking
-        self.register_buffer('current_mean', torch.tensor(0.0))
-        self.register_buffer('current_var', torch.tensor(0.0))
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply normalization using BATCH statistics (LN-style).
-        
-        Preserves BN's learned gamma/beta but uses batch stats for domain-agnostic behavior.
-        """
-        if x.dim() == 4:  # (B, C, H, W) - from BN2d
-            # Measure input stats
-            dims = (0, 2, 3)
-            self.current_mean = x.mean(dim=dims)
-            self.current_var = x.var(dim=dims, unbiased=False)
-            
-            # Normalize using BATCH statistics (key difference from BN!)
-            batch_mean = x.mean(dim=dims, keepdim=True)
-            batch_var = x.var(dim=dims, keepdim=True, unbiased=False)
-            normalized = (x - batch_mean) / torch.sqrt(batch_var + self.eps)
-            
-            # Apply BN's LEARNED gamma/beta
-            gamma = self.weight.view(1, -1, 1, 1)
-            beta = self.bias.view(1, -1, 1, 1)
-            
-            return normalized * gamma + beta
-            
-        elif x.dim() == 3:  # (B, C, L) - sequence
-            dims = (0, 2)
-            self.current_mean = x.mean(dim=dims)
-            self.current_var = x.var(dim=dims, unbiased=False)
-            
-            batch_mean = x.mean(dim=dims, keepdim=True)
-            batch_var = x.var(dim=dims, keepdim=True, unbiased=False)
-            normalized = (x - batch_mean) / torch.sqrt(batch_var + self.eps)
-            
-            gamma = self.weight.view(1, -1, 1)
-            beta = self.bias.view(1, -1, 1)
-            
-            return normalized * gamma + beta
-            
-        else:
-            # Standard LN behavior
-            if hasattr(self, 'normalized_shape') and self.normalized_shape:
-                dims = tuple(range(-len(self.normalized_shape), 0))
-            else:
-                dims = None
-            
-            if dims:
-                self.current_mean = x.mean(dim=dims)
-                self.current_var = x.var(dim=dims, unbiased=False)
-                batch_mean = x.mean(dim=dims, keepdim=True)
-                batch_var = x.var(dim=dims, keepdim=True, unbiased=False)
-            else:
-                self.current_mean = x.mean()
-                self.current_var = x.var(unbiased=False)
-                batch_mean = x.mean(keepdim=True)
-                batch_var = x.var(keepdim=True, unbiased=False)
-                
-            normalized = (x - batch_mean) / torch.sqrt(batch_var + self.eps)
-            return normalized * self.weight + self.bias
-
-
-
 class CascadedNorm(nn.Module):
     """
-    CascadedNorm All-LN: Manages transformation and CascadedAnchors.
-    
-    All norm layers are replaced with CascadedAnchors targeting (mean=0, var=1).
+    CascadedNorm: Manages transformation and norm layer statistics.
+
+    Integrates GammaTransform controller and tracks normalization layers.
     """
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
 
-        # Transform controller
+        # Transform controller with integrated stretcher
         self.transform_controller = GammaTransform(config)
 
-        # CascadedAnchors tracking (populated by Engine)
-        self.norm_layers: List[CascadedAnchor] = []
-        self.norm_types: List[str] = []  # 'BN→LN' or 'LN' (for logging)
-        self.source_means: List[torch.Tensor] = []  # All (0.0) for compatibility
-        self.source_vars: List[torch.Tensor] = []   # All (1.0) for compatibility
+        # Norm layer tracking (will be populated by Engine)
+        self.norm_layers: List[nn.Module] = []
+        self.norm_types: List[str] = []  # 'bn' or 'ln'
+        self.source_means: List[torch.Tensor] = []
+        self.source_vars: List[torch.Tensor] = []
 
     def forward(self, img):
         transformed, params = self.transform_controller(img)
@@ -246,48 +125,65 @@ class CascadedNorm(nn.Module):
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """
-        Compute per-channel alignment loss for all CascadedAnchors.
+        Compute per-channel alignment loss.
         
-        Each channel targets (mean=0, var=1) independently for BN bypass.
+        BN layers: Each channel aligns to (0, 1) independently for bypass.
+        LN layers: Scalar alignment to (0, 1).
         """
-        if len(self.norm_layers) == 0:
-            return torch.tensor(0.0)
-        
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
-        
-        for i, anchor in enumerate(self.norm_layers):
-            # Per-channel statistics
-            batch_mean = anchor.current_mean  # Shape: (C,) for BN, scalar for LN
-            batch_var = anchor.current_var
-            
-            # Ensure on correct device
-            batch_mean = batch_mean.to(total_loss.device)
-            batch_var = batch_var.to(total_loss.device)
-            
-            # Per-channel target (0, 1)
-            if batch_mean.numel() > 1:
-                # Multi-channel (BN): per-channel alignment
-                target_mean = torch.zeros_like(batch_mean)
-                target_var = torch.ones_like(batch_var)
-                
-                # Per-channel MSE
+
+        for i, (norm_layer, norm_type) in enumerate(zip(self.norm_layers, self.norm_types)):
+            if not hasattr(norm_layer, 'current_mean') or norm_layer.current_mean is None:
+                continue
+
+            batch_mean = norm_layer.current_mean
+            batch_var = norm_layer.current_var
+
+            source_mean = self.source_means[i].to(batch_mean.device)
+            source_var = self.source_vars[i].to(batch_var.device)
+
+            # Per-channel or scalar loss
+            if norm_type == "BN":
+                # BN: Per-channel alignment (C,)
+                # Target: Each channel → (0, 1)
+                if batch_mean.numel() > 1:
+                    # Keep channel dimension
+                    target_mean = torch.zeros_like(batch_mean)
+                    target_var = torch.ones_like(batch_var)
+                else:
+                    # Single channel BN
+                    target_mean = torch.tensor(0.0, device=batch_mean.device)
+                    target_var = torch.tensor(1.0, device=batch_var.device)
+                    
                 loss_mean = F.mse_loss(batch_mean, target_mean)
                 loss_var = F.mse_loss(batch_var, target_var)
+                
             else:
-                # Scalar (LN): single alignment
-                target_mean = torch.tensor(0.0, device=batch_mean.device)
-                target_var = torch.tensor(1.0, device=batch_var.device)
+                # LN: Scalar alignment
+                if batch_mean.numel() > 1:
+                    batch_mean = batch_mean.mean()
+                if batch_var.numel() > 1:
+                    batch_var = batch_var.mean()
                 
-                loss_mean = F.mse_loss(batch_mean, target_mean)
-                loss_var = F.mse_loss(batch_var, target_var)
-            
+                # Ensure scalar
+                if batch_mean.ndim > 0:
+                    batch_mean = batch_mean.squeeze()
+                if batch_var.ndim > 0:
+                    batch_var = batch_var.squeeze()
+                if source_mean.ndim > 0:
+                    source_mean = source_mean.squeeze()
+                if source_var.ndim > 0:
+                    source_var = source_var.squeeze()
+
+                loss_mean = F.mse_loss(batch_mean, source_mean)
+                loss_var = F.mse_loss(batch_var, source_var)
+
             total_loss = total_loss + loss_mean + loss_var
-        
-        # Add parameter regularization
+
         if self.config.param_regularization > 0:
             reg_loss = self.transform_controller.get_regularization_loss()
             total_loss = total_loss + reg_loss * self.config.param_regularization
-        
+
         return total_loss
 
     def online_parameters(self):
@@ -324,156 +220,46 @@ class CascadedNormEngine(AdaptationEngine):
         # Stats
         self._stats = {'alignment_losses': [], 'transform_params': []}
 
-    def _replace_with_anchor(self, module, parent_module, attr_name):
-        """
-        Replace BN or LN with CascadedAnchor.
-        
-        Args:
-            module: Original BN/LN module
-            parent_module: Parent module
-            attr_name: Attribute name in parent
-            
-        Returns:
-            (anchor, layer_type)
-        """
-        module_type = type(module).__name__
-        
-        # Determine normalized_shape and conversion type
-        if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
-            # BatchNorm → CascadedAnchor
-            if hasattr(module, 'num_features'):
-                normalized_shape = (module.num_features,)
-            else:
-                normalized_shape = module.running_mean.shape
-            
-            is_from_bn = True
-            layer_type = "BN→LN"
-            
-        elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
-            # LayerNorm → CascadedAnchor
-            normalized_shape = module.normalized_shape
-            is_from_bn = False
-            layer_type = "LN"
-            
-        else:
-            raise ValueError(f"Unsupported module type: {module_type}")
-        
-        # Create CascadedAnchor with ORIGINAL module
-        anchor = CascadedAnchor(
-            original_module=module,
-            normalized_shape=normalized_shape,
-            is_from_bn=is_from_bn
-        )
-        
-        # Move to same device
-        if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
-            anchor = anchor.to(module.running_mean.device)
-        else:
-            anchor = anchor.to(next(module.parameters()).device)
-        
-        # Replace in parent
-        if parent_module is not None and attr_name is not None:
-            setattr(parent_module, attr_name, anchor)
-        
-        return anchor, layer_type
-
     def _extract_norm_layers(self):
         """
-        Replace all BN/LN with CascadedAnchor for unified (0, 1) alignment.
+        Find all normalization layers including FrozenBatchNorm.
+
+        Extracts source statistics (running_mean/var) for alignment.
         """
-        print(f"[CascadedNorm AllLN] Replacing norm layers with CascadedAnchor...")
+        print(f"[CascadedNorm] Extracting norm layers...")
         found = []
-        conversion_log = []
-        
-        # Collect all norm layers with parent info
-        module_list = list(self.base_model.named_modules())
-        
-        for name, module in module_list:
+        for name, module in self.base_model.named_modules():
             module_type = type(module).__name__
-            
-            # Skip if not a norm layer
-            if not (isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d, nn.LayerNorm)) or 
-                    "BatchNorm" in module_type or "LayerNorm" in module_type):
-                continue
-            
-            # Skip first BN (stem) - keep original for input stability
+
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
-                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1']):
-                    print(f"  [SKIP] Keeping original BN: {name}")
-                    continue
-            
-            # Find parent module
-            parent_module = None
-            attr_name = None
-            if '.' in name:
-                parent_name = name.rsplit('.', 1)[0]
-                attr_name = name.rsplit('.', 1)[1]
-                for pname, pmodule in module_list:
-                    if pname == parent_name:
-                        parent_module = pmodule
-                        break
-            else:
-                parent_module = self.base_model
-                attr_name = name
-            
-            # Replace with CascadedAnchor
-            try:
-                anchor, layer_type = self._replace_with_anchor(
-                    module, parent_module, attr_name
-                )
-                
-                # All layers target (0, 1) for drift-free adaptation
-                # When input is (0,1), output distribution matches Clear BN
-                target_mean = torch.tensor(0.0)
-                target_var = torch.tensor(1.0)
-                
-                # Add to tracking
+                # BN: Use running statistics (averaged over channels)
                 found.append((
-                    name, layer_type, anchor,
-                    target_mean,
-                    target_var
+                    name, "BN", module,
+                    module.running_mean.mean().clone(), # Scalar source mean
+                    module.running_var.mean().clone()   # Scalar source var
                 ))
-                
-                # Log with parameter info
-                if layer_type == "BN→LN":
-                    gamma_mean = anchor.weight.mean().item()
-                    beta_mean = anchor.bias.mean().item()
-                    conversion_log.append(
-                        f"  [{layer_type}] {name}: γ={gamma_mean:.2f}, β={beta_mean:.2f} (learned)"
-                    )
-                else:
-                    conversion_log.append(f"  [{layer_type}] {name}")
-                
-            except Exception as e:
-                print(f"  [WARNING] Failed to convert {name}: {e}")
-        
-        # Log conversions
-        print(f"\n[Conversions]")
-        for log in conversion_log[:10]:  # Show first 10
-            print(log)
-        if len(conversion_log) > 10:
-            print(f"  ... and {len(conversion_log) - 10} more")
+            elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
+                # LN: Target normalized distribution (mean=0, var=1)
+                found.append((
+                    name, "LN", module,
+                    torch.tensor(0.0),
+                    torch.tensor(1.0)
+                ))
 
-        
-        # Filtering
+        # Filtering & Wrapping
         filtered = self._filter_by_cascade_mode(found)
-        
-        # Populate to CascadedNorm
-        for _, norm_type, anchor, source_mean, source_var in filtered:
-            self.cascaded_norm.norm_layers.append(anchor)
-            self.cascaded_norm.norm_types.append(norm_type)
-            self.cascaded_norm.source_means.append(source_mean)
-            self.cascaded_norm.source_vars.append(source_var)
-        
-        # Summary
-        bn_to_ln = sum(1 for nt in self.cascaded_norm.norm_types if nt == "BN→LN")
-        ln_count = sum(1 for nt in self.cascaded_norm.norm_types if nt == "LN")
-        
-        print(f"\n[Summary]")
-        print(f"  Total anchors: {len(self.cascaded_norm.norm_layers)}")
-        print(f"  BN→LN: {bn_to_ln}, LN: {ln_count}")
-        print(f"  All layers target (μ=0, σ²=1) for drift-free adaptation")
+        self._cascade_wrap(filtered)
 
+        # Populate to CascadedNorm
+        for _, norm_type, module, running_mean, running_var in filtered:
+            self.cascaded_norm.norm_layers.append(module)
+            self.cascaded_norm.norm_types.append(norm_type)
+            self.cascaded_norm.source_means.append(running_mean)
+            self.cascaded_norm.source_vars.append(running_var)
+
+        print(f"[CascadedNorm] Found {len(self.cascaded_norm.norm_layers)} norm layers "
+              f"(BN: {self.cascaded_norm.norm_types.count('BN')}, "
+              f"LN: {self.cascaded_norm.norm_types.count('LN')})")
 
     def _filter_by_cascade_mode(self, norm_list):
         """Filter normalization layers based on cascade mode."""
@@ -490,6 +276,62 @@ class CascadedNormEngine(AdaptationEngine):
             case _:  # all
                 return norm_list
 
+    @staticmethod
+    def _create_wrapped_class(original_class, module_type):
+        """Create a wrapped class with overridden forward method."""
+        if module_type == "BN":
+            def forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                if _input.dim() == 4:  # (B, C, H, W)
+                    dims = (0, 2, 3)
+                elif _input.dim() == 3:  # (B, C, L)
+                    dims = (0, 2)
+                else:  # (B, C)
+                    dims = (0,)
+                _self.current_mean = _input.mean(dim=dims)
+                _self.current_var = _input.var(dim=dims, unbiased=False)
+
+                return original_class.forward(_self, _input)
+            
+            # Use specific name for BatchNorm2d
+            class_name = "BatchNorm2dBypassAnchor"
+            
+        elif module_type == "LN":
+            def forward(_self, _input: torch.Tensor) -> torch.Tensor:
+                if hasattr(_self, "normalized_shape"):
+                    dims = tuple(range(-len(_self.normalized_shape), 0))
+                    _self.current_mean = _input.mean(dim=dims)
+                    _self.current_var = _input.var(dim=dims, unbiased=False)
+                else:
+                    _self.current_mean = _input.mean()
+                    _self.current_var = _input.var(unbiased=False)
+
+                return original_class.forward(_self, _input)
+            
+            class_name = "LayerNormBypassAnchor"
+        else:
+            return original_class
+
+        return type(class_name, (original_class,), {
+            "forward": forward
+        })
+
+    @staticmethod
+    def _cascade_wrap(filtered: list[nn.Module]):
+        """Wrap norm layer forward methods to capture batch statistics."""
+        class_cache = {}
+
+        for name, module_type, module, running_mean, running_var in filtered:
+            original_class = module.__class__
+
+            if original_class not in class_cache:
+                new_class = CascadedNormEngine._create_wrapped_class(original_class, module_type)
+                class_cache[original_class] = new_class
+            else:  # from class cache
+                new_class = class_cache[original_class]
+
+            module.__class__ = new_class  # override class
+            module.current_mean = torch.tensor(0.0)  # register stat variable
+            module.current_var = torch.tensor(0.0)  # register stat variable
 
     def online_parameters(self):
         """Only transformation parameters."""
