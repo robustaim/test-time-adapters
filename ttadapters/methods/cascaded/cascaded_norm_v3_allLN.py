@@ -119,7 +119,7 @@ class CascadedAnchor(nn.Module):
     """
     Unified normalization anchor for drift-free adaptation.
     
-    Uses batch statistics (LN-style) + running stats as affine (source info).
+    Preserves input→output relationship (like LN) by using batch stats + learned affine.
     """
     
     def __init__(self, original_module, normalized_shape, is_from_bn=False):
@@ -135,20 +135,22 @@ class CascadedAnchor(nn.Module):
         self.is_from_bn = is_from_bn
         self.eps = 1e-5
         
-        # Initialize affine parameters from source statistics
+        # Preserve learned affine for consistent input→output relationship
         if is_from_bn:
-            # BN: Use running stats as scale/shift (source information)
-            # gamma = sqrt(running_var), beta = running_mean
-            running_mean = original_module.running_mean.clone()
-            running_var = original_module.running_var.clone()
-            
-            self.weight = nn.Parameter(torch.sqrt(running_var))  # gamma
-            self.bias = nn.Parameter(running_mean)               # beta
+            # BN: Preserve learned gamma/beta
+            # This maintains "BN input → BN output" relationship
+            if hasattr(original_module, 'weight') and original_module.weight is not None:
+                self.weight = nn.Parameter(original_module.weight.clone())
+                self.bias = nn.Parameter(original_module.bias.clone())
+            else:
+                # No affine
+                num_features = original_module.num_features
+                self.weight = nn.Parameter(torch.ones(num_features))
+                self.bias = nn.Parameter(torch.zeros(num_features))
         else:
-            # LN: Keep identity-like (0, 1)
-            num_features = normalized_shape[0] if isinstance(normalized_shape, tuple) else normalized_shape
-            self.weight = nn.Parameter(torch.ones(num_features))
-            self.bias = nn.Parameter(torch.zeros(num_features))
+            # LN: Keep learned parameters
+            self.weight = nn.Parameter(original_module.weight.clone())
+            self.bias = nn.Parameter(original_module.bias.clone())
         
         # Stats tracking
         self.register_buffer('current_mean', torch.tensor(0.0))
