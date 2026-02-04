@@ -130,6 +130,10 @@ class ParameterGenerator(nn.Module):
         nn.init.constant_(self.head[-1].bias, 0.0)
 
     def forward(self, img):
+        # Ensure batch dimension
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            
         if img.max() > 1.0:
             img = img / 255.0 # Normalize for stability
             
