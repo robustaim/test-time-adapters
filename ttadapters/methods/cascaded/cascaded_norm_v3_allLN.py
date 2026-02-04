@@ -143,21 +143,48 @@ class CascadedAnchor(nn.LayerNorm):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Measure input stats and apply LayerNorm.
+        Normalize input with domain-agnostic target.
         
-        Supports 4D (B,C,H,W), 3D (B,C,L), and standard tensor shapes.
+        For 4D (BN2d replacement): Per-channel normalization
+        For others: Standard LayerNorm
         """
         # Measure input statistics (before normalization)
         if x.dim() == 4:  # (B, C, H, W) - from BN2d
             dims = (0, 2, 3)  # Spatial mean/var per channel
             self.current_mean = x.mean(dim=dims)
             self.current_var = x.var(dim=dims, unbiased=False)
+            
+            # Apply per-channel normalization (like BN)
+            # Normalize: (x - mean) / sqrt(var + eps)
+            # Then scale/shift with learned gamma/beta
+            mean = x.mean(dim=dims, keepdim=True)
+            var = x.var(dim=dims, keepdim=True, unbiased=False)
+            normalized = (x - mean) / torch.sqrt(var + self.eps)
+            
+            # Apply affine transform with source-initialized gamma/beta
+            # gamma, beta are (C,) shaped
+            gamma = self.weight.view(1, -1, 1, 1)
+            beta = self.bias.view(1, -1, 1, 1)
+            
+            return normalized * gamma + beta
+            
         elif x.dim() == 3:  # (B, C, L) - sequence
             dims = (0, 2)
             self.current_mean = x.mean(dim=dims)
             self.current_var = x.var(dim=dims, unbiased=False)
+            
+            # Similar per-channel normalization for 3D
+            mean = x.mean(dim=dims, keepdim=True)
+            var = x.var(dim=dims, keepdim=True, unbiased=False)
+            normalized = (x - mean) / torch.sqrt(var + self.eps)
+            
+            gamma = self.weight.view(1, -1, 1)
+            beta = self.bias.view(1, -1, 1)
+            
+            return normalized * gamma + beta
+            
         else:
-            # Standard LN dimensions
+            # Standard LN for other dimensions
             if hasattr(self, 'normalized_shape'):
                 dims = tuple(range(-len(self.normalized_shape), 0))
                 self.current_mean = x.mean(dim=dims)
@@ -165,9 +192,9 @@ class CascadedAnchor(nn.LayerNorm):
             else:
                 self.current_mean = x.mean()
                 self.current_var = x.var(unbiased=False)
-        
-        # Apply LayerNorm (from parent class)
-        return super().forward(x)
+            
+            # Use parent LayerNorm
+            return super().forward(x)
 
 
 class CascadedNorm(nn.Module):
