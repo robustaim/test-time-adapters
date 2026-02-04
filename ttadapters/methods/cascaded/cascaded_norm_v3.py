@@ -151,7 +151,12 @@ class CascadedNorm(nn.Module):
         return output, params
 
     def compute_alignment_loss(self) -> torch.Tensor:
-        """Compute alignment loss between batch and source statistics."""
+        """
+        Compute alignment loss between batch and source statistics.
+
+        BN: Per-channel alignment to running stats.
+        LN: Scalar alignment to (0, 1).
+        """
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
 
         for i, (norm_layer, norm_type) in enumerate(zip(self.norm_layers, self.norm_types)):
@@ -164,24 +169,39 @@ class CascadedNorm(nn.Module):
             source_mean = self.source_means[i].to(batch_mean.device)
             source_var = self.source_vars[i].to(batch_var.device)
 
-            # Ensure batch stats are scalars to match source stats
-            if batch_mean.numel() > 1:
-                batch_mean = batch_mean.mean()
-            if batch_var.numel() > 1:
-                batch_var = batch_var.mean()
+            # Per-channel for BN, scalar for LN
+            if norm_type == "BN":
+                # BN: Keep per-channel (C,) for alignment
+                if batch_mean.numel() > 1:
+                    # Expand source stats to match channel dimension
+                    source_mean_expanded = source_mean.expand_as(batch_mean)
+                    source_var_expanded = source_var.expand_as(batch_var)
+                    
+                    loss_mean = F.mse_loss(batch_mean, source_mean_expanded)
+                    loss_var = F.mse_loss(batch_var, source_var_expanded)
+                else:
+                    # Single channel
+                    loss_mean = F.mse_loss(batch_mean, source_mean)
+                    loss_var = F.mse_loss(batch_var, source_var)
+            else:
+                # LN: Reduce to scalar
+                if batch_mean.numel() > 1:
+                    batch_mean = batch_mean.mean()
+                if batch_var.numel() > 1:
+                    batch_var = batch_var.mean()
 
-            # Ensure scalar shapes match
-            if batch_mean.ndim > 0:
-                batch_mean = batch_mean.squeeze()
-            if batch_var.ndim > 0:
-                batch_var = batch_var.squeeze()
-            if source_mean.ndim > 0:
-                source_mean = source_mean.squeeze()
-            if source_var.ndim > 0:
-                source_var = source_var.squeeze()
+                # Ensure scalar shapes match
+                if batch_mean.ndim > 0:
+                    batch_mean = batch_mean.squeeze()
+                if batch_var.ndim > 0:
+                    batch_var = batch_var.squeeze()
+                if source_mean.ndim > 0:
+                    source_mean = source_mean.squeeze()
+                if source_var.ndim > 0:
+                    source_var = source_var.squeeze()
 
-            loss_mean = F.mse_loss(batch_mean, source_mean)
-            loss_var = F.mse_loss(batch_var, source_var)
+                loss_mean = F.mse_loss(batch_mean, source_mean)
+                loss_var = F.mse_loss(batch_var, source_var)
 
             total_loss = total_loss + loss_mean + loss_var
 
