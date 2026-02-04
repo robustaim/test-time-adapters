@@ -248,8 +248,8 @@ class CascadedNorm(nn.Module):
         """
         Compute alignment loss for all CascadedAnchors.
         
-        BN anchors target running stats (for equivalence).
-        LN anchors target (0, 1) (drift-free).
+        All anchors target (0, 1). When achieved, BN anchors produce
+        Clear-equivalent output via learned gamma/beta.
         """
         if len(self.norm_layers) == 0:
             return torch.tensor(0.0)
@@ -416,15 +416,10 @@ class CascadedNormEngine(AdaptationEngine):
                     module, parent_module, attr_name
                 )
                 
-                # Determine alignment target
-                if layer_type == "BN→LN":
-                    # Use running stats as target for BN equivalence
-                    target_mean = module.running_mean.mean().to('cpu')
-                    target_var = module.running_var.mean().to('cpu')
-                else:
-                    # LN: use (0, 1) target
-                    target_mean = torch.tensor(0.0)
-                    target_var = torch.tensor(1.0)
+                # All layers target (0, 1) for drift-free adaptation
+                # When input is (0,1), output distribution matches Clear BN
+                target_mean = torch.tensor(0.0)
+                target_var = torch.tensor(1.0)
                 
                 # Add to tracking
                 found.append((
@@ -438,8 +433,7 @@ class CascadedNormEngine(AdaptationEngine):
                     gamma_mean = anchor.weight.mean().item()
                     beta_mean = anchor.bias.mean().item()
                     conversion_log.append(
-                        f"  [{layer_type}] {name}: γ={gamma_mean:.2f}, β={beta_mean:.2f} "
-                        f"(target: μ={target_mean:.2f}, σ²={target_var:.2f})"
+                        f"  [{layer_type}] {name}: γ={gamma_mean:.2f}, β={beta_mean:.2f} (learned)"
                     )
                 else:
                     conversion_log.append(f"  [{layer_type}] {name}")
