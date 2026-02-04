@@ -248,14 +248,15 @@ class CascadedNorm(nn.Module):
         """
         Compute alignment loss for all CascadedAnchors.
         
-        All anchors target (mean=0, var=1) for drift-free adaptation.
+        BN anchors target running stats (for equivalence).
+        LN anchors target (0, 1) (drift-free).
         """
         if len(self.norm_layers) == 0:
             return torch.tensor(0.0)
         
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
         
-        for anchor in self.norm_layers:
+        for i, anchor in enumerate(self.norm_layers):
             # All anchors are CascadedAnchor instances with current_mean/var
             batch_mean = anchor.current_mean
             batch_var = anchor.current_var
@@ -266,9 +267,9 @@ class CascadedNorm(nn.Module):
             if batch_var.numel() > 1:
                 batch_var = batch_var.mean()
             
-            # Target: (0, 1) - domain-agnostic
-            target_mean = torch.tensor(0.0, device=batch_mean.device)
-            target_var = torch.tensor(1.0, device=batch_var.device)
+            # Target: per-layer (running stats for BN, (0,1) for LN)
+            target_mean = self.source_means[i].to(batch_mean.device)
+            target_var = self.source_vars[i].to(batch_var.device)
             
             # MSE loss
             loss_mean = F.mse_loss(batch_mean, target_mean)
@@ -415,18 +416,31 @@ class CascadedNormEngine(AdaptationEngine):
                     module, parent_module, attr_name
                 )
                 
+                # Determine alignment target
+                if layer_type == "BN→LN":
+                    # Use running stats as target for BN equivalence
+                    target_mean = module.running_mean.mean().to('cpu')
+                    target_var = module.running_var.mean().to('cpu')
+                else:
+                    # LN: use (0, 1) target
+                    target_mean = torch.tensor(0.0)
+                    target_var = torch.tensor(1.0)
+                
                 # Add to tracking
                 found.append((
                     name, layer_type, anchor,
-                    torch.tensor(0.0),  # Target: mean = 0
-                    torch.tensor(1.0)   # Target: var = 1
+                    target_mean,
+                    target_var
                 ))
                 
                 # Log with parameter info
                 if layer_type == "BN→LN":
                     gamma_mean = anchor.weight.mean().item()
                     beta_mean = anchor.bias.mean().item()
-                    conversion_log.append(f"  [{layer_type}] {name}: γ={gamma_mean:.2f}, β={beta_mean:.2f} (learned)")
+                    conversion_log.append(
+                        f"  [{layer_type}] {name}: γ={gamma_mean:.2f}, β={beta_mean:.2f} "
+                        f"(target: μ={target_mean:.2f}, σ²={target_var:.2f})"
+                    )
                 else:
                     conversion_log.append(f"  [{layer_type}] {name}")
                 
