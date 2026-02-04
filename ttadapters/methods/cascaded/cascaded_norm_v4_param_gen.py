@@ -128,8 +128,8 @@ class ParameterGenerator(nn.Module):
 
 class GammaTransform(nn.Module):
     """Learnable parameters (via Generator) for noise reduction."""
-    noise_floor_init = 2.0
-    gamma_init = 1.0
+    noise_floor_init = 0.0  # Init to 0 (No clipping by default)
+    gamma_init = 1.0        # Init to 1 (No gamma correction by default)
 
     def __init__(self, config: CascadedNormV4Config):
         super().__init__()
@@ -143,17 +143,20 @@ class GammaTransform(nn.Module):
 
     def forward(self, img):
         """Get constrained parameters and apply transform."""
-        if self.generator.training:
-             print(f"[V4 Debug] Img Max: {img.max().item():.2f}")
-
+        # Generator predicts raw logit, we apply Tanh scaling
         delta = self.generator(img)
         self.current_delta = delta
         
-        # Use mean delta for batch (limitation of current Stretcher)
-        avg_delta = delta.mean(dim=0)
+        avg_delta = delta.mean(dim=0) # (2,)
         
-        noise_floor = (self.noise_floor_init + avg_delta[0]).clamp(0.0, 48.0)
-        gamma = (self.gamma_init + avg_delta[1]).clamp(0.1, 3.0)
+        # Tanh Scaling to prevent explosion
+        # Delta 0 -> Noise +/- 10.0
+        # Delta 1 -> Gamma +/- 0.5
+        noise_delta = torch.tanh(avg_delta[0]) * 10.0 
+        gamma_delta = torch.tanh(avg_delta[1]) * 0.5
+        
+        noise_floor = (self.noise_floor_init + noise_delta).clamp(0.0, 20.0)
+        gamma = (self.gamma_init + gamma_delta).clamp(0.5, 1.5) # Safe range
         
         if self.generator.training:
              print(f"[V4 Debug] Noise: {noise_floor.item():.2f}, Gamma: {gamma.item():.2f}")
