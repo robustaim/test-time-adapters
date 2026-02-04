@@ -5,6 +5,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
+from tqdm.auto import tqdm
 
 from ..base import AdaptationEngine, AdaptationConfig
 from ...models.base import BaseModel
@@ -18,9 +19,9 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.1
+    param_regularization: float = 0.01  # Reduced to allow more adaptation freedom
     
-    cascade_mode: Literal["all", "single", "single_last", "selected"] = "all"
+    cascade_mode: Literal["all", "single", "single_last", "selected"] = "single_last"  # Focus on high-level features
     cascade_indices: Optional[List[int]] = None
 
 
@@ -286,25 +287,46 @@ class CascadedNormEngine(AdaptationEngine):
             anchor.count.fill_(0)
             
         count = 0
+        pbar = tqdm(source_loader, desc="Calibrating", unit="batch")
         with torch.no_grad():
-            for batch in source_loader:
+            for batch in pbar:
+                img = None
+                
+                # Handle dict input
                 if isinstance(batch, dict):
-                    if 'pixel_values' in batch: img = batch['pixel_values']
-                    elif 'img' in batch: img = batch['img']
-                    elif 'image' in batch: img = batch['image']
-                    else: continue
+                    for key in ['pixel_values', 'img', 'image']:
+                        if key in batch:
+                            img = batch[key]
+                            break
+                    if img is None:
+                        continue
+                # Handle list/tuple input
                 elif isinstance(batch, (list, tuple)):
                     img = batch[0]
+                    # Check if first element is a dict (e.g., detectron2 format)
+                    if isinstance(img, dict):
+                        for key in ['pixel_values', 'img', 'image']:
+                            if key in img:
+                                img = img[key]
+                                break
+                # Handle tensor input
                 else:
                     img = batch
+                
+                # Final check: img should be a tensor
+                if not isinstance(img, torch.Tensor):
+                    continue
                 
                 img = img.to(self.device)
                 if img.max() <= 1.0: img = img * 255.0
                 
                 self.base_model(img)
                 count += img.size(0)
-                if count >= max_samples: break
-
+                pbar.set_postfix({'samples': count, 'target': max_samples})
+                if count >= max_samples:
+                    break
+        
+        pbar.close()
         for anchor in self.cascaded_norm.anchors:
             anchor.eval()
         print(f"[CascadedNormEngine] Calibration Complete. {len(self.cascaded_norm.anchors)} anchors.")
