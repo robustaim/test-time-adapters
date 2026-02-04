@@ -19,11 +19,11 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.01  # Reduced to allow more adaptation freedom
+    param_regularization: float = 0.0001
     
     cascade_mode: Literal["all", "single", "single_last", "selected"] = "single_last"  # Focus on high-level features
     cascade_indices: Optional[List[int]] = None
-    anchor_granularity: Literal["block", "stage"] = "stage"  # "block": per-block (fine), "stage": per-layer (coarse, WHW-style)
+    anchor_granularity: Literal["block", "stage", "fpn"] = "fpn"  # "block": per-block, "stage": per-layer, "fpn": FPN outputs (WHW-identical)
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -217,21 +217,161 @@ class CascadedNormEngine(AdaptationEngine):
 
         # Insert Anchors and register to CascadedNorm
         self._insert_anchors()
-        self.cascaded_norm.anchors = [m for m in self.base_model.modules() if isinstance(m, CascadedAnchor)]
+        
+        # Collect anchors based on granularity
+        if self.config.anchor_granularity == "fpn":
+            # FPN anchors are stored in backbone attributes
+            if hasattr(self.base_model, 'backbone'):
+                if hasattr(self.base_model.backbone, '_fpn_anchors'):
+                    # Detectron2: ModuleDict
+                    self.cascaded_norm.anchors = list(self.base_model.backbone._fpn_anchors.values())
+                elif hasattr(self.base_model.backbone, '_backbone_anchors'):
+                    # RT-DETR: ModuleList
+                    self.cascaded_norm.anchors = list(self.base_model.backbone._backbone_anchors)
+                else:
+                    # Fallback: search in modules
+                    self.cascaded_norm.anchors = [m for m in self.base_model.modules() if isinstance(m, CascadedAnchor)]
+            else:
+                # YOLO or fallback
+                self.cascaded_norm.anchors = [m for m in self.base_model.modules() if isinstance(m, CascadedAnchor)]
+        else:
+            # Block/Stage: search in all modules
+            self.cascaded_norm.anchors = [m for m in self.base_model.modules() if isinstance(m, CascadedAnchor)]
 
         # Stats
         self._stats = {'alignment_losses': [], 'transform_params': []}
 
+
     def _insert_anchors(self):
         """
-        Insert anchors after Residual Blocks or Stages.
+        Insert anchors after Residual Blocks, Stages, or FPN outputs.
         Supports filtering via cascade_mode and granularity control.
         """
-        if self.config.anchor_granularity == "stage":
+        if self.config.anchor_granularity == "fpn":
+            self._insert_anchors_fpn()
+        elif self.config.anchor_granularity == "stage":
             self._insert_anchors_stage()
         else:
             self._insert_anchors_block()
     
+    def _insert_anchors_fpn(self):
+        """
+        Insert anchors to intercept FPN outputs (WHW-identical).
+        Supports: Detectron2 (FPN), RT-DETR (Hybrid Encoder), YOLO (PAN Neck)
+        """
+        print("[CascadedNormEngine] Injecting anchors into model (FPN-based, WHW-identical)...")
+        
+        # Detect model provider
+        if self.model_provider == ModelProvider.Detectron2:
+            self._insert_anchors_fpn_detectron2()
+        elif self.model_provider == ModelProvider.HuggingFace:
+            self._insert_anchors_fpn_rtdetr()
+        elif self.model_provider == ModelProvider.Ultralytics:
+            self._insert_anchors_fpn_yolo()
+        else:
+            print(f"[WARNING] FPN insertion not supported for {self.model_provider}. Falling back to stage-based.")
+            self._insert_anchors_stage()
+    
+    def _insert_anchors_fpn_detectron2(self):
+        """Insert anchors for Detectron2 FPN outputs (ResNet50/SwinT Faster RCNN)."""
+        # Detectron2 FPN structure: backbone returns dict {'p2', 'p3', 'p4', 'p5', 'p6'}
+        # We need to wrap backbone.forward to insert anchors after FPN outputs
+        
+        original_backbone_forward = self.base_model.backbone.forward
+        fpn_anchors = nn.ModuleDict()
+        
+        # Determine which FPN levels to use
+        fpn_levels = ['p2', 'p3', 'p4', 'p5']  # Standard FPN levels
+        
+        if self.config.cascade_mode == "single_last":
+            fpn_levels = ['p5']  # Only highest level
+        elif self.config.cascade_mode == "selected" and self.config.cascade_indices:
+            all_levels = ['p2', 'p3', 'p4', 'p5']
+            fpn_levels = [all_levels[i] for i in self.config.cascade_indices if i < len(all_levels)]
+        
+        print(f"Target FPN Levels: {fpn_levels}")
+        
+        # Create anchors for each level
+        for level in fpn_levels:
+            fpn_anchors[level] = CascadedAnchor()
+            print(f"  -> Inserting Anchor after FPN level '{level}'")
+        
+        # Wrap backbone forward
+        def fpn_forward_with_anchors(x):
+            features = original_backbone_forward(x)
+            
+            # Insert anchors after each FPN level
+            for level in fpn_levels:
+                if level in features:
+                    features[level] = fpn_anchors[level](features[level])
+            
+            return features
+        
+        self.base_model.backbone.forward = fpn_forward_with_anchors
+        self.base_model.backbone._fpn_anchors = fpn_anchors  # Store reference
+        
+        print(f"[CascadedNormEngine] Inserted {len(fpn_anchors)} FPN anchors (Detectron2)")
+    
+    def _insert_anchors_fpn_rtdetr(self):
+        """Insert anchors for RT-DETR multi-scale features."""
+        # RT-DETR: backbone outputs multi-scale features
+        # We wrap backbone.forward to insert anchors
+        
+        original_backbone_forward = self.base_model.backbone.forward
+        backbone_anchors = nn.ModuleList()
+        
+        # RT-DETR typically has 3-4 feature levels
+        num_levels = 4 if self.config.cascade_mode == "all" else 1
+        
+        for i in range(num_levels):
+            backbone_anchors.append(CascadedAnchor())
+            print(f"  -> Inserting Anchor after backbone level {i}")
+        
+        def backbone_forward_with_anchors(x):
+            features = original_backbone_forward(x)
+            
+            # features is typically a list or dict
+            if isinstance(features, dict):
+                for i, (k, v) in enumerate(features.items()):
+                    if i < len(backbone_anchors):
+                        features[k] = backbone_anchors[i](v)
+            elif isinstance(features, (list, tuple)):
+                features = [backbone_anchors[i](f) if i < len(backbone_anchors) else f 
+                           for i, f in enumerate(features)]
+            
+            return features
+        
+        self.base_model.backbone.forward = backbone_forward_with_anchors
+        self.base_model.backbone._backbone_anchors = backbone_anchors
+        
+        print(f"[CascadedNormEngine] Inserted {len(backbone_anchors)} backbone anchors (RT-DETR)")
+    
+    def _insert_anchors_fpn_yolo(self):
+        """Insert anchors for YOLO PAN neck outputs."""
+        # YOLO structure: model.model[0-9] = backbone, [10-15] = neck (PAN), [16-22] = head
+        # We insert anchors after neck outputs
+        
+        neck_indices = [12, 15, 18]  # Typical YOLO neck output indices
+        
+        if self.config.cascade_mode == "single_last":
+            neck_indices = [18]  # Only last neck output
+        elif self.config.cascade_mode == "selected" and self.config.cascade_indices:
+            all_indices = [12, 15, 18]
+            neck_indices = [all_indices[i] for i in self.config.cascade_indices if i < len(all_indices)]
+        
+        print(f"Target Neck Indices: {neck_indices}")
+        
+        # Wrap neck layers with anchors
+        for idx in neck_indices:
+            if idx < len(self.base_model.model):
+                original_layer = self.base_model.model[idx]
+                anchor = CascadedAnchor()
+                self.base_model.model[idx] = nn.Sequential(original_layer, anchor)
+                print(f"  -> Inserting Anchor after neck layer {idx}")
+        
+        print(f"[CascadedNormEngine] Inserted {len(neck_indices)} neck anchors (YOLO)")
+    
+
     def _insert_anchors_stage(self):
         """
         Insert anchors after each stage.
