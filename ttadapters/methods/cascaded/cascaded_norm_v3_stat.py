@@ -19,11 +19,11 @@ class CascadedNormConfig(AdaptationConfig):
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
-    param_regularization: float = 0.0001
+    param_regularization: float = 0.0
     
-    cascade_mode: Literal["all", "single", "single_last", "selected"] = "single_last"  # Focus on high-level features
+    cascade_mode: Literal["all", "single", "single_last", "selected"] = "all"
     cascade_indices: Optional[List[int]] = None
-    anchor_granularity: Literal["block", "stage", "fpn"] = "fpn"  # "block": per-block, "stage": per-layer, "fpn": FPN outputs (WHW-identical)
+    anchor_granularity: Literal["block", "stage", "fpn"] = "block"
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -89,7 +89,7 @@ class GammaTransform(nn.Module):
     def forward(self, img):
         """Get constrained parameters and apply transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)  # pass range 20~100
-        gamma = self.gamma.clamp(min=0.5, max=2.0)  # gamma range 0.5~2.0
+        gamma = self.gamma.clamp(min=0.3, max=2.5)  # gamma range 0.5~2.0
 
         transformed = self.stretcher(img, noise_floor, self.saturation_limit, gamma)
 
