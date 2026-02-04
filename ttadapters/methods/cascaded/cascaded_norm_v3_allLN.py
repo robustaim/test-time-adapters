@@ -389,6 +389,12 @@ class CascadedNormEngine(AdaptationEngine):
                     "BatchNorm" in module_type or "LayerNorm" in module_type):
                 continue
             
+            # Skip first BN (stem) - keep original for input stability
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
+                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1']):
+                    print(f"  [SKIP] Keeping original BN: {name}")
+                    continue
+            
             # Find parent module
             parent_module = None
             attr_name = None
