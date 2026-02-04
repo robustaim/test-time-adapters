@@ -23,6 +23,7 @@ class CascadedNormConfig(AdaptationConfig):
     
     cascade_mode: Literal["all", "single", "single_last", "selected"] = "single_last"  # Focus on high-level features
     cascade_indices: Optional[List[int]] = None
+    anchor_granularity: Literal["block", "stage"] = "stage"  # "block": per-block (fine), "stage": per-layer (coarse, WHW-style)
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -223,20 +224,101 @@ class CascadedNormEngine(AdaptationEngine):
 
     def _insert_anchors(self):
         """
-        Recursively insert anchors after Residual Blocks.
-        Supports filtering via cascade_mode.
+        Insert anchors after Residual Blocks or Stages.
+        Supports filtering via cascade_mode and granularity control.
+        """
+        if self.config.anchor_granularity == "stage":
+            self._insert_anchors_stage()
+        else:
+            self._insert_anchors_block()
+    
+    def _insert_anchors_stage(self):
+        """
+        Insert anchors after each stage.
+        WHW-style coarse-grained approach.
+        Supports: ResNet (layer1-4), SwinT (layers.0-3), YOLO (backbone stages)
+        """
+        print("[CascadedNormEngine] Injecting anchors into model (Stage-based, WHW-style)...")
+        
+        stages = []
+        
+        # Strategy 1: ResNet-style (layer1, layer2, layer3, layer4)
+        for name, module in self.base_model.named_children():
+            if 'layer' in name.lower() and any(char.isdigit() for char in name):
+                stages.append((name, module))
+        
+        # Strategy 2: Swin Transformer (layers.0, layers.1, layers.2, layers.3)
+        if not stages:
+            if hasattr(self.base_model, 'layers'):
+                layers_module = self.base_model.layers
+                if isinstance(layers_module, nn.ModuleList) or isinstance(layers_module, nn.Sequential):
+                    for idx, layer in enumerate(layers_module):
+                        stages.append((f'layers.{idx}', layer))
+        
+        # Strategy 3: YOLO backbone (model.0 ~ model.N, typically model.9 is last backbone)
+        if not stages:
+            if hasattr(self.base_model, 'model'):
+                # YOLO typically has backbone ending around index 9-10
+                # We'll detect by looking for downsampling layers
+                model_seq = self.base_model.model
+                if isinstance(model_seq, nn.Sequential) or isinstance(model_seq, nn.ModuleList):
+                    # Heuristic: Collect every 3rd layer as "stage" (YOLO has 3 layers per stage typically)
+                    for idx in [2, 4, 6, 8]:  # Common YOLO stage boundaries
+                        if idx < len(model_seq):
+                            stages.append((f'model.{idx}', model_seq[idx]))
+        
+        # Fallback: Use block-based if no stages found
+        if not stages:
+            print("[WARNING] No stages detected. Falling back to block-based insertion.")
+            self._insert_anchors_block()
+            return
+        
+        total_stages = len(stages)
+        print(f"Total Stages Found: {total_stages} ({[name for name, _ in stages]})")
+        
+        # Determine target indices
+        target_indices = set()
+        if self.config.cascade_mode == "all":
+            target_indices = set(range(total_stages))
+        elif self.config.cascade_mode == "single_last":
+            target_indices = {total_stages - 1}
+        elif self.config.cascade_mode == "selected" and self.config.cascade_indices:
+            target_indices = {i if i >= 0 else total_stages + i for i in self.config.cascade_indices}
+        
+        print(f"Target Stage Indices: {sorted(list(target_indices))}")
+        
+        # Inject anchors
+        for idx, (stage_name, stage_module) in enumerate(stages):
+            if idx in target_indices:
+                print(f"  -> Inserting Anchor after Stage '{stage_name}' (index {idx})")
+                anchor = CascadedAnchor()
+                
+                # Handle different parent structures
+                if '.' in stage_name:
+                    # Nested (e.g., 'layers.0', 'model.2')
+                    parent_name, child_idx = stage_name.rsplit('.', 1)
+                    parent = getattr(self.base_model, parent_name)
+                    parent[int(child_idx)] = nn.Sequential(stage_module, anchor)
+                else:
+                    # Direct child (e.g., 'layer1')
+                    setattr(self.base_model, stage_name, nn.Sequential(stage_module, anchor))
+
+    
+    def _insert_anchors_block(self):
+        """
+        Insert anchors after individual Residual Blocks.
+        Fine-grained approach.
         """
         print("[CascadedNormEngine] Injecting anchors into model (Block-based)...")
         
         self.block_count = 0
         total_blocks_found = 0
         
-        # 1. First Pass: Count total blocks to handle negative indices or 'single_last'
+        # 1. First Pass: Count total blocks
         def count_blocks(module):
             count = 0
             for name, child in module.named_children():
                 class_name = child.__class__.__name__
-                # Heuristic for Residual Blocks
                 is_block = "Block" in class_name or "Bottleneck" in class_name
                 if is_block:
                     count += 1
@@ -254,10 +336,9 @@ class CascadedNormEngine(AdaptationEngine):
         elif self.config.cascade_mode == "single_last":
             target_indices = {total_blocks_found - 1}
         elif self.config.cascade_mode == "selected" and self.config.cascade_indices:
-            # Handle negative indices
             target_indices = {i if i >= 0 else total_blocks_found + i for i in self.config.cascade_indices}
 
-        print(f"Target Indices: {sorted(list(target_indices))}")
+        print(f"Target Block Indices: {sorted(list(target_indices))}")
 
         # 3. Injection Pass
         self.current_idx = 0
@@ -271,7 +352,6 @@ class CascadedNormEngine(AdaptationEngine):
                     if self.current_idx in target_indices:
                         print(f"  -> Inserting Anchor after Block #{self.current_idx} ({class_name})")
                         anchor = CascadedAnchor()
-                        # Wrap: Block -> Sequential(Block, Anchor)
                         setattr(module, name, nn.Sequential(child, anchor))
                     self.current_idx += 1
                 else:
