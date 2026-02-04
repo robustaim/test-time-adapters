@@ -246,10 +246,9 @@ class CascadedNorm(nn.Module):
 
     def compute_alignment_loss(self) -> torch.Tensor:
         """
-        Compute alignment loss for all CascadedAnchors.
+        Compute per-channel alignment loss for all CascadedAnchors.
         
-        All anchors target (0, 1). When achieved, BN anchors produce
-        Clear-equivalent output via learned gamma/beta.
+        Each channel targets (mean=0, var=1) independently for BN bypass.
         """
         if len(self.norm_layers) == 0:
             return torch.tensor(0.0)
@@ -257,23 +256,30 @@ class CascadedNorm(nn.Module):
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
         
         for i, anchor in enumerate(self.norm_layers):
-            # All anchors are CascadedAnchor instances with current_mean/var
-            batch_mean = anchor.current_mean
+            # Per-channel statistics
+            batch_mean = anchor.current_mean  # Shape: (C,) for BN, scalar for LN
             batch_var = anchor.current_var
             
-            # Reduce to scalar if needed
+            # Ensure on correct device
+            batch_mean = batch_mean.to(total_loss.device)
+            batch_var = batch_var.to(total_loss.device)
+            
+            # Per-channel target (0, 1)
             if batch_mean.numel() > 1:
-                batch_mean = batch_mean.mean()
-            if batch_var.numel() > 1:
-                batch_var = batch_var.mean()
-            
-            # Target: per-layer (running stats for BN, (0,1) for LN)
-            target_mean = self.source_means[i].to(batch_mean.device)
-            target_var = self.source_vars[i].to(batch_var.device)
-            
-            # MSE loss
-            loss_mean = F.mse_loss(batch_mean, target_mean)
-            loss_var = F.mse_loss(batch_var, target_var)
+                # Multi-channel (BN): per-channel alignment
+                target_mean = torch.zeros_like(batch_mean)
+                target_var = torch.ones_like(batch_var)
+                
+                # Per-channel MSE
+                loss_mean = F.mse_loss(batch_mean, target_mean)
+                loss_var = F.mse_loss(batch_var, target_var)
+            else:
+                # Scalar (LN): single alignment
+                target_mean = torch.tensor(0.0, device=batch_mean.device)
+                target_var = torch.tensor(1.0, device=batch_var.device)
+                
+                loss_mean = F.mse_loss(batch_mean, target_mean)
+                loss_var = F.mse_loss(batch_var, target_var)
             
             total_loss = total_loss + loss_mean + loss_var
         
