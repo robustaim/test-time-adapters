@@ -241,7 +241,8 @@ class CascadedNormEngine(AdaptationEngine):
                 ))
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
                 # Skip first LN - keep original for input stability
-                if any(keyword in name.lower() for keyword in ['stem', 'patch_embed', 'pos_embed']):
+                # Covers: patch_embed, patch_embed.norm, layers.0.*, norm (standalone)
+                if any(keyword in name.lower() for keyword in ['patch_embed', 'pos_embed', 'layers.0', '.norm.']) or name.endswith('.norm'):
                     print(f"  [SKIP] Keeping original LN: {name}")
                     continue
                 
