@@ -306,9 +306,23 @@ class CascadedNormEngine(AdaptationEngine):
         elif module_type == "LN":
             def forward(_self, _input: torch.Tensor) -> torch.Tensor:
                 if hasattr(_self, "normalized_shape"):
-                    dims = tuple(range(-len(_self.normalized_shape), 0))
-                    _self.current_mean = _input.mean(dim=dims)
-                    _self.current_var = _input.var(dim=dims, unbiased=False)
+                    # Feature-wise stats (like BN's channel-wise)
+                    # Average batch dimensions, keep feature dimensions
+                    # e.g., Input (B, N, D), normalized_shape=(D,)
+                    #   → average dims (0, 1), keep (D,)
+                    input_shape = _input.shape
+                    normalized_shape = _self.normalized_shape
+                    batch_ndims = len(input_shape) - len(normalized_shape)
+                    
+                    if batch_ndims > 0:
+                        # Average over batch dimensions only
+                        batch_dims = tuple(range(batch_ndims))
+                        _self.current_mean = _input.mean(dim=batch_dims)  # Shape: normalized_shape
+                        _self.current_var = _input.var(dim=batch_dims, unbiased=False)
+                    else:
+                        # Edge case: no batch dimension
+                        _self.current_mean = _input.mean()
+                        _self.current_var = _input.var(unbiased=False)
                 else:
                     _self.current_mean = _input.mean()
                     _self.current_var = _input.var(unbiased=False)
