@@ -229,7 +229,8 @@ class CascadedNormEngine(AdaptationEngine):
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
                 # Skip first BN (stem) - keep original for input stability
-                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1']):
+                # Covers: stem, conv1.norm, bn1, model.0, backbone.0 (YOLO), 0.bn
+                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1', 'model.0', 'backbone.0']) or name.endswith('0.bn'):
                     print(f"  [SKIP] Keeping original BN: {name}")
                     continue
                 
