@@ -480,7 +480,12 @@ class CascadedNormEngine(AdaptationEngine):
                 img = img * 255.0
 
             img_transformed, params = self.cascaded_norm(img)
-            self._stats['transform_params'].append(tuple(p.item() for p in params))
+            # Handle per-channel parameters: convert to list/scalar as needed
+            param_values = tuple(
+                p.tolist() if p.numel() > 1 else p.item() 
+                for p in params
+            )
+            self._stats['transform_params'].append(param_values)
 
             new_input = input_dict.copy()
             new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
