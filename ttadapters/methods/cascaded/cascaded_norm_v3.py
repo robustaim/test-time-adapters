@@ -85,24 +85,18 @@ class DifferentiableHistogramStretcher(nn.Module):
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
     def forward(self, image, clip_low, clip_high, gamma):
-        """Apply stretching to image with per-channel gamma correction."""
+        """Apply stretching to image with gamma correction."""
         C = image.shape[0]
         stretched = torch.zeros_like(image)
 
         for c in range(C):
-            # Per-channel parameters
-            stretched[c] = self.stretch_channel(
-                image[c], 
-                clip_low[c] if clip_low.numel() > 1 else clip_low,  # Per-channel or scalar
-                clip_high, 
-                gamma[c] if gamma.numel() > 1 else gamma            # Per-channel or scalar
-            )
+            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma)
 
         return stretched
 
 
 class GammaTransform(nn.Module):
-    """Learnable per-channel parameters for noise reduction with gamma correction."""
+    """Learnable scalar parameters for noise reduction with gamma correction."""
     noise_floor_init = 2.0
     gamma_init = 1.0
 
@@ -110,14 +104,14 @@ class GammaTransform(nn.Module):
         super().__init__()
         self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
         
-        # Per-channel parameters (RGB)
-        self.noise_floor = nn.Parameter(torch.full((3,), self.noise_floor_init))
-        self.gamma = nn.Parameter(torch.full((3,), self.gamma_init))
+        # Scalar parameters (preserve color balance)
+        self.noise_floor = nn.Parameter(torch.tensor(self.noise_floor_init))
+        self.gamma = nn.Parameter(torch.tensor(self.gamma_init))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
-        """Get constrained parameters and apply per-channel transform."""
+        """Get constrained parameters and apply transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)  # pass range 20~100
         gamma = self.gamma.clamp(min=0.5, max=2.0)  # gamma range 0.5~2.0
 
@@ -127,9 +121,7 @@ class GammaTransform(nn.Module):
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
-        # Per-channel (3,) → reduce to scalar
-        return ((self.noise_floor - self.noise_floor_init).pow(2) + 
-                (self.gamma - self.gamma_init).pow(2)).mean()
+        return (self.noise_floor - self.noise_floor_init).pow(2) + (self.gamma - self.gamma_init).pow(2)
 
 
 class CascadedNorm(nn.Module):
@@ -474,12 +466,7 @@ class CascadedNormEngine(AdaptationEngine):
                 img = img * 255.0
 
             img_transformed, params = self.cascaded_norm(img)
-            # Handle per-channel parameters: convert to list/scalar as needed
-            param_values = tuple(
-                p.tolist() if p.numel() > 1 else p.item() 
-                for p in params
-            )
-            self._stats['transform_params'].append(param_values)
+            self._stats['transform_params'].append(tuple(p.item() for p in params))
 
             new_input = input_dict.copy()
             new_input['image'] = img_transformed / 255.0 if original_scale else img_transformed
