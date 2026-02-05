@@ -96,15 +96,13 @@ class DifferentiableHistogramStretcher(nn.Module):
 
 
 class GammaTransform(nn.Module):
-    """Learnable scalar parameters for noise reduction with gamma correction."""
+    """Learnable parameters for noise reduction with gamma correction."""
     noise_floor_init = 2.0
     gamma_init = 1.0
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
-        
-        # Scalar parameters (preserve color balance)
         self.noise_floor = nn.Parameter(torch.tensor(self.noise_floor_init))
         self.gamma = nn.Parameter(torch.tensor(self.gamma_init))
 
@@ -153,12 +151,7 @@ class CascadedNorm(nn.Module):
         return output, params
 
     def compute_alignment_loss(self) -> torch.Tensor:
-        """
-        Compute alignment loss between batch and source statistics.
-
-        BN: Per-channel alignment to running stats.
-        LN: Scalar alignment to (0, 1).
-        """
+        """Compute alignment loss between batch and source statistics."""
         total_loss = torch.tensor(0.0, device=self.source_means[0].device)
 
         for i, (norm_layer, norm_type) in enumerate(zip(self.norm_layers, self.norm_types)):
@@ -171,31 +164,24 @@ class CascadedNorm(nn.Module):
             source_mean = self.source_means[i].to(batch_mean.device)
             source_var = self.source_vars[i].to(batch_var.device)
 
-            # Per-channel for BN, scalar for LN
-            if norm_type == "BN":
-                # BN: Per-channel (C,) alignment to running stats
-                # batch_mean/var: (C,), source_mean/var: (C,)
-                loss_mean = F.mse_loss(batch_mean, source_mean)
-                loss_var = F.mse_loss(batch_var, source_var)
-            else:
-                # LN: Reduce to scalar
-                if batch_mean.numel() > 1:
-                    batch_mean = batch_mean.mean()
-                if batch_var.numel() > 1:
-                    batch_var = batch_var.mean()
+            # Ensure batch stats are scalars to match source stats
+            if batch_mean.numel() > 1:
+                batch_mean = batch_mean.mean()
+            if batch_var.numel() > 1:
+                batch_var = batch_var.mean()
 
-                # Ensure scalar shapes match
-                if batch_mean.ndim > 0:
-                    batch_mean = batch_mean.squeeze()
-                if batch_var.ndim > 0:
-                    batch_var = batch_var.squeeze()
-                if source_mean.ndim > 0:
-                    source_mean = source_mean.squeeze()
-                if source_var.ndim > 0:
-                    source_var = source_var.squeeze()
+            # Ensure scalar shapes match
+            if batch_mean.ndim > 0:
+                batch_mean = batch_mean.squeeze()
+            if batch_var.ndim > 0:
+                batch_var = batch_var.squeeze()
+            if source_mean.ndim > 0:
+                source_mean = source_mean.squeeze()
+            if source_var.ndim > 0:
+                source_var = source_var.squeeze()
 
-                loss_mean = F.mse_loss(batch_mean, source_mean)
-                loss_var = F.mse_loss(batch_var, source_var)
+            loss_mean = F.mse_loss(batch_mean, source_mean)
+            loss_var = F.mse_loss(batch_var, source_var)
 
             total_loss = total_loss + loss_mean + loss_var
 
@@ -251,11 +237,11 @@ class CascadedNormEngine(AdaptationEngine):
             module_type = type(module).__name__
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
-                # BN: Preserve per-channel running statistics (C,)
+                # BN: Use running statistics (averaged over channels)
                 found.append((
                     name, "BN", module,
-                    module.running_mean.clone(),  # Per-channel (C,)
-                    module.running_var.clone()    # Per-channel (C,)
+                    module.running_mean.mean().clone(), # Scalar source mean
+                    module.running_var.mean().clone()   # Scalar source var
                 ))
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
                 # LN: Target normalized distribution (mean=0, var=1)
