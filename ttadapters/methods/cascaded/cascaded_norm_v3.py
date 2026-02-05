@@ -85,31 +85,39 @@ class DifferentiableHistogramStretcher(nn.Module):
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
     def forward(self, image, clip_low, clip_high, gamma):
-        """Apply stretching to image with gamma correction."""
+        """Apply stretching to image with per-channel gamma correction."""
         C = image.shape[0]
         stretched = torch.zeros_like(image)
 
         for c in range(C):
-            stretched[c] = self.stretch_channel(image[c], clip_low, clip_high, gamma)
+            # Per-channel parameters
+            stretched[c] = self.stretch_channel(
+                image[c], 
+                clip_low[c] if clip_low.numel() > 1 else clip_low,  # Per-channel or scalar
+                clip_high, 
+                gamma[c] if gamma.numel() > 1 else gamma            # Per-channel or scalar
+            )
 
         return stretched
 
 
 class GammaTransform(nn.Module):
-    """Learnable parameters for noise reduction with gamma correction."""
+    """Learnable per-channel parameters for noise reduction with gamma correction."""
     noise_floor_init = 2.0
     gamma_init = 1.0
 
     def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.saturation_limit = torch.tensor(config.saturation_limit, requires_grad=False)
-        self.noise_floor = nn.Parameter(torch.tensor(self.noise_floor_init))
-        self.gamma = nn.Parameter(torch.tensor(self.gamma_init))
+        
+        # Per-channel parameters (RGB)
+        self.noise_floor = nn.Parameter(torch.full((3,), self.noise_floor_init))
+        self.gamma = nn.Parameter(torch.full((3,), self.gamma_init))
 
         self.stretcher = DifferentiableHistogramStretcher(config.temperature)
 
     def forward(self, img):
-        """Get constrained parameters and apply transform."""
+        """Get constrained parameters and apply per-channel transform."""
         noise_floor = self.noise_floor.clamp(min=0.0, max=20.0)  # pass range 20~100
         gamma = self.gamma.clamp(min=0.5, max=2.0)  # gamma range 0.5~2.0
 
