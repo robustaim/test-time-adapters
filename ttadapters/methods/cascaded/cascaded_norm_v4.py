@@ -160,17 +160,16 @@ class CascadedNorm(nn.Module):
                 loss_var = F.mse_loss(batch_var, target_var)
                 
             else:
-                # LN: Source stats target (compensate for modality mismatch)
-                # Pixel transform (spatial) → Patch Embed → LN (sequential)
-                # → Use source stats instead of (0,1)
+                # LN: Feature-wise alignment (matching normalized_shape)
+                # Target: Each feature dimension → (0, 1)
                 if batch_mean.numel() > 1:
-                    # Keep feature dimensions but use source as target
-                    target_mean = source_mean.expand_as(batch_mean) if source_mean.numel() == 1 else source_mean
-                    target_var = source_var.expand_as(batch_var) if source_var.numel() == 1 else source_var
+                    # Keep feature dimensions
+                    target_mean = torch.zeros_like(batch_mean)
+                    target_var = torch.ones_like(batch_var)
                 else:
                     # Single element LN
-                    target_mean = source_mean
-                    target_var = source_var
+                    target_mean = torch.tensor(0.0, device=batch_mean.device)
+                    target_var = torch.tensor(1.0, device=batch_var.device)
 
                 loss_mean = F.mse_loss(batch_mean, target_mean)
                 loss_var = F.mse_loss(batch_var, target_var)
@@ -230,7 +229,8 @@ class CascadedNormEngine(AdaptationEngine):
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
                 # Skip first BN (stem) - keep original for input stability
-                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1']):
+                # Covers: stem, conv1.norm, bn1, model.0, backbone.0 (YOLO), 0.bn
+                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1', 'model.0', 'backbone.0']) or name.endswith('0.bn'):
                     print(f"  [SKIP] Keeping original BN: {name}")
                     continue
                 
