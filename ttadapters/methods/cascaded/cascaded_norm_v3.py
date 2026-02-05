@@ -25,7 +25,7 @@ Advantages:
     3. No source data needed (BN.running_mean/var contains source info)
 """
 
-from typing import List
+from typing import List, Literal
 from dataclasses import dataclass
 
 import torch
@@ -46,6 +46,9 @@ class CascadedNormConfig(AdaptationConfig):
     temperature: float = 0.01
     saturation_limit: float = 100.0
     param_regularization: float = 0.1
+
+    # Cascade Mode
+    cascade_mode: Literal["all", "early 1", "early 5", "early-middle-last", "last 1", "last 5"] = "all"
 
 
 class DifferentiableHistogramStretcher(nn.Module):
@@ -271,15 +274,31 @@ class CascadedNormEngine(AdaptationEngine):
         if not hasattr(self.config, 'cascade_mode'):
             return norm_list
 
-        match self.config.cascade_mode:
-            case "single":
+        mode = self.config.cascade_mode
+        n = len(norm_list)
+
+        if mode == 'early 1':
+            return [norm_list[0]] if n > 0 else []
+        elif mode == 'early 5':
+            return norm_list[:5]
+        elif mode == 'last 1':
+            return [norm_list[-1]] if n > 0 else []
+        elif mode == 'last 5':
+            return norm_list[-5:]
+        elif mode == 'early-middle-last':
+            if n == 0:
+                return []
+            if n == 1:
                 return [norm_list[0]]
-            case "single_last":
-                return [norm_list[-1]]
-            case "selected":
-                return [norm_list[i] for i in getattr(self.config, 'cascade_indices', [])]
-            case _:  # all
-                return norm_list
+            if n == 2:
+                return [norm_list[0], norm_list[-1]]
+            middle_idx = n // 2
+            return [norm_list[0], norm_list[middle_idx], norm_list[-1]]
+        elif mode == 'all':
+            return norm_list
+        else:
+            print(f"[CascadedNorm] Warning: Unknown cascade_mode '{mode}', using 'all'")
+            return norm_list
 
     @staticmethod
     def _create_wrapped_class(original_class, module_type):
