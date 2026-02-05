@@ -127,7 +127,9 @@ class GammaTransform(nn.Module):
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
-        return (self.noise_floor - self.noise_floor_init).pow(2) + (self.gamma - self.gamma_init).pow(2)
+        # Per-channel (3,) → reduce to scalar
+        return ((self.noise_floor - self.noise_floor_init).pow(2) + 
+                (self.gamma - self.gamma_init).pow(2)).mean()
 
 
 class CascadedNorm(nn.Module):
