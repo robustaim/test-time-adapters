@@ -292,50 +292,18 @@ class CascadedNormEngine(AdaptationEngine):
         """Create a wrapped class with overridden forward method."""
         if module_type == "BN":
             def forward(_self, _input: torch.Tensor) -> torch.Tensor:
-                # Measure batch stats (per-channel)
                 if _input.dim() == 4:  # (B, C, H, W)
                     dims = (0, 2, 3)
                 elif _input.dim() == 3:  # (B, C, L)
                     dims = (0, 2)
                 else:  # (B, C)
                     dims = (0,)
-                
                 _self.current_mean = _input.mean(dim=dims)
                 _self.current_var = _input.var(dim=dims, unbiased=False)
-                
-                # BYPASS MODE: Normalize with BATCH stats (like LN)
-                # When input ~ N(0,1) per channel, batch stats ~ (0,1) → normalized ≈ input
-                batch_mean = _self.current_mean
-                batch_var = _self.current_var
-                
-                # Reshape for broadcasting
-                if _input.dim() == 4:
-                    batch_mean = batch_mean.view(1, -1, 1, 1)
-                    batch_var = batch_var.view(1, -1, 1, 1)
-                elif _input.dim() == 3:
-                    batch_mean = batch_mean.view(1, -1, 1)
-                else:
-                    batch_mean = batch_mean.view(1, -1)
-                
-                # Normalize with batch stats (bypass when input ~ N(0,1))
-                normalized = (_input - batch_mean) / torch.sqrt(batch_var + _self.eps)
-                
-                # Apply learned affine (from original BN)
-                if _self.weight is not None:
-                    if _input.dim() == 4:
-                        gamma = _self.weight.view(1, -1, 1, 1)
-                        beta = _self.bias.view(1, -1, 1, 1)
-                    elif _input.dim() == 3:
-                        gamma = _self.weight.view(1, -1, 1)
-                        beta = _self.bias.view(1, -1)
-                    else:
-                        gamma = _self.weight.view(1, -1)
-                        beta = _self.bias.view(1, -1)
-                    
-                    return normalized * gamma + beta
-                else:
-                    return normalized
+
+                return original_class.forward(_self, _input)
             
+            # Use specific name for BatchNorm2d
             class_name = "BatchNorm2dBypassAnchor"
             
         elif module_type == "LN":
