@@ -179,18 +179,10 @@ class CascadedNorm(nn.Module):
 
             # Per-channel for BN, scalar for LN
             if norm_type == "BN":
-                # BN: Keep per-channel (C,) for alignment
-                if batch_mean.numel() > 1:
-                    # Expand source stats to match channel dimension
-                    source_mean_expanded = source_mean.expand_as(batch_mean)
-                    source_var_expanded = source_var.expand_as(batch_var)
-                    
-                    loss_mean = F.mse_loss(batch_mean, source_mean_expanded)
-                    loss_var = F.mse_loss(batch_var, source_var_expanded)
-                else:
-                    # Single channel
-                    loss_mean = F.mse_loss(batch_mean, source_mean)
-                    loss_var = F.mse_loss(batch_var, source_var)
+                # BN: Per-channel (C,) alignment to running stats
+                # batch_mean/var: (C,), source_mean/var: (C,)
+                loss_mean = F.mse_loss(batch_mean, source_mean)
+                loss_var = F.mse_loss(batch_var, source_var)
             else:
                 # LN: Reduce to scalar
                 if batch_mean.numel() > 1:
