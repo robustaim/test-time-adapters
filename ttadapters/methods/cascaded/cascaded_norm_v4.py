@@ -143,7 +143,7 @@ class CascadedNorm(nn.Module):
             source_mean = self.source_means[i].to(batch_mean.device)
             source_var = self.source_vars[i].to(batch_var.device)
 
-            # Per-channel or scalar loss
+            # Per-channel or feature-wise loss
             if norm_type == "BN":
                 # BN: Per-channel alignment (C,)
                 # Target: Each channel → (0, 1)
@@ -160,24 +160,19 @@ class CascadedNorm(nn.Module):
                 loss_var = F.mse_loss(batch_var, target_var)
                 
             else:
-                # LN: Scalar alignment
+                # LN: Feature-wise alignment (matching normalized_shape)
+                # Target: Each feature dimension → (0, 1)
                 if batch_mean.numel() > 1:
-                    batch_mean = batch_mean.mean()
-                if batch_var.numel() > 1:
-                    batch_var = batch_var.mean()
-                
-                # Ensure scalar
-                if batch_mean.ndim > 0:
-                    batch_mean = batch_mean.squeeze()
-                if batch_var.ndim > 0:
-                    batch_var = batch_var.squeeze()
-                if source_mean.ndim > 0:
-                    source_mean = source_mean.squeeze()
-                if source_var.ndim > 0:
-                    source_var = source_var.squeeze()
+                    # Keep feature dimensions
+                    target_mean = torch.zeros_like(batch_mean)
+                    target_var = torch.ones_like(batch_var)
+                else:
+                    # Single element LN
+                    target_mean = torch.tensor(0.0, device=batch_mean.device)
+                    target_var = torch.tensor(1.0, device=batch_var.device)
 
-                loss_mean = F.mse_loss(batch_mean, source_mean)
-                loss_var = F.mse_loss(batch_var, source_var)
+                loss_mean = F.mse_loss(batch_mean, target_mean)
+                loss_var = F.mse_loss(batch_var, target_var)
 
             total_loss = total_loss + loss_mean + loss_var
 
