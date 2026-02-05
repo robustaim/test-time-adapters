@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 from dataclasses import dataclass
 
 import torch
