@@ -1,1 +1,1 @@
-from .modelings import YOLO11ForObjectDetection
+from .modeling_yolo11 import YOLO11ForObjectDetection

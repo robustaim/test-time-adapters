@@ -1,1 +1,1 @@
-from .modelings import RTDetrForObjectDetection
+from .modeling_rt_detr import RTDetrForObjectDetection
