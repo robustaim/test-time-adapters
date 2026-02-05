@@ -232,6 +232,11 @@ class CascadedNormEngine(AdaptationEngine):
             module_type = type(module).__name__
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)) or "BatchNorm" in module_type:
+                # Skip first BN (stem) - keep original for input stability
+                if any(keyword in name.lower() for keyword in ['stem', 'conv1.norm', 'bn1']):
+                    print(f"  [SKIP] Keeping original BN: {name}")
+                    continue
+                
                 # BN: Use running statistics (averaged over channels)
                 found.append((
                     name, "BN", module,
@@ -239,6 +244,11 @@ class CascadedNormEngine(AdaptationEngine):
                     module.running_var.mean().clone()   # Scalar source var
                 ))
             elif isinstance(module, nn.LayerNorm) or "LayerNorm" in module_type:
+                # Skip first LN - keep original for input stability
+                if any(keyword in name.lower() for keyword in ['stem', 'patch_embed', 'pos_embed']):
+                    print(f"  [SKIP] Keeping original LN: {name}")
+                    continue
+                
                 # LN: Target normalized distribution (mean=0, var=1)
                 found.append((
                     name, "LN", module,
