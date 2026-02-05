@@ -42,6 +42,7 @@ class CascadedNormConfig(AdaptationConfig):
     """Configuration for CascadedNorm."""
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
+    optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     temperature: float = 0.01
     saturation_limit: float = 100.0
