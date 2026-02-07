@@ -236,6 +236,10 @@ class CascadeAnchor(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
 
+    def __repr__(self) -> str:
+        module_name = self.__class__.__name__
+        return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
+
     def forward(self, x):
         # soft bypass
         match self.anchor_type:
