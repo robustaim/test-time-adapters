@@ -116,7 +116,7 @@ class InputTransformation(nn.Module):
         """Weighted blending between original image and transformed image."""
         transformed, transform_params = self.transform(original)
         gate = torch.sigmoid(self.gate_logit)
-        self.applied_params = (gate.item(), transform_params)
+        self.applied_params = gate.item(), *transform_params
         return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
 
 
