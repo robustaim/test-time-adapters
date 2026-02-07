@@ -86,7 +86,7 @@ class GammaTransform(nn.Module):
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, float, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
-        stretched = torch.zeros_like(image)
+        stretched = torch.zeros_like(image, device=image.device, dtype=image.dtype)
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # range [0.5, 2.0]
 
         for c in range(C):
@@ -329,7 +329,7 @@ class CascadedNormEngine(AdaptationEngine):
         # Extract norm layers from base model
         if self.config.verbose:
             print(f"[CascadedNorm] Summary:")
-            print(f"    View Transform method: {self.config.itm_type}")
+            print(f"  View Transform method: {self.config.itm_type}")
         self._extract_norm_layers()
 
         # Stats
@@ -339,7 +339,7 @@ class CascadedNormEngine(AdaptationEngine):
         self.to(self.device, dtype=self.dtype)
 
         if self.config.verbose:
-            print(f"    {self.dist_norm}")
+            print("\n", self.dist_norm)
 
     @staticmethod
     def _is_norm_layer(module: nn.Module) -> bool:
@@ -352,8 +352,8 @@ class CascadedNormEngine(AdaptationEngine):
             for name, module in self.base_model.named_modules():
                 if self._is_norm_layer(module):
                     norm_layer_keys.append(name)
-            print(f"    Total norm layers: {len(norm_layer_keys)}")
-            print(f"        Norm layer keys: {norm_layer_keys}")
+            print(f"  Total norm layers: {len(norm_layer_keys)}")
+            print(f"  Norm layer keys: {norm_layer_keys}")
 
         # recursively extracts norm layers by using re and convert to CascadeAnchor
         if self.config.cascade_target is None:
@@ -368,7 +368,8 @@ class CascadedNormEngine(AdaptationEngine):
             for name, module in self.base_model.named_modules():
                 if cascade_target_re.search(name) and self._is_norm_layer(module):
                     self.dist_norm.anchors.append(CascadeAnchor(self.config, module, self.loss_class()))
-        print(f"    Applied to {len(self.dist_norm.anchors)} norm layers")
+        print(f"  Applied to {len(self.dist_norm.anchors)} norm layers")
+        print(f"  Applied norm layer keys: {[anchor.name for anchor in self.dist_norm.anchors]}")
 
     def online_parameters(self):
         """Get learnable parameters for optimization."""
