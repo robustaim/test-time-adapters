@@ -53,7 +53,7 @@ class CascadedNormConfig(AdaptationConfig):
     gamma_saturation_limit: float = 98.0
 
     @classmethod
-    def from_preset(cls, base_model: nn.Module, **kwargs):
+    def from_preset(cls, base_model: "nn.Module", **kwargs):
         """Create configuration from preset."""
         from ....models import (
             FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
