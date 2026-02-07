@@ -356,20 +356,25 @@ class CascadedNormEngine(AdaptationEngine):
             print(f"  Norm layer keys: {norm_layer_keys}")
 
         # recursively extracts norm layers by using re and convert to CascadeAnchor
+        applied_list = self.dist_norm.anchors
+        applied_key_list = []
         if self.config.cascade_target is None:
             # No target pattern specified, apply to all norm layers
             for name, module in self.base_model.named_modules():
                 if self._is_norm_layer(module):
-                    self.dist_norm.anchors.append(CascadeAnchor(self.config, module, self.loss_class()))
+                    applied_list.append(CascadeAnchor(self.config, module, self.loss_class()))
+                    applied_key_list.append(name)
         else:
             # Join multiple patterns with OR for matching any of them
             pattern = "|".join(f"({p})" for p in self.config.cascade_target)
             cascade_target_re = re.compile(pattern)
             for name, module in self.base_model.named_modules():
                 if cascade_target_re.search(name) and self._is_norm_layer(module):
-                    self.dist_norm.anchors.append(CascadeAnchor(self.config, module, self.loss_class()))
+                    applied_list.append(CascadeAnchor(self.config, module, self.loss_class()))
+                    applied_key_list.append(name)
+        self.dist_norm.anchors = applied_list
         print(f"  Applied to {len(self.dist_norm.anchors)} norm layers")
-        print(f"  Applied norm layer keys: {[anchor.name for anchor in self.dist_norm.anchors]}")
+        print(f"  Applied norm layer keys: {applied_key_list}")
 
     def online_parameters(self):
         """Get learnable parameters for optimization."""
