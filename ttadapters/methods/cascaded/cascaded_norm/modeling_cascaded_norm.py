@@ -278,13 +278,13 @@ class CascadeAnchor(nn.Module):
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
-        if not self._forward_stats['mean'] or not self._forward_stats['var']:
-            raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.")
-
-        mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
-        var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
-        self._forward_stats['mean'] = []  # reset for next forward pass
-        self._forward_stats['var'] = []  # reset for next forward pass
+        try:
+            mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
+            var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
+            self._forward_stats['mean'] = []  # reset for next forward pass
+            self._forward_stats['var'] = []  # reset for next forward pass
+        except Exception as e:
+            raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.") from e
         return mean_loss + var_loss
 
 
