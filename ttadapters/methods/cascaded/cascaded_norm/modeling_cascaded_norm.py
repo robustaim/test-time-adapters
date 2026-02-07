@@ -273,11 +273,16 @@ class CascadeAnchor(nn.Module):
                 return x * scale.to(out_dtype) + bias.to(out_dtype)
             case SupportedNormType.LN:
                 # calculate stats -> this will be optimized to N(0,1)
-                # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, ...)
-                # Target: Scalar (0, 1) <will be broadcasted to (B, H, W)>
+                # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, H, W)
+                # Target: Scalar (0, 1) <expanded to (B, H, W)>
                 dims = tuple(range(-len(self.norm_shape), 0))
                 self._forward_stats['mean'] = x.mean(dim=dims)
                 self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                # Update target stats to match forward stats shape (using expand for efficiency)
+                # We use the initial scalar targets (0, 1) and expand them
+                self._target_stats['mean'] = torch.tensor(0.0, device=x.device).expand_as(self._forward_stats['mean'])
+                self._target_stats['var'] = torch.tensor(1.0, device=x.device).expand_as(self._forward_stats['var'])
 
                 # do scale and bias
                 return self.norm(x)  # LN is automatically bypassed softly
