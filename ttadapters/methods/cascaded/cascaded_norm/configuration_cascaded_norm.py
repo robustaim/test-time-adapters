@@ -40,7 +40,7 @@ class CascadedNormConfig(AdaptationConfig):
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     # Engine configuration
-    itm_type: Literal["clahe", "gamma"] = "clahe"
+    itm_type: Literal["clahe", "gamma"] = "gamma"
     cascade_target: List[str] = None
 
     # CLAHE parameters
