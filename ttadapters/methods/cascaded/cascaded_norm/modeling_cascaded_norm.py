@@ -150,12 +150,8 @@ class AnchorList(nn.ModuleList):
         if self.ln_count > 0:
             params.append(f"LN={self.ln_count}")
         param_str = ", ".join(params)
-
-        module_repr = super().__repr__()
-        if module_repr.startswith("ModuleList"):
-            module_repr = module_repr[10:]
-
-        return f"AnchorList({param_str}){module_repr}"
+        module_name = self.__class__.__name__
+        return super().__repr__().replace(module_name, f"{module_name}({param_str})")
 
 
 class CascadedNorm(nn.Module):
@@ -327,6 +323,9 @@ class CascadedNormEngine(AdaptationEngine):
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
 
         # Extract norm layers from base model
+        if self.config.verbose:
+            print(f"[CascadedNorm] Summary:")
+            print(f"    View Transform method: {self.config.itm_type}")
         self._extract_norm_layers()
 
         # Stats
@@ -336,8 +335,6 @@ class CascadedNormEngine(AdaptationEngine):
         self.to(self.device, dtype=self.dtype)
 
         if self.config.verbose:
-            print(f"\n[CascadedNorm] Summary:")
-            print(f"    View Transform method: {self.config.itm_type}")
             print(f"    {self.dist_norm}")
 
     @staticmethod
