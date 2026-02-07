@@ -86,7 +86,7 @@ class GammaTransform(nn.Module):
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, float, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
-        stretched = torch.zeros_like(image, device=image.device, dtype=image.dtype)
+        stretched = torch.zeros_like(image)
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # range [0.5, 2.0]
 
         for c in range(C):
@@ -94,7 +94,7 @@ class GammaTransform(nn.Module):
                 image[c], self.noise_floor, self.saturation_limit, gamma
             )
 
-        return stretched.to(image.device, dtype=image.dtype), (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
+        return stretched, (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
 
 
 class InputTransformation(nn.Module):
@@ -117,7 +117,7 @@ class InputTransformation(nn.Module):
         transformed, transform_params = self.transform(original)
         gate = torch.sigmoid(self.gate_logit)
         self.applied_params = (gate.item(), transform_params)
-        return gate * transformed + (1 - gate) * original
+        return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
 
 
 class SupportedNormType(Enum):
