@@ -90,6 +90,10 @@ class AdaptationEngine(BaseModel):
     def device(self) -> torch.device:
         return self._device
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
     def to(self, *args, **kwargs) -> Self:
         result = super().to(*args, **kwargs)
         try:
