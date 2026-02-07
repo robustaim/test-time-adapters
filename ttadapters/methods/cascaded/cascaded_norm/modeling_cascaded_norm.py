@@ -205,6 +205,7 @@ class CascadeAnchor(nn.Module):
         self.loss_fn = loss_fn
         self.anchor_type: SupportedNormType = SupportedNormType.BN
         self.norm_shape: Tuple[int, ...] = tuple()
+        self.target_shape: Tuple[int, ...] = tuple()
 
         self._forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         self._target_stats = dict(mean=[], var=[])  # N(0, 1)
@@ -216,7 +217,8 @@ class CascadeAnchor(nn.Module):
 
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
-            self.norm_shape = original_norm.running_mean.shape
+            self.norm_shape = original_norm.running_mean.shape  # (C,)
+            self.target_shape = self.norm_shape
             if isinstance(original_norm, nn.BatchNorm2d) or (hasattr(original_norm, "num_batches_tracked") and original_norm.num_batches_tracked is not None):
                 num_samples = original_norm.num_batches_tracked
             else:
@@ -226,16 +228,20 @@ class CascadeAnchor(nn.Module):
                 var=original_norm.running_var,
                 n=num_samples
             )
+            # BN target: Channel-wise statistics (C,)
             self._target_stats = dict(
-                mean=torch.zeros(self.norm_shape, device=self.weight.device),
-                var=torch.ones(self.norm_shape, device=self.weight.device)
+                mean=torch.zeros(self.target_shape, device=self.weight.device),
+                var=torch.ones(self.target_shape, device=self.weight.device)
             )
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN
+            self.target_shape = ()  # Scalar target for position-wise stats
             self.norm_shape = original_norm.normalized_shape
+            
+            # LN target: Scalar statistics (0, 1) broadcasted to (B, H, W)
             self._target_stats = dict(
-                mean=torch.zeros(self.norm_shape, device=self.weight.device),
-                var=torch.ones(self.norm_shape, device=self.weight.device)
+                mean=torch.tensor(0.0, device=self.weight.device),
+                var=torch.tensor(1.0, device=self.weight.device)
             )
         else:
             raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
@@ -267,6 +273,8 @@ class CascadeAnchor(nn.Module):
                 return x * scale.to(out_dtype) + bias.to(out_dtype)
             case SupportedNormType.LN:
                 # calculate stats -> this will be optimized to N(0,1)
+                # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, ...)
+                # Target: Scalar (0, 1) <will be broadcasted to (B, H, W)>
                 dims = tuple(range(-len(self.norm_shape), 0))
                 self._forward_stats['mean'] = x.mean(dim=dims)
                 self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
