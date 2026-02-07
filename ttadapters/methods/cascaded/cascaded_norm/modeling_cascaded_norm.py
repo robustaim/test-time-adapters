@@ -334,7 +334,7 @@ class CascadedNormEngine(AdaptationEngine):
             print("[CascadedNorm] Initialization Summary")
             print("-" * 60)
             print(f"  View Transform Method : {self.config.itm_type}")
-            print(f"  Loss Function         : {self.config.itm_loss_fn}")
+            print(f"  Loss Function         : {self.loss_class.__name__}")
         self._extract_norm_layers()
         if self.config.verbose:
             print("-" * 60)
