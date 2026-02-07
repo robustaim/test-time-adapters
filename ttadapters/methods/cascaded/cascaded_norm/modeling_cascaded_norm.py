@@ -94,7 +94,7 @@ class GammaTransform(nn.Module):
                 image[c], self.noise_floor, self.saturation_limit, gamma
             )
 
-        return stretched, (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
+        return stretched.to(image.device, dtype=image.dtype), (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
 
 
 class InputTransformation(nn.Module):
