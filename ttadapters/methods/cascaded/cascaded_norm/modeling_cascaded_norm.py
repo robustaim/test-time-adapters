@@ -250,8 +250,8 @@ class CascadeAnchor(nn.Module):
             case SupportedNormType.BN:
                 # calculate stats -> this will be optimized to N(0,1)
                 dims = (0, 2, 3)
-                self._forward_stats['mean'] = forward_mean = x.mean(dim=dims)
-                self._forward_stats['var'] = forward_var = x.var(dim=dims, unbiased=False)
+                self._forward_stats['mean'] = x.mean(dim=dims)
+                self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
             case SupportedNormType.LN:
                 # calculate stats -> this will be optimized to N(0,1)
                 # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, H, W)
@@ -264,11 +264,11 @@ class CascadeAnchor(nn.Module):
                 # We use the initial scalar targets (0, 1) and expand them
                 self._target_stats['mean'] = torch.tensor(0.0, device=x.device).expand_as(self._forward_stats['mean'])
                 self._target_stats['var'] = torch.tensor(1.0, device=x.device).expand_as(self._forward_stats['var'])
-
-                # do scale and bias
-                return self.norm(x)  # LN is automatically bypassed softly
             case _:
                 raise ValueError(f"Unsupported anchor type: {self.anchor_type}")
+
+        # Scale and Bias
+        return self.norm(x)
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
