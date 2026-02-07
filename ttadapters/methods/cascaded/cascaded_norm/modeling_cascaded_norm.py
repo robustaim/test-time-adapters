@@ -275,7 +275,7 @@ class CascadeAnchor(nn.Module):
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
         if not self._forward_stats['mean'] or not self._forward_stats['var']:
-            return torch.tensor(0.0, device=self.weight.device, requires_grad=False)
+            raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.")
 
         mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
         var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
@@ -355,26 +355,30 @@ class CascadedNormEngine(AdaptationEngine):
             print(f"  Total norm layers: {len(norm_layer_keys)}")
             print(f"  Norm layer keys: {norm_layer_keys}")
 
-        # recursively extracts norm layers by using re and convert to CascadeAnchor
+        # Recursively extract norm layers and replace with CascadeAnchors
+        # Compile pattern: if None, match all; otherwise match provided patterns
+        cascade_target_re = None if self.config.cascade_target is None else re.compile(
+            "|".join(f"({p})" for p in self.config.cascade_target)
+        )
         applied_list = self.dist_norm.anchors
         applied_key_list = []
-        if self.config.cascade_target is None:
-            # No target pattern specified, apply to all norm layers
-            for name, module in self.base_model.named_modules():
-                if self._is_norm_layer(module):
-                    applied_list.append(CascadeAnchor(self.config, module, self.loss_class()))
-                    applied_key_list.append(name)
-        else:
-            # Join multiple patterns with OR for matching any of them
-            pattern = "|".join(f"({p})" for p in self.config.cascade_target)
-            cascade_target_re = re.compile(pattern)
-            for name, module in self.base_model.named_modules():
-                if cascade_target_re.search(name) and self._is_norm_layer(module):
-                    applied_list.append(CascadeAnchor(self.config, module, self.loss_class()))
-                    applied_key_list.append(name)
-        self.dist_norm.anchors = applied_list
+        for name, module in self.base_model.named_modules():
+            # Check if module is a norm layer and matches the pattern (if specified)
+            if self._is_norm_layer(module) and (cascade_target_re is None or cascade_target_re.search(name)):
+                anchor = CascadeAnchor(self.config, module, self.loss_function)
+                applied_list.append(anchor)
+                applied_key_list.append(name)
+                self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
         print(f"  Applied to {len(self.dist_norm.anchors)} norm layers")
         print(f"  Applied norm layer keys: {applied_key_list}")
+
+    def _replace_module(self, module_name: str, new_module: nn.Module):
+        """Replace a module in the base model with a new module."""
+        name_parts = module_name.split('.')
+        parent = self.base_model
+        for part in name_parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, name_parts[-1], new_module)
 
     def online_parameters(self):
         """Get learnable parameters for optimization."""
