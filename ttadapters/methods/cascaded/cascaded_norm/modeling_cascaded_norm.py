@@ -87,8 +87,12 @@ class GammaTransform(nn.Module):
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
-        gamma = F.softplus(self.gamma) + 0.1  # range [0.1, inf)
-        gamma = torch.clamp(gamma, 0.1, 5.0)  # constrain to reasonable range [0.1, 5.0]
+
+        # Gamma constraint using Tanh for smooth gradients
+        # Range: [0.1, 5.0]
+        # self.gamma init -0.6931 -> tanh(-0.6931) ≈ -0.6
+        # gamma ≈ 2.45 * (-0.6 + 1.0) + 0.1 = 0.98 + 0.1 = 1.08 (Near Identity)
+        gamma = 2.45 * (torch.tanh(self.gamma) + 1.0) + 0.1
 
         for c in range(C):
             stretched[c] = self.stretch_channel(
@@ -326,9 +330,17 @@ class CascadedNormEngine(AdaptationEngine):
 
         # Extract norm layers from base model
         if self.config.verbose:
-            print(f"[CascadedNorm] Summary:")
-            print(f"  View Transform method: {self.config.itm_type}")
+            print("=" * 60)
+            print("[CascadedNorm] Initialization Summary")
+            print("-" * 60)
+            print(f"  View Transform Method : {self.config.itm_type}")
+            print(f"  Loss Function         : {self.config.itm_loss_fn}")
         self._extract_norm_layers()
+        if self.config.verbose:
+            print("-" * 60)
+            print("  Distribution Normalization Module:")
+            print(self.dist_norm)
+            print("=" * 60)
 
         # Stats
         self._reset_stats()
@@ -336,22 +348,19 @@ class CascadedNormEngine(AdaptationEngine):
         # Device
         self.to(self.device, dtype=self.dtype)
 
-        if self.config.verbose:
-            print("\n", self.dist_norm)
-
     @staticmethod
     def _is_norm_layer(module: nn.Module) -> bool:
         return isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)) or "BatchNorm2d" in module.__class__.__name__ or "LayerNorm" in module.__class__.__name__
 
     def _extract_norm_layers(self):
         # count every norm layers
+        norm_layer_keys = []
+        for name, module in self.base_model.named_modules():
+            if self._is_norm_layer(module):
+                norm_layer_keys.append(name)
+
         if self.config.verbose:
-            norm_layer_keys = []
-            for name, module in self.base_model.named_modules():
-                if self._is_norm_layer(module):
-                    norm_layer_keys.append(name)
-            print(f"  Total norm layers: {len(norm_layer_keys)}")
-            print(f"  Norm layer keys: {norm_layer_keys}")
+            print(f"  Total Norm Layers     : {len(norm_layer_keys)}")
 
         # Recursively extract norm layers and replace with CascadeAnchors
         # Compile pattern: if None, match all; otherwise match provided patterns
@@ -370,8 +379,25 @@ class CascadedNormEngine(AdaptationEngine):
                 applied_list.append(anchor)
                 applied_key_list.append(name)
                 self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
-        print(f"  Applied to {len(self.dist_norm.anchors)} norm layers")
-        print(f"  Applied norm layer keys: {applied_key_list}")
+
+        if self.config.verbose:
+            target_str = str(self.config.cascade_target) if self.config.cascade_target else "All (Default)"
+            print(f"  Target Strategy       : {target_str}")
+            print(f"  Applied To            : {len(self.dist_norm.anchors)} layer(s)")
+
+            if len(applied_key_list) > 0:
+                print("-" * 60)
+                print("  Applied Layers (Sample):")
+                # Print sample if too many
+                if len(applied_key_list) > 10:
+                    for k in applied_key_list[:5]:
+                        print(f"    - {k}")
+                    print(f"    ... ({len(applied_key_list) - 10} more) ...")
+                    for k in applied_key_list[-5:]:
+                        print(f"    - {k}")
+                else:
+                    for k in applied_key_list:
+                        print(f"    - {k}")
 
     def _replace_module(self, module_name: str, new_module: nn.Module):
         """Replace a module in the base model with a new module."""
