@@ -86,7 +86,7 @@ class GammaTransform(nn.Module):
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, float, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
-        stretched = torch.zeros_like(image)
+        stretched = torch.zeros_like(image, device=image.device)
         gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # range [0.5, 2.0]
 
         for c in range(C):
