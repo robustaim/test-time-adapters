@@ -186,7 +186,7 @@ class CascadedNorm(nn.Module):
         return self.itm(x)
 
     def diff(self) -> torch.Tensor:
-        return torch.sum(anchor.diff() for anchor in self.anchors)
+        return torch.stack([anchor.diff() for anchor in self.anchors]).sum()
 
 
 class CascadeAnchor(nn.Module):
