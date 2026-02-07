@@ -133,7 +133,7 @@ class AnchorList(nn.ModuleList):
         self.bn_count = 0
         self.ln_count = 0
 
-    def append(self, item: CascadeAnchor):
+    def append(self, item: "CascadeAnchor"):
         if not isinstance(item, CascadeAnchor):
             raise TypeError("item must be CascadeAnchor")
 
