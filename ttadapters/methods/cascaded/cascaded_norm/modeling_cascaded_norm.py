@@ -110,7 +110,9 @@ class InputTransformation(nn.Module):
         self.applied_params = None
         self.itm_type = config.itm_type
 
-        self.gate_raw = nn.Parameter(torch.tensor(0.0))
+        # Initialize gate to start near 0.1 (Soft Start)
+        # 0.5 * (tanh(raw) + 1) = 0.1 => tanh(raw) = -0.8 => raw approx -1.1
+        self.gate_raw = nn.Parameter(torch.tensor(-1.1))
         self.transform = CLAHETransform(config) if config.itm_type == "clahe" else GammaTransform(config)
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
@@ -187,7 +189,18 @@ class CascadedNorm(nn.Module):
         return self.itm(x)
 
     def diff(self) -> torch.Tensor:
-        return torch.stack([anchor.diff() for anchor in self.anchors]).sum()
+        align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
+
+        # We want gate to stay around 0.1 unless necessary
+        # gate = 0.5 * (tanh(raw) + 1)
+        # If we regularize raw towards -1.1, gate stays near 0.1
+        reg_loss = 0.0
+        if hasattr(self.itm, 'gate_raw'):
+            # Target raw value for 0.1 is approx -1.1
+            target = -1.1
+            reg_loss = (self.itm.gate_raw - target).pow(2).mean()
+
+        return align_loss + 0.1 * reg_loss
 
 
 class CascadeAnchor(nn.Module):
