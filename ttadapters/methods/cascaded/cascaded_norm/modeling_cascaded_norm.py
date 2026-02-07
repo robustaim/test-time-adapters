@@ -217,10 +217,14 @@ class CascadeAnchor(nn.Module):
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
             self.norm_shape = original_norm.running_mean.shape
+            if isinstance(original_norm, nn.BatchNorm2d) or (hasattr(original_norm, "num_batches_tracked") and original_norm.num_batches_tracked is not None):
+                num_samples = original_norm.num_batches_tracked
+            else:
+                num_samples = config.frozen_bn_num_samples
             self._source_stats = dict(
                 mean=original_norm.running_mean,
                 var=original_norm.running_var,
-                n=original_norm.num_batches_tracked
+                n=num_samples
             )
             self._target_stats = dict(
                 mean=torch.zeros(self.norm_shape, device=self.weight.device),

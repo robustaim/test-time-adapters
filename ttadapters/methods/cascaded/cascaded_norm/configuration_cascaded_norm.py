@@ -52,6 +52,9 @@ class CascadedNormConfig(AdaptationConfig):
     gamma_noise_floor: float = 2.0
     gamma_saturation_limit: float = 98.0
 
+    # Anchor configutation
+    frozen_bn_num_samples: int = 128  # same value from NORM
+
     @classmethod
     def from_preset(cls, base_model: "nn.Module", **kwargs):
         """Create configuration from preset."""
