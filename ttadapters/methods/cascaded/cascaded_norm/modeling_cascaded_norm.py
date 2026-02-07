@@ -158,12 +158,12 @@ class AnchorList(nn.ModuleList):
 class CascadedNorm(nn.Module):
     """
     CascadedNorm: Cascaded Input Distribution Normalization
-        with Source Flow Adaptation loss via Soft Norm Bypassing
+        with Source Flow Adaptation loss via Norm Linearization
 
     Learns to normalize input pixel distribution through adaptive
     transformation with cascaded layer-wise supervision.
 
-    The term "normalization" refers to distribution alignment
+    The term "normalization" refers to distribution matching
     between source and target domains, achieved through:
     - Gamma Transform: Histogram stretching with gamma correction
     - CLAHE Transform: Histogram equalization with adaptive contrast enhancement
@@ -194,7 +194,7 @@ class CascadedNorm(nn.Module):
 
 class CascadeAnchor(nn.Module):
     """
-    Cascade Anchor Module which tries to bypass the original normalization layer.
+    Cascade Anchor Module which tries to linearize the original normalization layer.
 
     Supported normalization layers:
     - nn.BatchNorm2d / FrozenBatchNorm2d
@@ -212,7 +212,6 @@ class CascadeAnchor(nn.Module):
 
         self._forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         self._target_stats = dict(mean=[], var=[])  # N(0, 1)
-        self._source_stats = dict(mean=[], var=[], n=0)  # BN only
 
         self.weight = original_norm.weight
         self.bias = original_norm.bias
@@ -222,15 +221,7 @@ class CascadeAnchor(nn.Module):
             self.anchor_type = SupportedNormType.BN
             self.norm_shape = original_norm.running_mean.shape  # (C,)
             self.target_shape = self.norm_shape
-            if isinstance(original_norm, nn.BatchNorm2d) or (hasattr(original_norm, "num_batches_tracked") and original_norm.num_batches_tracked is not None):
-                num_samples = original_norm.num_batches_tracked
-            else:
-                num_samples = config.frozen_bn_num_samples
-            self._source_stats = dict(
-                mean=original_norm.running_mean,
-                var=original_norm.running_var,
-                n=num_samples
-            )
+
             # BN target: Channel-wise statistics (C,)
             self._target_stats = dict(
                 mean=torch.zeros(self.target_shape, device=self.weight.device),
@@ -240,7 +231,7 @@ class CascadeAnchor(nn.Module):
             self.anchor_type = SupportedNormType.LN
             self.target_shape = ()  # Scalar target for position-wise stats
             self.norm_shape = original_norm.normalized_shape
-            
+
             # LN target: Scalar statistics (0, 1) broadcasted to (B, H, W)
             self._target_stats = dict(
                 mean=torch.tensor(0.0, device=self.weight.device),
@@ -254,26 +245,13 @@ class CascadeAnchor(nn.Module):
         return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def forward(self, x):
-        # soft bypass
+        # Norm Linearization
         match self.anchor_type:
-            case SupportedNormType.BN:  # BN requires manual norm & scale operation
+            case SupportedNormType.BN:
                 # calculate stats -> this will be optimized to N(0,1)
                 dims = (0, 2, 3)
                 self._forward_stats['mean'] = forward_mean = x.mean(dim=dims)
                 self._forward_stats['var'] = forward_var = x.var(dim=dims, unbiased=False)
-
-                # calculate updated running stats (instant mean/var)
-                alpha = x.shape[0] / (self._source_stats['n'] + x.shape[0])
-                running_mean = (1 - alpha) * self._source_stats['mean'] + alpha * forward_mean
-                running_var = (1 - alpha) * self._source_stats['var'] + alpha * forward_var
-                scale = self.weight * (running_var + self.eps).rsqrt()
-                bias = self.bias - running_mean * scale
-
-                # do scale and bias
-                scale = scale.reshape(1, -1, 1, 1)
-                bias = bias.reshape(1, -1, 1, 1)
-                out_dtype = x.dtype
-                return x * scale.to(out_dtype) + bias.to(out_dtype)
             case SupportedNormType.LN:
                 # calculate stats -> this will be optimized to N(0,1)
                 # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, H, W)
@@ -385,6 +363,9 @@ class CascadedNormEngine(AdaptationEngine):
         for name, module in self.base_model.named_modules():
             # Check if module is a norm layer and matches the pattern (if specified)
             if self._is_norm_layer(module) and (cascade_target_re is None or cascade_target_re.search(name)):
+                # Check if already wrapped (to prevent double wrapping if called multiple times)
+                if isinstance(module, CascadeAnchor):
+                    continue
                 anchor = CascadeAnchor(self.config, module, self.loss_function)
                 applied_list.append(anchor)
                 applied_key_list.append(name)
