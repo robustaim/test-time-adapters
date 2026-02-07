@@ -87,7 +87,8 @@ class GammaTransform(nn.Module):
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
-        gamma = 0.5 + torch.sigmoid(self.gamma) * 1.5  # range [0.5, 2.0]
+        gamma = F.softplus(self.gamma) + 0.1  # range [0.1, inf)
+        gamma = torch.clamp(gamma, 0.1, 5.0)  # constrain to reasonable range [0.1, 5.0]
 
         for c in range(C):
             stretched[c] = self.stretch_channel(
@@ -109,13 +110,13 @@ class InputTransformation(nn.Module):
         self.applied_params = None
         self.itm_type = config.itm_type
 
-        self.gate_logit = nn.Parameter(torch.tensor(0.0))
+        self.gate_raw = nn.Parameter(torch.tensor(0.0))
         self.transform = CLAHETransform(config) if config.itm_type == "clahe" else GammaTransform(config)
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
         transformed, transform_params = self.transform(original)
-        gate = torch.sigmoid(self.gate_logit)
+        gate = self.gate_raw.clamp(min=0.0, max=1.0)
         self.applied_params = gate.item(), *transform_params
         return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
 
