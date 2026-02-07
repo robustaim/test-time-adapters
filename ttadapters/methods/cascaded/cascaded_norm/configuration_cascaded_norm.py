@@ -57,13 +57,13 @@ class CascadedNormConfig(AdaptationConfig):
         """Create configuration from preset."""
         from ....models import (
             FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
-            RTDETRForObjectDetection, YOLO11ForObjectDetection
+            RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.SWINT.value, **kwargs)
-        elif isinstance(base_model, RTDETRForObjectDetection):
+        elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.C3K2.value, **kwargs)
