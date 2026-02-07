@@ -138,9 +138,9 @@ class AnchorList(nn.ModuleList):
             raise TypeError("item must be CascadeAnchor")
 
         super().append(item)
-        if item.norm_type == SupportedNormType.BN:
+        if item.anchor_type == SupportedNormType.BN:
             self.bn_count += 1
-        elif item.norm_type == SupportedNormType.LN:
+        elif item.anchor_type == SupportedNormType.LN:
             self.ln_count += 1
 
     def __repr__(self) -> str:
