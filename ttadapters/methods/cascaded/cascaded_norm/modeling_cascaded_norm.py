@@ -97,6 +97,11 @@ class GammaTransform(nn.Module):
 
         return stretched, (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
 
+    def get_regularization_loss(self):
+        """Compute regularization loss relative to initialization anchors."""
+        # Pull towards Identity (gamma=1.0 -> self.gamma=0.0)
+        return self.gamma.pow(2)
+
 
 class InputTransformation(nn.Module):
     """
@@ -192,8 +197,14 @@ class CascadedNorm(nn.Module):
 
     def diff(self) -> torch.Tensor:
         align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
-        # Reg loss is handled by AdamW weight decay (pulling gamma param to 0 -> gamma=1.0)
-        return align_loss
+
+        # Add Gamma Regularization (if applicable)
+        reg_loss = torch.tensor(0.0, device=align_loss.device)
+        if hasattr(self.itm.transform, 'get_regularization_loss'):
+            reg_loss = self.itm.transform.get_regularization_loss()
+
+        # Combined Loss: Alignment + Regularization
+        return align_loss + reg_loss
 
 
 class CascadeAnchor(nn.Module):
