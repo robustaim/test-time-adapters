@@ -88,11 +88,11 @@ class GammaTransform(nn.Module):
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
 
-        # Gamma constraint using Tanh for smooth gradients
-        # Range: [0.1, 5.0]
-        # self.gamma init -0.6931 -> tanh(-0.6931) ≈ -0.6
-        # gamma ≈ 2.45 * (-0.6 + 1.0) + 0.1 = 0.98 + 0.1 = 1.08 (Near Identity)
-        gamma = 2.45 * (torch.tanh(self.gamma) + 1.0) + 0.1
+        # Gamma constraint using Sigmoid for intuitive range control [0.5, 2.0]
+        # Range: Min 0.5 + Span 1.5
+        # self.gamma init -0.6931 -> sigmoid(-0.6931) = 1/3
+        # gamma = 1.5 * (1/3) + 0.5 = 1.0 (Identity)
+        gamma = 1.5 * torch.sigmoid(self.gamma) + 0.5
 
         for c in range(C):
             stretched[c] = self.stretch_channel(
