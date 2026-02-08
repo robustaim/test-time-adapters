@@ -120,8 +120,12 @@ class InputTransformation(nn.Module):
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
         transformed, transform_params = self.transform(original)
-        gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-        self.applied_params = gate.item(), *transform_params
+        if self.itm_type == "clahe":  # learnable gating applied only for clahe
+            gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
+            self.applied_params = gate.item(), *transform_params
+        else:
+            gate = 0.5
+            self.applied_params = 0.5, *transform_params
         return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
 
 
