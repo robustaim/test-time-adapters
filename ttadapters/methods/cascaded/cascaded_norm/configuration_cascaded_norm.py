@@ -37,7 +37,7 @@ class CascadedNormConfig(AdaptationConfig):
     """Configuration for CascadedNorm."""
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
-    optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
+    optim: Literal["SGD", "Adam", "AdamW"] = "AdamW"
 
     # Engine configuration
     itm_type: Literal["clahe", "gamma"] = "gamma"
@@ -49,6 +49,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     # Gamma parameters
     gamma_temperature: float = 0.01
+    gamma_range: Tuple[float, float] = (0.5, 2.0)  # *2 to /2
     gamma_noise_floor: float = 2.0
     gamma_saturation_limit: float = 98.0
 

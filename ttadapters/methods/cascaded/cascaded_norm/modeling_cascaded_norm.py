@@ -50,9 +50,8 @@ class GammaTransform(nn.Module):
         self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
         self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
 
-        # sigmoid(x) = (1.0 - 0.5) / 1.5 = 1/3
-        # x = logit(1/3) = log( (1/3) / (2/3) ) = log(0.5)
-        self.gamma = nn.Parameter(torch.tensor(-0.6931))  # init for identity transform
+        self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
+        self.gamma_range = tuple(config.gamma_range)
 
     def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """Differentiable percentile approximation."""
@@ -88,11 +87,8 @@ class GammaTransform(nn.Module):
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
 
-        # Gamma constraint using Sigmoid for intuitive range control [0.5, 2.0]
-        # Range: Min 0.5 + Span 1.5
-        # self.gamma init -0.6931 -> sigmoid(-0.6931) = 1/3
-        # gamma = 1.5 * (1/3) + 0.5 = 1.0 (Identity)
-        gamma = 1.5 * torch.sigmoid(self.gamma) + 0.5
+        # self.gamma init 0.0 -> gamma = 1.0 (Identity)
+        gamma = (self.gamma + 1.0).clamp(*self.gamma_range)
 
         for c in range(C):
             stretched[c] = self.stretch_channel(
@@ -196,8 +192,8 @@ class CascadedNorm(nn.Module):
 
     def diff(self) -> torch.Tensor:
         align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
-        reg_loss = (self.itm.gate_raw - 0.0).pow(2).mean()
-        return align_loss + 0.1 * reg_loss
+        # Reg loss is handled by AdamW weight decay (pulling gamma param to 0 -> gamma=1.0)
+        return align_loss
 
 
 class CascadeAnchor(nn.Module):
