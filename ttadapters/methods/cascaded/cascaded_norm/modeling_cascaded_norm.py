@@ -22,15 +22,14 @@ class CLAHETransform(nn.Module):
         self.config = config
         self.clip_limit = config.clahe_clip_limit
         self.tile_size = config.clahe_tile_size
+        self.clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(self.tile_size, self.tile_size))
 
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, int]]:
         image_np = image.permute(1, 2, 0).cpu().numpy()  # (H, W, C), RGB
         image_np = image_np.astype(np.uint8)
 
         image_ycrcb = cv2.cvtColor(image_np, cv2.COLOR_RGB2YCrCb)
-
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(self.tile_size, self.tile_size))
-        image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
+        image_ycrcb[:, :, 0] = self.clahe.apply(image_ycrcb[:, :, 0])
 
         image_rgb = cv2.cvtColor(image_ycrcb, cv2.COLOR_YCrCb2RGB)
         image_rgb = image_rgb.astype(np.float32)
@@ -115,7 +114,7 @@ class InputTransformation(nn.Module):
         self.applied_params = None
         self.itm_type = config.itm_type
 
-        self.gate_raw = nn.Parameter(torch.tensor(0.0))
+        self.gate_raw = nn.Parameter(torch.tensor(0.0)) if config.itm_type == "clahe" else None
         self.transform = CLAHETransform(config) if config.itm_type == "clahe" else GammaTransform(config)
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
@@ -128,6 +127,26 @@ class InputTransformation(nn.Module):
             gate = 0.5
             self.applied_params = 0.5, *transform_params
         return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
+
+    def get_regularization_loss(self) -> torch.Tensor | None:
+        transform_reg_loss = None
+        gate_reg_loss = None
+
+        # Add Regularization (if applicable)
+        if hasattr(self.transform, 'get_regularization_loss'):
+            transform_reg_loss = self.transform.get_regularization_loss()
+
+        # Add Gate Regularization (if applicable)
+        if self.gate_raw is not None:
+            gate_reg_loss = self.gate_raw.pow(2)
+
+        if transform_reg_loss is not None:
+            if gate_reg_loss is not None:
+                return transform_reg_loss + gate_reg_loss
+            else:
+                return transform_reg_loss
+        else:
+            return gate_reg_loss
 
 
 class SupportedNormType(Enum):
@@ -197,14 +216,10 @@ class CascadedNorm(nn.Module):
 
     def diff(self) -> torch.Tensor:
         align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
-
-        # Add Gamma Regularization (if applicable)
-        reg_loss = torch.tensor(0.0, device=align_loss.device)
-        if hasattr(self.itm.transform, 'get_regularization_loss'):
-            reg_loss = self.itm.transform.get_regularization_loss()
+        reg_loss = self.itm.get_regularization_loss()
 
         # Combined Loss: Alignment + Regularization
-        return align_loss + reg_loss
+        return (align_loss + reg_loss) if reg_loss is not None else align_loss
 
 
 class CascadeAnchor(nn.Module):
