@@ -230,7 +230,6 @@ class CascadeAnchor(nn.Module):
 
         self.weight = original_norm.weight
         self.bias = original_norm.bias
-        self.eps = original_norm.eps
 
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
