@@ -47,6 +47,25 @@ class TargetKeyPreset(Enum):
         r"layers\.[01]\.blocks\.*\.norm2$"  # SwinTransformerBlock
     ]
     SWINT_S4 = SWINT_S3 = SWINT  # Only 2 LNs in Swin, so S4=S3=ALL
+    C3K2 = [  # YOLO11 Early stages only (layers 2, 4)
+        r"\.model\.[24]\..*\.bn$",  # C3k2 block
+    ]
+    C3K2_S1 = [
+        r"\.model\.[24]\.cv1\.bn$",  # C3k2 block
+        r"\.model\.[24]\.m\.0\.cv1\.bn$",  # C3k block
+    ]
+    C3K2_S2 = [
+        r"\.model\.[24]\.cv2\.bn$",  # C3k2 block
+        r"\.model\.[24]\.m\.0\.cv3\.bn$",  # C3k block
+    ]
+    C3K2_S3 = [
+        r"\.model\.[24]\.cv1\.bn$",  # C3k2 block
+        r"\.model\.[24]\.m\.0\.cv[12]\.bn$",  # C3k block
+    ]
+    C3K2_S4 = [
+        r"\.model\.[24]\.cv2\.bn$",  # C3k2 block
+        r"\.model\.[24]\.m\.0\.cv[23]\.bn$",  # C3k block
+    ]
 
 
 @dataclass
