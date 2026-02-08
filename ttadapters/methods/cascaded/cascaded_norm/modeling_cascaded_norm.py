@@ -495,17 +495,22 @@ class CascadedNormEngine(AdaptationEngine):
                         img_transformed = self.dist_norm(img)
                         x['image'] = img_transformed / 255.0 if original_scale else img_transformed
                 case ModelProvider.HuggingFace | ModelProvider.Ultralytics:
-                    input_dict = kwargs if kwargs else args[0]  # HuggingFace (RT-DETR) uses "pixel_values", Ultralytics (YOLO) uses "img"
+                    if kwargs:  # HuggingFace (RT-DETR) uses "pixel_values"
+                        input_dict = kwargs
 
-                    # Determine which key to use
-                    if 'pixel_values' in input_dict:
-                        img_key = 'pixel_values'
-                    elif 'img' in input_dict:
-                        img_key = 'img'
-                    else:
-                        raise ValueError(f"No image key found in input_dict: {input_dict}")
+                        # Determine which key to use
+                        if 'pixel_values' in input_dict:
+                            img_key = 'pixel_values'
+                        elif 'img' in input_dict:
+                            img_key = 'img'
+                        else:
+                            raise ValueError(f"No image key found in input_dict: {input_dict}")
 
-                    img = input_dict[img_key].to(self.device)
+                        img = input_dict[img_key].to(self.device)
+                    else:  # Ultralytics models basically use args[0] as input tensor
+                        img = args[0]  
+                        if isinstance(img, dict) and "img" in img:
+                            img = img['img'].to(self.device)
 
                     # recover original scale
                     original_scale = img.max() <= 1.0
@@ -519,7 +524,13 @@ class CascadedNormEngine(AdaptationEngine):
                         transformed_list.append(img_transformed)
 
                     img_batch = torch.stack(transformed_list, dim=0)
-                    input_dict[img_key] = img_batch / 255.0 if original_scale else img_batch
+                    model_input = img_batch / 255.0 if original_scale else img_batch
+
+                    # Update args
+                    if kwargs:
+                        input_dict[img_key] = model_input
+                    else:
+                        args = (model_input,) + args[1:]
                 case _:
                     raise ValueError(f"Model provider {self.model_provider} is not supported yet.")
 
