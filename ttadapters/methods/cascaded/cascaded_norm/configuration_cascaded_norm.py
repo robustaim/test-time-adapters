@@ -1,6 +1,6 @@
-from enum import Enum
-from typing import Literal, List
+from typing import Literal, List, Tuple
 from dataclasses import dataclass
+from enum import Enum
 
 from ...base import AdaptationConfig
 
