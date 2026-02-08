@@ -376,12 +376,12 @@ class CascadedNormEngine(AdaptationEngine):
         # Recursively extract norm layers and replace with CascadeAnchors
         # Compile pattern: if None, match all; otherwise match provided patterns
         cascade_target_re = None if self.config.cascade_target is None else re.compile(
-            "|".join(f"({p})" for p in self.config.cascade_target)
+            "|".join(f"({p})" for p in self.config.cascade_target), flags=re.IGNORECASE
         )
         # Compile exclusion pattern
         exclude_target_re = None
         if self.config.exclude_target:
-            exclude_target_re = re.compile("|".join(f"({p})" for p in self.config.exclude_target))
+            exclude_target_re = re.compile("|".join(f"({p})" for p in self.config.exclude_target), flags=re.IGNORECASE)
 
         applied_list = self.dist_norm.anchors
         applied_key_list = []
