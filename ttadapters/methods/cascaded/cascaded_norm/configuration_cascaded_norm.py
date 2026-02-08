@@ -94,7 +94,7 @@ class CascadedNormConfig(AdaptationConfig):
     frozen_bn_num_samples: int = 128  # same value from NORM
 
     @classmethod
-    def from_preset(cls, base_model: "nn.Module", **kwargs):
+    def from_preset(cls, base_model, **kwargs):
         """Create configuration from preset."""
         from ....models import (
             FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
