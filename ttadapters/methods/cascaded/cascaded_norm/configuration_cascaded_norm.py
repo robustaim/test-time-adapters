@@ -37,17 +37,14 @@ class TargetKeyPreset(Enum):
         r"\.res[23].*\.conv[23]\.norm$",  # BottleneckBlock (Detectron2)
         r"\.stages\.[01].*\.layer\.[12]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
-    SWINT = [  # SwinT: layer0 + layer1 + layer2 block 0/1
+    SWINT = [  # SwinT: layer0 + layer1
         r"\.layers\.[01]\.blocks\..*\.norm[12]$"  # SwinTransformerBlock
-        r"\.layers\.2\.blocks\.[01]\.norm[12]$"  # SwinTransformerBlock
     ]
     SWINT_S1 = [
         r"\.layers\.[01]\.blocks\..*\.norm1$"  # SwinTransformerBlock
-        r"\.layers\.2\.blocks\.[01]\.norm1$"  # SwinTransformerBlock
     ]
     SWINT_S2 = [
         r"\.layers\.[01]\.blocks\..*\.norm2$"  # SwinTransformerBlock
-        r"\.layers\.2\.blocks\.[01]\.norm2$"  # SwinTransformerBlock
     ]
     SWINT_S4 = SWINT_S3 = SWINT  # Only 2 LNs in Swin, so S4=S3=ALL
     C3K2 = [  # YOLO11 Early stages only (layers 2, 4)
