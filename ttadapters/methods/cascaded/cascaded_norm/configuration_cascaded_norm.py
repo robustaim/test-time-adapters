@@ -101,13 +101,13 @@ class CascadedNormConfig(AdaptationConfig):
             RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.RESNET_S3.value, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.SWINT.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.SWINT_S3.value, **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.RESNET_S3.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.C3K2.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.C3K2_S3.value, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
 
