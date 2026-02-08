@@ -35,7 +35,7 @@ class CLAHETransform(nn.Module):
         image_rgb = image_rgb.astype(np.float32)
         image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1)  # (C, H, W)
 
-        return image_tensor, (self.clip_limit, self.tile_size)
+        return image_tensor.to(image.device, dtype=image.dtype), (self.clip_limit, self.tile_size)
 
 
 class GammaTransform(nn.Module):
@@ -138,7 +138,7 @@ class InputTransformation(nn.Module):
             gate = 0.5
             self.applied_params = 0.5, *transform_params
 
-        return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
+        return gate * transformed + (1 - gate) * original
 
     def get_regularization_loss(self) -> torch.Tensor | None:
         transform_reg_loss = None
