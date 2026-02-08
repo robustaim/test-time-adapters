@@ -378,18 +378,31 @@ class CascadedNormEngine(AdaptationEngine):
         cascade_target_re = None if self.config.cascade_target is None else re.compile(
             "|".join(f"({p})" for p in self.config.cascade_target)
         )
+        # Compile exclusion pattern
+        exclude_target_re = None
+        if self.config.exclude_target:
+            exclude_target_re = re.compile("|".join(f"({p})" for p in self.config.exclude_target))
+
         applied_list = self.dist_norm.anchors
         applied_key_list = []
         for name, module in self.base_model.named_modules():
-            # Check if module is a norm layer and matches the pattern (if specified)
-            if self._is_norm_layer(module) and (cascade_target_re is None or cascade_target_re.search(name)):
-                # Check if already wrapped (to prevent double wrapping if called multiple times)
-                if isinstance(module, CascadeAnchor):
+            # Check if module is a norm layer
+            if self._is_norm_layer(module):
+                # 1. Safety Check: Skip if matches exclude_target
+                if exclude_target_re and exclude_target_re.search(name):
                     continue
-                anchor = CascadeAnchor(self.config, module, self.loss_function)
-                applied_list.append(anchor)
-                applied_key_list.append(name)
-                self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
+
+                # 2. Target Check:
+                # If cascade_target is None -> Target All (Default)
+                # If cascade_target is Set -> Target Only Matches
+                if cascade_target_re is None or cascade_target_re.search(name):
+                    # Check if already wrapped (to prevent double wrapping if called multiple times)
+                    if isinstance(module, CascadeAnchor):
+                        continue
+                    anchor = CascadeAnchor(self.config, module, self.loss_function)
+                    applied_list.append(anchor)
+                    applied_key_list.append(name)
+                    self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
 
         if self.config.verbose:
             target_str = str(self.config.cascade_target) if self.config.cascade_target else "All (Default)"

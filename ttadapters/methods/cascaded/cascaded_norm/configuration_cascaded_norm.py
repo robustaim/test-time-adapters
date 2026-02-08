@@ -1,5 +1,5 @@
 from typing import Literal, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from ...base import AdaptationConfig
@@ -8,7 +8,7 @@ from ...base import AdaptationConfig
 class TargetKeyPreset(Enum):
     """
     Preset patterns for cascade_target to match the LAST normalization layer in residual blocks.
-    
+
     Flow Adaptation Principle:
     - First BN/LN in block: applies source-aligned transformation
     - Last BN/LN in block: target for N(0,1) alignment (soft bypassing)
@@ -42,6 +42,7 @@ class CascadedNormConfig(AdaptationConfig):
     # Engine configuration
     itm_type: Literal["clahe", "gamma"] = "gamma"
     cascade_target: List[str] = None
+    exclude_target: List[str] = field(default_factory=lambda: ["stem", "conv1.norm", "bn1", "model.0.bn"])
 
     # CLAHE parameters
     clahe_clip_limit: float = 2.0
