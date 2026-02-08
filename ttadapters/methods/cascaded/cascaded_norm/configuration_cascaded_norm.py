@@ -7,29 +7,46 @@ from ...base import AdaptationConfig
 
 class TargetKeyPreset(Enum):
     """
-    Preset patterns for cascade_target to match the LAST normalization layer in residual blocks.
+    Preset patterns for cascade_target.
+    Strategies (S1~S5) are applied to the **EARLY 5 Blocks (4~6)** of the backbone to fast optimization.
 
-    Flow Adaptation Principle:
-    - First BN/LN in block: applies source-aligned transformation
-    - Last BN/LN in block: target for N(0,1) alignment (soft bypassing)
-    - Anchors are inserted at the LAST norm layer of each block
+    Principles:
+    - STRATEGY 0 (All): Adapt all intra-block normalizations.
+    - STRATEGY 1 (First): Adapt only the first BN/LN (Source Anchor).
+    - STRATEGY 2 (Last): Adapt only the last BN/LN (Target Anchor).
+    - STRATEGY 3 (Proximal): Adapt First and Immediate Next.
+    - STRATEGY 4 (Distal): Adapt Last and Immediate Prev.
     """
-    SWINT = [
-        r"\.norm2$",  # Last LayerNorm in SwinTransformerBlock (after MLP)
+    RESNET = [  # ResNet: res2 + res3 / stages 0 + 1
+        r"\.res[23].*\.conv[123]\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.stages\.[01].*\.layer\.[012]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
-    RESNET = [
-        r"\.conv3\.norm$",  # Last BN in BottleneckBlock (Detectron2)
-        r"\.layer\.2\.normalization$",  # Last BN in RTDetrResNetBottleNeckLayer (RT-DETR)
+    RESNET_S1 = [
+        r"\.res[23].*\.conv1\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.stages\.[01].*\.layer\.0\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
-    C3K2 = [  # YOLO11
-        # Single level granularity - block level only (simpler and less anchors)
-        r"C3k2.*\.cv2\.bn$",  # Last BN of C3k2 block itself
+    RESNET_S2 = [
+        r"\.res[23].*\.conv3\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.stages\.[01].*\.layer\.2\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
-    C3K2_BTL = [  # YOLO11
-        # Dual level granularities
-        r"Bottleneck.*\.cv2\.bn$",  # Last BN in each Bottleneck within C3k2->C3k->m
-        r"C3k2.*\.cv2\.bn$",  # Last BN of C3k2 block itself
+    RESNET_S3 = [
+        r"\.res[23].*\.conv[12]\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.stages\.[01].*\.layer\.[01]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
+    RESNET_S4 = [
+        r"\.res[23].*\.conv[23]\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.stages\.[01].*\.layer\.[12]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
+    ]
+    SWINT = [  # SwinT: layer0 + layer1
+        r"layers\.[01]\.blocks\.*\.norm[12]$"  # SwinTransformerBlock
+    ]
+    SWINT_S1 = [
+        r"layers\.[01]\.blocks\.*\.norm1$"  # SwinTransformerBlock
+    ]
+    SWINT_S2 = [
+        r"layers\.[01]\.blocks\.*\.norm2$"  # SwinTransformerBlock
+    ]
+    SWINT_S4 = SWINT_S3 = SWINT  # Only 2 LNs in Swin, so S4=S3=ALL
 
 
 @dataclass
@@ -37,12 +54,12 @@ class CascadedNormConfig(AdaptationConfig):
     """Configuration for CascadedNorm."""
     adaptation_name: str = "CascadedNormEngine"
     adapt_lr: float = 1e-3
-    optim: Literal["SGD", "Adam", "AdamW"] = "AdamW"
+    optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     # Engine configuration
     itm_type: Literal["clahe", "gamma"] = "gamma"
     cascade_target: List[str] = None
-    exclude_target: List[str] = field(default_factory=lambda: ["stem", "conv1.norm", "bn1", "model.0.bn"])
+    exclude_target: List[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
 
     # CLAHE parameters
     clahe_clip_limit: float = 2.0
