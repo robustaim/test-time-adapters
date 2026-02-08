@@ -147,8 +147,8 @@ class InputTransformation(nn.Module):
         # Add Regularization (if applicable)
         if hasattr(self.transform, 'get_regularization_loss'):
             transform_reg_loss = self.transform.get_regularization_loss()
-        if self.itm_type == "clahe-gamma":
-            transform_reg_loss += self.transform[1].get_regularization_loss()
+        elif self.itm_type == "clahe-gamma":
+            transform_reg_loss = self.transform[1].get_regularization_loss()
 
         # Add Gate Regularization (if applicable)
         if self.gate_raw is not None:
