@@ -76,7 +76,7 @@ class CascadedNormConfig(AdaptationConfig):
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     # Engine configuration
-    itm_type: Literal["clahe", "gamma"] = "gamma"
+    itm_type: Literal["clahe", "gamma", "clahe-gamma"] = "gamma"
     cascade_target: List[str] = None
     exclude_target: List[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
 

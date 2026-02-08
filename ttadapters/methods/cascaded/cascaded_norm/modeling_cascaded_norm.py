@@ -115,17 +115,29 @@ class InputTransformation(nn.Module):
         self.itm_type = config.itm_type
 
         self.gate_raw = nn.Parameter(torch.tensor(0.0)) if config.itm_type == "clahe" else None
-        self.transform = CLAHETransform(config) if config.itm_type == "clahe" else GammaTransform(config)
+        if config.itm_type == "clahe":
+            self.transform = CLAHETransform(config)
+        elif config.itm_type == "gamma":
+            self.transform = GammaTransform(config)
+        elif config.itm_type == "clahe-gamma":
+            self.transform = nn.ModuleList([CLAHETransform(config), GammaTransform(config)])
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
-        transformed, transform_params = self.transform(original)
+        if self.itm_type == "clahe-gamma":
+            transformed, clahe_params = self.transform[0](original)
+            transformed, gamma_params = self.transform[1](transformed)
+            transform_params = clahe_params + gamma_params
+        else:
+            transformed, transform_params = self.transform(original)
+
         if self.itm_type == "clahe":  # learnable gating applied only for clahe
             gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
             self.applied_params = gate.item(), *transform_params
         else:
             gate = 0.5
             self.applied_params = 0.5, *transform_params
+
         return gate * transformed.to(original.device, dtype=original.dtype) + (1 - gate) * original
 
     def get_regularization_loss(self) -> torch.Tensor | None:
@@ -559,6 +571,16 @@ class CascadedNormEngine(AdaptationEngine):
             gate, clip_limit, tile_size = self.dist_norm.itm.applied_params
             transform_params = {
                 'gate': gate,
+                'clip_limit': clip_limit,
+                'tile_size': tile_size
+            }
+        elif self.config.itm_type == "clahe-gamma":
+            gate, clip_limit, tile_size, clip_low, clip_high, gamma = self.dist_norm.itm.applied_params
+            transform_params = {
+                'gate': gate,
+                'gamma': gamma,
+                'clip_low': clip_low,
+                'clip_high': clip_high,
                 'clip_limit': clip_limit,
                 'tile_size': tile_size
             }
