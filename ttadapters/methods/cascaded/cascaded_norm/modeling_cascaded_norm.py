@@ -10,7 +10,8 @@ from torch import nn
 import torch.nn.functional as F
 
 from ...base import AdaptationEngine
-from ....models.base import BaseModel, ModelProvider
+from ....models.base import BaseModel, ModelProvider, DataPreparation
+
 from .configuration_cascaded_norm import CascadedNormConfig
 
 
@@ -695,11 +696,13 @@ class CascadedNormEngine(AdaptationEngine):
         else:
             return None
 
-    def fit(self, source_loader, max_samples=2000):
+    def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
         if not self.config.use_feature_alignment:
             return  # do nothing if feature alignment is not used
 
         from tqdm.auto import tqdm
+        from torch.utils.data import DataLoader
+        from ....utils.validator import DetectionEvaluator
 
         print(f"[CascadedNormEngine] Starting Calibration ({max_samples} samples)...")
 
@@ -710,14 +713,21 @@ class CascadedNormEngine(AdaptationEngine):
             anchor.norm.eval()
             anchor.num_samples.fill_(0)
 
-        pbar = tqdm(source_loader, desc="Calibrating", unit="batch")
-        with torch.no_grad():
-            for batch in pbar:
-                self.base_model(batch)
+        loader = DataLoader(source_dataset, batch_size=batch_size, collate_fn=source_dataset.collate_fn, **kwargs)
+
+        def limit_samples():
+            for batch in loader:
+                yield batch
                 count = self.dist_norm.anchors[0].num_samples
-                pbar.set_postfix({'samples': count, 'target': max_samples})
                 if count >= max_samples:
                     break
+
+        DetectionEvaluator.evaluate_with_reset(
+            self.base_model, desc="Feature Calibration", classes=source_dataset.classes,
+            loader=limit_sample(), loader_length=max_samples//batch_size,
+            data_preparation=source_dataset, reset=False,
+            dtype=dtype, device=self.device
+        )
 
         pbar.close()
         self.eval()
