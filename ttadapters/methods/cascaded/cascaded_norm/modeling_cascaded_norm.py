@@ -461,15 +461,15 @@ class CascadeAnchor(nn.Module):
         return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def _update_feature_stats(self, x: torch.Tensor):
+        n = x.shape[0]
         batch_mean = x.mean()
         batch_var = x.var(unbiased=False)
         if self.num_samples == 0:
             self.source_mean = batch_mean
             self.source_var = batch_var
-            self.num_samples = torch.tensor(1.0)
+            self.num_samples = torch.tensor(float(n))
         else:
-            n = self.num_samples
-            self.num_samples += 1
+            self.num_samples += float(n)
             self.source_mean = self.source_mean + (batch_mean - self.source_mean) / self.num_samples
             self.source_var = self.source_var + (batch_var - self.source_var) / self.num_samples
 
