@@ -724,12 +724,10 @@ class CascadedNormEngine(AdaptationEngine):
 
         DetectionEvaluator.evaluate_with_reset(
             self.base_model, desc="Feature Calibration", classes=source_dataset.classes,
-            loader=limit_sample(), loader_length=max_samples//batch_size,
+            loader=limit_samples(), loader_length=max_samples//batch_size,
             data_preparation=source_dataset, reset=False,
             dtype=dtype, device=self.device
         )
-
-        pbar.close()
         self.eval()
 
         # save the state dict of the anchors
