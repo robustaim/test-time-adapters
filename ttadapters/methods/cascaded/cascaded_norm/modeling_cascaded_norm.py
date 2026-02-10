@@ -523,13 +523,30 @@ class CascadeAnchor(nn.Module):
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
         try:
-            mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
-            var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
+            if isinstance(self.loss_fn, GaussianKLDivLoss):
+                # KL Divergence requires (mean, var) pairs
+                f_mean = self._forward_stats['mean']
+                f_var = self._forward_stats['var']
+                t_mean = self._target_stats['mean']
+                t_var = self._target_stats['var']
+
+                # Stack to form (..., 2) for GaussianKLDivLoss
+                # If scalars: (2,)
+                # If (C,): (C, 2)
+                input_dist = torch.stack([f_mean, f_var], dim=-1)
+                target_dist = torch.stack([t_mean, t_var], dim=-1)
+
+                loss = self.loss_fn(input_dist, target_dist)
+            else:
+                mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
+                var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
+                loss = mean_loss + var_loss
+
             self._forward_stats['mean'] = []  # reset for next forward pass
             self._forward_stats['var'] = []  # reset for next forward pass
         except Exception as e:
             raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.") from e
-        return mean_loss + var_loss
+        return loss
 
 
 class CascadedNormEngine(AdaptationEngine):
