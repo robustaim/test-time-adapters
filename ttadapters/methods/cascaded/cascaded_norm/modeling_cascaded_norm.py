@@ -481,6 +481,8 @@ class CascadeAnchor(nn.Module):
         self._forward_stats['mean'] = x.mean()
         self._forward_stats['var'] = x.var(unbiased=False)
 
+        return self.norm(x)
+
     def forward_norm_linearization(self, x):
         match self.anchor_type:
             case SupportedNormType.BN:
