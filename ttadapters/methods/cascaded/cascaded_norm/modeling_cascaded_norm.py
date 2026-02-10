@@ -413,6 +413,7 @@ class CascadeAnchor(nn.Module):
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
+        self.current_mask = None
 
         self.is_feature_alignment_mode = config.use_feature_alignment
         self.anchor_type: SupportedNormType = SupportedNormType.BN
@@ -459,9 +460,22 @@ class CascadeAnchor(nn.Module):
         return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def _update_feature_stats(self, x: torch.Tensor):
-        n = x.shape[0]
-        batch_mean = x.mean()
-        batch_var = x.var(unbiased=False)
+        if self.current_mask is not None:
+            # Resize mask to feature map size (B, 1, H, W)
+            mask = F.interpolate(self.current_mask, size=x.shape[2:], mode='nearest')
+            valid_mask = mask.bool().expand_as(x)
+            
+            if valid_mask.any():
+                x_valid = x[valid_mask]
+                batch_mean = x_valid.mean()
+                batch_var = x_valid.var(unbiased=False)
+                n = float(x_valid.numel())
+            else:
+                return  # No valid pixels
+        else:
+            batch_mean = x.mean()
+            batch_var = x.var(unbiased=False)
+            n = float(x.numel())
 
         if self.num_samples == 0:
             self.feature_mean.copy_(batch_mean)
@@ -486,8 +500,21 @@ class CascadeAnchor(nn.Module):
             with torch.no_grad():
                 self._update_feature_stats(x)
 
-        self._forward_stats['mean'] = x.mean()
-        self._forward_stats['var'] = x.var(unbiased=False)
+        if self.current_mask is not None:
+            # Resize mask to feature map size (B, 1, H, W)
+            mask = F.interpolate(self.current_mask, size=x.shape[2:], mode='nearest')
+            valid_mask = mask.bool().expand_as(x)
+            
+            if valid_mask.any():
+                x_valid = x[valid_mask]
+                self._forward_stats['mean'] = x_valid.mean()
+                self._forward_stats['var'] = x_valid.var(unbiased=False)
+            else:
+                self._forward_stats['mean'] = x.mean()
+                self._forward_stats['var'] = x.var(unbiased=False)
+        else:
+            self._forward_stats['mean'] = x.mean()
+            self._forward_stats['var'] = x.var(unbiased=False)
 
         return self.norm(x)
 
@@ -496,8 +523,29 @@ class CascadeAnchor(nn.Module):
             case SupportedNormType.BN:
                 # calculate stats -> this will be optimized to N(0,1)
                 dims = (0, 2, 3)
-                self._forward_stats['mean'] = x.mean(dim=dims)
-                self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                if self.current_mask is not None:
+                    # Use mask (B, 1, H, W)
+                    mask = F.interpolate(self.current_mask, size=x.shape[2:], mode='nearest')
+                    valid_mask = mask.bool().expand_as(x)
+
+                    if valid_mask.any():
+                        sum_mask = valid_mask.sum(dim=(0, 2, 3)).clamp(min=1.0)
+                        
+                        sum_x = (x * mask).sum(dim=(0, 2, 3))
+                        batch_mean = sum_x / sum_mask
+                        
+                        sum_x2 = (x * x * mask).sum(dim=(0, 2, 3))
+                        batch_var = (sum_x2 / sum_mask) - batch_mean.pow(2)
+                        
+                        self._forward_stats['mean'] = batch_mean
+                        self._forward_stats['var'] = batch_var
+                    else:
+                        self._forward_stats['mean'] = x.mean(dim=dims)
+                        self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+                else:
+                    self._forward_stats['mean'] = x.mean(dim=dims)
+                    self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
 
                 self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
                 self._target_stats['var'] = self._target_stats['var'].to(x.device)
@@ -508,6 +556,27 @@ class CascadeAnchor(nn.Module):
                 dims = tuple(range(-len(self.norm_shape), 0))
                 self._forward_stats['mean'] = x.mean(dim=dims)
                 self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                # Masking for LN: Force padding stats to match target (0, 1) to ignore loss
+                if self.current_mask is not None:
+                     # Check if spatial dims match (assuming (B, ..., H, W))
+                     # x might be (B, H, W, C) for Swin?
+                     # If (B, H, W, C), dims=(-1). Result (B, H, W).
+                     # mask is (B, 1, H, W).
+                     # Need to careful with shapes.
+                     # Simplified approach: assume result has spatial structure compatible with mask or broadcastable.
+                     try:
+                         mask = F.interpolate(self.current_mask, size=self._forward_stats['mean'].shape[-2:], mode='nearest')
+                         valid_mask = mask.bool()
+                         # Expand to match stats shape if needed (e.g. if stats has channel dim? No, stats reduced over C)
+                         # If stats is (B, H, W), mask (B, 1, H, W) broadcasts? 
+                         # Squeeze mask channel
+                         valid_mask = valid_mask.squeeze(1)
+                         
+                         self._forward_stats['mean'] = torch.where(valid_mask, self._forward_stats['mean'], torch.tensor(0.0, device=x.device))
+                         self._forward_stats['var'] = torch.where(valid_mask, self._forward_stats['var'], torch.tensor(1.0, device=x.device))
+                     except:
+                         pass # Skip masking if shapes don't align easily for LN
 
                 # Update target stats to match forward stats shape (using expand for efficiency)
                 # We use the initial scalar targets (0, 1) and expand them
@@ -723,6 +792,48 @@ class CascadedNormEngine(AdaptationEngine):
         else:
             return None
 
+    def _set_anchor_masks(self, inputs):
+        """Inject validity mask into anchors for masked statistics."""
+        if not self.config.masked_sampling:
+            for anchor in self.dist_norm.anchors:
+                anchor.current_mask = None
+            return
+
+        img = None
+        # Try to extract image from inputs
+        # For Ultralytics/RT-DETR, inputs is usually a Tensor or Dict
+        if isinstance(inputs, torch.Tensor):
+            img = inputs
+        elif isinstance(inputs, (list, tuple)) and len(inputs) > 0:
+            if isinstance(inputs[0], torch.Tensor):
+                img = inputs[0]
+            elif isinstance(inputs[0], dict):
+                 pass # Detectron2 inputs (handled differently or skipped)
+        elif isinstance(inputs, dict):
+            if 'pixel_values' in inputs:
+                img = inputs['pixel_values']
+            elif 'img' in inputs:
+                img = inputs['img']
+
+        if img is not None:
+            mask_val = self.config.mask_value
+            # Check scale
+            if img.max() <= 1.0 and mask_val > 1.0:
+                mask_val = mask_val / 255.0
+            
+            # Create mask (1 for valid, 0 for padding)
+            # Padding is roughly constant mask_val
+            eps = 1e-3
+            dist = (img - mask_val).abs()
+            is_padding = (dist < eps).all(dim=1, keepdim=True)
+            mask = (~is_padding).float()
+
+            for anchor in self.dist_norm.anchors:
+                anchor.current_mask = mask.to(self.device)
+        else:
+            for anchor in self.dist_norm.anchors:
+                anchor.current_mask = None
+
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
         if not self.config.use_feature_alignment:
             return  # do nothing if feature alignment is not used
@@ -735,6 +846,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         self.offline()  # turn off online mode so that the anchors don't update their parameters
         self.eval()  # turn on eval mode so that the base model doesn't update its parameters
+        self.adapting = False # Corrected from offline()
         for anchor in self.dist_norm.anchors:
             anchor.train()
             anchor.norm.eval()
@@ -744,6 +856,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         def limit_samples():
             for batch in loader:
+                self._set_anchor_masks(batch)
                 yield batch
                 count = self.dist_norm.anchors[0].num_samples
                 if count >= max_samples:
@@ -764,6 +877,13 @@ class CascadedNormEngine(AdaptationEngine):
     def forward(self, *args, **kwargs):
         # Zero gradients
         self.optimizer.zero_grad()
+
+        # Inject Mask
+        if self.config.masked_sampling:
+            if args:
+                self._set_anchor_masks(args[0])
+            elif kwargs:
+                self._set_anchor_masks(kwargs)
 
         # Dist norm forward
         if self.adapting:
