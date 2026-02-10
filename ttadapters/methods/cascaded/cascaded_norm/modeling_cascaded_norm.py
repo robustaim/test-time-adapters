@@ -708,8 +708,8 @@ class CascadedNormEngine(AdaptationEngine):
 
         print(f"[CascadedNormEngine] Starting Calibration ({max_samples} samples)...")
 
-        self.eval()  # turn on eval mode so that the base model doesn't update its parameters
         self.offline()  # turn off online mode so that the anchors don't update their parameters
+        self.eval()  # turn on eval mode so that the base model doesn't update its parameters
         for anchor in self.dist_norm.anchors:
             anchor.train()
             anchor.norm.eval()
