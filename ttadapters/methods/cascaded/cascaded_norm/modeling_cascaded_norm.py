@@ -692,7 +692,7 @@ class CascadedNormEngine(AdaptationEngine):
         pbar = tqdm(source_loader, desc="Calibrating", unit="batch")
         with torch.no_grad():
             for batch in pbar:
-                self.base_model(img)
+                self.base_model(batch)
                 count = self.dist_norm.anchors[0].num_samples
                 pbar.set_postfix({'samples': count, 'target': max_samples})
                 if count >= max_samples:
