@@ -353,7 +353,7 @@ class CascadedNorm(nn.Module):
         super().__init__()
         self.config = config
 
-        if self.itm_combination_method == "frequency":
+        if self.config.itm_combination_method == "frequency":
             self.itm = FrequencyAwareInputTransformation(config)
         else:
             self.itm = InputTransformation(config)  # Input Transformation Module
