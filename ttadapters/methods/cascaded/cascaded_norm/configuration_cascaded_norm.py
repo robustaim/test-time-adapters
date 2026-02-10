@@ -77,6 +77,7 @@ class CascadedNormConfig(AdaptationConfig):
 
     # Engine configuration
     itm_type: Literal["clahe", "gamma", "clahe-gamma"] = "gamma"
+    itm_combination_method: Literal["residual", "hierarchical", "frequency"] | None = None  # only used when itm_type == "clahe-gamma"
     cascade_target: List[str] = None
     exclude_target: List[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
 
@@ -90,8 +91,13 @@ class CascadedNormConfig(AdaptationConfig):
     gamma_noise_floor: float = 2.0
     gamma_saturation_limit: float = 98.0
 
+    # CLAHE-Gamma parameters
+    frequency_combination_kernel_size: int = 3
+    frequency_combination_sigma: float = 1.0
+
     # Anchor configutation
-    frozen_bn_num_samples: int = 128  # same value from NORM
+    use_kl_divergence: bool = False
+    use_feature_alignment: bool = False
 
     @classmethod
     def from_preset(cls, base_model, **kwargs):

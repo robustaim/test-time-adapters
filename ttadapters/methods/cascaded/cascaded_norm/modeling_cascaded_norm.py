@@ -14,6 +14,68 @@ from ....models.base import BaseModel, ModelProvider
 from .configuration_cascaded_norm import CascadedNormConfig
 
 
+class GaussianKLDivLoss(nn.Module):
+    """KL Divergence Loss between two Gaussian distributions.
+
+    Computes KL(P||Q) where P and Q are Gaussian distributions.
+    KL(P||Q) = log(σ_q/σ_p) + (σ_p² + (μ_p - μ_q)²)/(2σ_q²) - 1/2
+    """
+
+    def __init__(self, reduction: Literal["none", "mean", "sum"] = "mean"):
+        """
+        Args:
+            reduction: "none" | "mean" | "sum"
+        """
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute KL divergence between input and target distributions.
+
+        Args:
+            input: Input tensor (mean, var) of Q distribution
+                   Shape: (batch_size, 2) or (2,) where [..., 0] is mean, [..., 1] is var
+            target: Target tensor (mean, var) of P distribution
+                    Shape: (batch_size, 2) or (2,) where [..., 0] is mean, [..., 1] is var
+
+        Returns:
+            KL divergence loss
+        """
+        # Extract means and variances
+        if input.dim() == 1:
+            q_mean, q_var = input[0], input[1]
+            p_mean, p_var = target[0], target[1]
+            batch_size = 1
+        else:
+            q_mean, q_var = input[:, 0], input[:, 1]
+            p_mean, p_var = target[:, 0], target[:, 1]
+            batch_size = input.size(0)
+
+        # Add epsilon for numerical stability
+        q_var = q_var + 1e-6
+        p_var = p_var + 1e-6
+
+        sigma_p = torch.sqrt(p_var)
+        sigma_q = torch.sqrt(q_var)
+
+        # Compute KL divergence: KL(P||Q)
+        term1 = torch.log(sigma_q / sigma_p)
+        term2 = (p_var + (p_mean - q_mean)**2) / (2 * q_var)
+
+        kl_div = term1 + term2 - 0.5
+
+        # Apply reduction
+        if self.reduction == "none":
+            return kl_div
+        elif self.reduction == "mean":
+            return kl_div.mean()
+        elif self.reduction == "sum":
+            return kl_div.sum()
+        else:
+            raise ValueError(f"Invalid reduction mode: {self.reduction}")
+
+
 class CLAHETransform(nn.Module):
     """CLAHE Transform Module. (Not differentiable)"""
 
@@ -113,8 +175,9 @@ class InputTransformation(nn.Module):
         self.config = config
         self.applied_params = None
         self.itm_type = config.itm_type
+        self.itm_combination_method = config.itm_combination_method
 
-        self.gate_raw = nn.Parameter(torch.tensor(0.0)) if config.itm_type == "clahe" else None
+        self.gate_raw = nn.Parameter(torch.tensor(0.0)) if config.itm_type != "gamma" else None
         if config.itm_type == "clahe":
             self.transform = CLAHETransform(config)
         elif config.itm_type == "gamma":
@@ -125,20 +188,32 @@ class InputTransformation(nn.Module):
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
         if self.itm_type == "clahe-gamma":
-            transformed, clahe_params = self.transform[0](original)
-            transformed, gamma_params = self.transform[1](transformed)
-            transform_params = clahe_params + gamma_params
+            transformed, transform_params = self.transform[0](original)
         else:
             transformed, transform_params = self.transform(original)
 
-        if self.itm_type == "clahe":  # learnable gating applied only for clahe
-            gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-            self.applied_params = gate.item(), *transform_params
+        global_gate = 0.5
+        if self.itm_type == "gamma":  # gamma transform is already acts as a gate it self (no need to use another gate)
+            self.applied_params = global_gate, *transform_params
         else:
-            gate = 0.5
-            self.applied_params = 0.5, *transform_params
+            if self.itm_combination_method == "hierarchical":
+                clahe_gate = local_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
 
-        return gate * transformed + (1 - gate) * original
+                transformed = clahe_gate * transformed + (1 - clahe_gate) * original
+                transformed, later_params = self.transform[1](transformed)
+                transform_params += later_params
+            elif self.itm_combination_method == "residual":
+                residual_gate = local_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
+                residual_base, residual_params = self.transform[1](transformed)
+
+                transformed = transformed + residual_gate * (residual_base - transformed)
+                transform_params += residual_params
+            else:  # learnable gating applied only for clahe
+                global_gate = local_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
+
+            self.applied_params = local_gate, *transform_params
+
+        return global_gate * transformed + (1 - global_gate) * original
 
     def get_regularization_loss(self) -> torch.Tensor | None:
         transform_reg_loss = None
@@ -161,6 +236,66 @@ class InputTransformation(nn.Module):
                 return transform_reg_loss
         else:
             return gate_reg_loss
+
+
+class FrequencyAwareInputTransformation(InputTransformation):
+    """
+    Input Transformation Module which applies frequency-aware transformation.
+    CLAHE for high frequency, Gamma for low frequency
+    """
+
+    def __init__(self, config: CascadedNormConfig):
+        super().__init__(config)
+
+        # Kernel parameters
+        self.kernel_size = config.frequency_combination_kernel_size
+        self.sigma = config.frequency_combination_sigma
+
+        # Pre-compute and register Gaussian kernel
+        kernel = self._create_gaussian_kernel()
+        self.register_buffer("blur_kernel", kernel)
+
+    def _create_gaussian_kernel(self):
+        """Create Gaussian kernel (called once during init)"""
+        x = torch.arange(self.kernel_size, dtype=torch.float32)
+        x = x - (self.kernel_size - 1) / 2
+
+        gauss = torch.exp(-x.pow(2) / (2 * self.sigma ** 2))
+        kernel_1d = gauss / gauss.sum()
+
+        kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
+        return kernel_2d.view(1, 1, self.kernel_size, self.kernel_size)
+
+    def gaussian_blur(self, x):
+        """Apply cached Gaussian blur to input tensor"""
+        c = x.shape[0]
+
+        # Expand cached kernel for all channels
+        kernel = self.blur_kernel.repeat(c, 1, 1, 1)
+        blurred = F.conv2d(x.unsqueeze(0), kernel, padding=self.kernel_size // 2, groups=c).squeeze(0)
+
+        return blurred
+
+    def forward(self, original: torch.Tensor) -> torch.Tensor:
+        """Apply frequency-aware transformation"""
+        high_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
+        low_gate = 0.5
+
+        # Frequency decomposition (using cached kernel)
+        low_freq = self.gaussian_blur(original)  # low pass filter
+        high_freq = original - low_freq
+
+        # Transform each component
+        clahe_high, high_params = self.transform[0](high_freq)  # CLAHE is high-frequency only (local detail)
+        gamma_low, low_params = self.transform[1](low_freq)  # Gamma is low-frequency only (global tone)
+
+        # Recombine with gating
+        processed_high = high_gate * clahe_high + (1-high_gate) * high_freq
+        processed_low = low_gate * gamma_low + (1-low_gate) * low_freq
+
+        self.applied_params = high_gate.item(), *high_params, *low_params
+
+        return processed_high + processed_low
 
 
 class SupportedNormType(Enum):
@@ -200,7 +335,7 @@ class AnchorList(nn.ModuleList):
 class CascadedNorm(nn.Module):
     """
     CascadedNorm: Cascaded Input Distribution Normalization
-        with Source Flow Adaptation loss via Norm Linearization
+        with Source (Feature) Flow Adaptation loss via Norm Linearization
 
     Learns to normalize input pixel distribution through adaptive
     transformation with cascaded layer-wise supervision.
@@ -218,7 +353,10 @@ class CascadedNorm(nn.Module):
         super().__init__()
         self.config = config
 
-        self.itm = InputTransformation(config)  # Input Transformation Module
+        if self.itm_combination_method == "frequency":
+            self.itm = FrequencyAwareInputTransformation(config)
+        else:
+            self.itm = InputTransformation(config)  # Input Transformation Module
         self.anchors = AnchorList()
 
     def online_parameters(self):
@@ -357,6 +495,9 @@ class CascadedNormEngine(AdaptationEngine):
         self.dist_norm_state: dict
         self.config = config
 
+        if self.config.use_kl_divergence:
+            self.loss_class = GaussianKLDivLoss
+
         super().__init__(base_model, config)
 
     def _pre_init(self):
@@ -487,6 +628,36 @@ class CascadedNormEngine(AdaptationEngine):
             return current_stats
         else:
             return None
+
+    def fit(self, source_loader, max_samples=2000):
+        if not self.config.use_feature_alignment:
+            return  # do nothing if feature alignment is not used
+
+        from tqdm.auto import tqdm
+
+        print(f"[CascadedNormEngine] Starting Calibration ({max_samples} samples)...")
+
+        self.eval()  # turn on eval mode so that the base model doesn't update its parameters
+        self.offline()  # turn off online mode so that the anchors don't update their parameters
+        for anchor in self.dist_norm.anchors:
+            anchor.train()
+            anchor.count.fill_(0)
+
+        pbar = tqdm(source_loader, desc="Calibrating", unit="batch")
+        with torch.no_grad():
+            for batch in pbar:
+                self.base_model(img)
+                pbar.set_postfix({'samples': count, 'target': max_samples})
+                if count >= max_samples:
+                    break
+
+        pbar.close()
+        for anchor in self.dist_norm.anchors:
+            anchor.eval()
+
+        # save the state dict of the anchors
+        self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
+        print(f"[CascadedNormEngine] Calibration Complete. {len(self.dist_norm.anchors)} anchors.")
 
     def forward(self, *args, **kwargs):
         # Zero gradients
