@@ -211,7 +211,7 @@ class InputTransformation(nn.Module):
             else:  # learnable gating applied only for clahe
                 global_gate = local_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
 
-            self.applied_params = local_gate, *transform_params
+            self.applied_params = local_gate.item(), *transform_params
 
         return global_gate * transformed + (1 - global_gate) * original
 
@@ -381,6 +381,11 @@ class CascadeAnchor(nn.Module):
     Supported normalization layers:
     - nn.BatchNorm2d / FrozenBatchNorm2d
     - nn.LayerNorm
+
+    Optional operations:
+    * Feature below is only applied when specified in the config
+    - Feature Alignment: Align the feature distribution between source and target domains
+    - KL Divergence: KL divergence between source and target domains
     """
 
     def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module):
@@ -388,7 +393,10 @@ class CascadeAnchor(nn.Module):
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
+
+        self.is_feature_alignment_mode = config.use_feature_alignment
         self.anchor_type: SupportedNormType = SupportedNormType.BN
+
         self.norm_shape: Tuple[int, ...] = tuple()
         self.target_shape: Tuple[int, ...] = tuple()
 
@@ -398,7 +406,12 @@ class CascadeAnchor(nn.Module):
         self.weight = original_norm.weight
         self.bias = original_norm.bias
 
-        if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
+        self.register_buffer("num_samples", torch.tensor(0.0))
+        if self.is_feature_alignment_mode:
+            self.register_buffer("feature_mean", torch.tensor(0.0))
+            self.register_buffer("feature_var", torch.tensor(1.0))
+            self._forward_stats = dict(mean=self.feature_mean, var=self.feature_var)
+        elif isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
             self.norm_shape = original_norm.running_mean.shape  # (C,)
             self.target_shape = self.norm_shape
@@ -425,14 +438,37 @@ class CascadeAnchor(nn.Module):
         module_name = self.__class__.__name__
         return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
-    def forward(self, x):
-        # Norm Linearization
+    def _update_feature_stats(self, x: torch.Tensor):
+        batch_mean = x.mean()
+        batch_var = x.var(unbiased=False)
+        if self.num_samples == 0:
+            self.source_mean = batch_mean
+            self.source_var = batch_var
+            self.num_samples = torch.tensor(1.0)
+        else:
+            n = self.num_samples
+            self.num_samples += 1
+            self.source_mean = self.source_mean + (batch_mean - self.source_mean) / self.num_samples
+            self.source_var = self.source_var + (batch_var - self.source_var) / self.num_samples
+
+    def forward_feature_alignment(self, x):
+        if self.training:
+            with torch.no_grad():
+                self._update_feature_stats(x)
+
+        self._forward_stats['mean'] = x.mean()
+        self._forward_stats['var'] = x.var(unbiased=False)
+
+    def forward_norm_linearization(self, x):
         match self.anchor_type:
             case SupportedNormType.BN:
                 # calculate stats -> this will be optimized to N(0,1)
                 dims = (0, 2, 3)
                 self._forward_stats['mean'] = x.mean(dim=dims)
                 self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
+                self._target_stats['var'] = self._target_stats['var'].to(x.device)
             case SupportedNormType.LN:
                 # calculate stats -> this will be optimized to N(0,1)
                 # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, H, W)
@@ -450,6 +486,15 @@ class CascadeAnchor(nn.Module):
 
         # Scale and Bias
         return self.norm(x)
+
+    def forward(self, x):
+        if self.is_feature_alignment_mode:
+            # Source Feature Alignment
+            x = self.forward_feature_alignment(x)
+        else:
+            # Norm Linearization
+            x = self.forward_norm_linearization(x)
+        return x
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
@@ -641,19 +686,20 @@ class CascadedNormEngine(AdaptationEngine):
         self.offline()  # turn off online mode so that the anchors don't update their parameters
         for anchor in self.dist_norm.anchors:
             anchor.train()
-            anchor.count.fill_(0)
+            anchor.norm.eval()
+            anchor.num_samples.fill_(0)
 
         pbar = tqdm(source_loader, desc="Calibrating", unit="batch")
         with torch.no_grad():
             for batch in pbar:
                 self.base_model(img)
+                count = self.dist_norm.anchors[0].num_samples
                 pbar.set_postfix({'samples': count, 'target': max_samples})
                 if count >= max_samples:
                     break
 
         pbar.close()
-        for anchor in self.dist_norm.anchors:
-            anchor.eval()
+        self.eval()
 
         # save the state dict of the anchors
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
