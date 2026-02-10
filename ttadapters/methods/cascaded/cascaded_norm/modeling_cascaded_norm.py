@@ -276,6 +276,24 @@ class FrequencyAwareInputTransformation(InputTransformation):
 
         return blurred
 
+    def normalize_high_freq(self, high_freq):
+        """Normalize high-freq to [0, 255] for CLAHE"""
+        h_min = high_freq.min()
+        h_max = high_freq.max()
+
+        # [min, max] → [0, 255]
+        normalized = (high_freq - h_min) / (h_max - h_min + 1e-6) * 255.0
+        return normalized
+
+    def denormalize_high_freq(self, clahe_output, original_high):
+        """Convert CLAHE output back to high-freq scale"""
+        h_min = original_high.min()
+        h_max = original_high.max()
+
+        # [0, 255] → [min, max]
+        denormalized = clahe_output / 255.0 * (h_max - h_min + 1e-6) + h_min
+        return denormalized
+
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Apply frequency-aware transformation"""
         high_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
@@ -286,7 +304,9 @@ class FrequencyAwareInputTransformation(InputTransformation):
         high_freq = original - low_freq
 
         # Transform each component
-        clahe_high, high_params = self.transform[0](high_freq)  # CLAHE is high-frequency only (local detail)
+        high_normalized = self.normalize_high_freq(high_freq)
+        clahe_high, high_params = self.transform[0](high_normalized)  # CLAHE is high-frequency only (local detail)
+        high_freq = self.denormalize_high_freq(clahe_high, high_freq)
         gamma_low, low_params = self.transform[1](low_freq)  # Gamma is low-frequency only (global tone)
 
         # Recombine with gating
@@ -385,6 +405,7 @@ class CascadeAnchor(nn.Module):
     Optional operations:
     * Feature below is only applied when specified in the config
     - Feature Alignment: Align the feature distribution between source and target domains
+                        (will be used instead of norm linearization)
     - KL Divergence: KL divergence between source and target domains
     """
 
