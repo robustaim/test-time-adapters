@@ -47,11 +47,9 @@ class GaussianKLDivLoss(nn.Module):
         if input.dim() == 1:
             q_mean, q_var = input[0], input[1]
             p_mean, p_var = target[0], target[1]
-            batch_size = 1
         else:
             q_mean, q_var = input[:, 0], input[:, 1]
             p_mean, p_var = target[:, 0], target[:, 1]
-            batch_size = input.size(0)
 
         # Add epsilon for numerical stability
         q_var = q_var + 1e-6
@@ -432,7 +430,7 @@ class CascadeAnchor(nn.Module):
         if self.is_feature_alignment_mode:
             self.register_buffer("feature_mean", torch.tensor(0.0))
             self.register_buffer("feature_var", torch.tensor(1.0))
-            self._forward_stats = dict(mean=self.feature_mean, var=self.feature_var)
+            self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
         elif isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
             self.norm_shape = original_norm.running_mean.shape  # (C,)
@@ -464,14 +462,24 @@ class CascadeAnchor(nn.Module):
         n = x.shape[0]
         batch_mean = x.mean()
         batch_var = x.var(unbiased=False)
+
         if self.num_samples == 0:
-            self.source_mean = batch_mean
-            self.source_var = batch_var
-            self.num_samples = torch.tensor(float(n))
+            self.feature_mean.copy_(batch_mean)
+            self.feature_var.copy_(batch_var)
+            self.num_samples.fill_(n)
         else:
-            self.num_samples += float(n)
-            self.source_mean = self.source_mean + (batch_mean - self.source_mean) / self.num_samples
-            self.source_var = self.source_var + (batch_var - self.source_var) / self.num_samples
+            old_n = self.num_samples.item()
+            new_n = old_n + n
+
+            # Weighted average for mean
+            new_mean = (self.feature_mean * old_n + batch_mean * n) / new_n
+            self.feature_mean.copy_(new_mean)
+
+            # Weighted average for var (approx)
+            new_var = (self.feature_var * old_n + batch_var * n) / new_n
+            self.feature_var.copy_(new_var)
+
+            self.num_samples.fill_(new_n)
 
     def forward_feature_alignment(self, x):
         if self.training:
