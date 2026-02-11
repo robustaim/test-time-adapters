@@ -821,25 +821,16 @@ class CascadedNormEngine(AdaptationEngine):
             if img.max() <= 1.0 and mask_val > 1.0:
                 mask_val = mask_val / 255.0
             
-            # DEBUG: Check mask generation
-            print(f"[DEBUG] Img max: {img.max():.4f}, Mask Val: {mask_val:.4f}")
-
             # Create mask (1 for valid, 0 for padding)
             # Padding is roughly constant mask_val
-            eps = 1e-2  # Increased epsilon slightly for float nuances
+            eps = 1e-3
             dist = (img - mask_val).abs()
             is_padding = (dist < eps).all(dim=1, keepdim=True)
             mask = (~is_padding).float()
 
-            # DEBUG: Check mask ratio
-            if mask.mean() > 0.99:
-                print(f"[DEBUG] Warning: Mask is covering full image? Mean: {mask.mean():.4f}")
-
             for anchor in self.dist_norm.anchors:
                 anchor.current_mask = mask.to(self.device)
         else:
-            # DEBUG
-            print("[DEBUG] No image found in inputs for masking.")
             for anchor in self.dist_norm.anchors:
                 anchor.current_mask = None
 
