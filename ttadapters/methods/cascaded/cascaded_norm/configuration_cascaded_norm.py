@@ -100,6 +100,7 @@ class CascadedNormConfig(AdaptationConfig):
     # Anchor configutation
     use_kl_divergence: bool = False
     use_feature_alignment: bool = False
+    use_bn_running_stat: bool = False
 
     @classmethod
     def from_preset(cls, base_model, **kwargs):

@@ -437,10 +437,13 @@ class CascadeAnchor(nn.Module):
             self.target_shape = self.norm_shape
 
             # BN target: Channel-wise statistics (C,)
-            self._target_stats = dict(
-                mean=torch.zeros(self.target_shape, device=self.weight.device),
-                var=torch.ones(self.target_shape, device=self.weight.device)
-            )
+            if config.use_bn_running_stat:
+                self._target_stats = dict(mean=original_norm.running_mean, var=original_norm.running_var)
+            else:
+                self._target_stats = dict(
+                    mean=torch.zeros(self.target_shape, device=self.weight.device),
+                    var=torch.ones(self.target_shape, device=self.weight.device)
+                )
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN
             self.target_shape = ()  # Scalar target for position-wise stats
