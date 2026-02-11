@@ -515,8 +515,9 @@ class CascadeAnchor(nn.Module):
     def forward_feature_alignment(self, x):
         if self.training:
             with torch.no_grad():
-                self._source_stats['mean'].extend(x.mean(dim=1, keepdim=True).tolist())
-                self._source_stats['var'].extend(x.var(dim=1, unbiased=False, keepdim=True).tolist())
+                dim = tuple(range(1, x.ndim))
+                self._source_stats['mean'].extend(x.mean(dim=dim).tolist())
+                self._source_stats['var'].extend(x.var(dim=dim, unbiased=False).tolist())
 
         self._forward_stats['mean'] = x.mean()
         self._forward_stats['var'] = x.var(unbiased=False)
