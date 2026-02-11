@@ -462,35 +462,40 @@ class CascadeAnchor(nn.Module):
         self.weight = original_norm.weight
         self.bias = original_norm.bias
 
-        if self.is_feature_alignment_mode:
-            self.register_buffer("feature_mean", torch.tensor(0.0))
-            self.register_buffer("feature_var", torch.tensor(1.0))
-            self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
-        elif isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
+        # 1. Identify Norm Type & Shape
+        if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.BN
             self.norm_shape = original_norm.running_mean.shape  # (C,)
             self.target_shape = self.norm_shape
-
-            # BN target: Channel-wise statistics (C,)
-            if config.use_bn_running_stat:
-                self._target_stats = dict(mean=original_norm.running_mean, var=original_norm.running_var)
-            else:
-                self._target_stats = dict(
-                    mean=torch.zeros(self.target_shape, device=self.weight.device),
-                    var=torch.ones(self.target_shape, device=self.weight.device)
-                )
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN
-            self.target_shape = ()  # Scalar target for position-wise stats
             self.norm_shape = original_norm.normalized_shape
-
-            # LN target: Scalar statistics (0, 1) broadcasted to (B, H, W)
-            self._target_stats = dict(
-                mean=torch.tensor(0.0, device=self.weight.device),
-                var=torch.tensor(1.0, device=self.weight.device)
-            )
+            self.target_shape = ()  # Scalar target for position-wise stats (initially)
         else:
             raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
+
+        # 2. Initialize Stats Buffers
+        if self.is_feature_alignment_mode:
+            # Multi-dimensional buffer for BN, scalar for LN
+            self.register_buffer("feature_mean", torch.zeros(self.target_shape))
+            self.register_buffer("feature_var", torch.ones(self.target_shape))
+            self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
+        else:
+            if self.anchor_type == SupportedNormType.BN:
+                # BN target: Channel-wise statistics (C,)
+                if config.use_bn_running_stat:
+                    self._target_stats = dict(mean=original_norm.running_mean, var=original_norm.running_var)
+                else:
+                    self._target_stats = dict(
+                        mean=torch.zeros(self.target_shape, device=self.weight.device),
+                        var=torch.ones(self.target_shape, device=self.weight.device)
+                    )
+            elif self.anchor_type == SupportedNormType.LN:
+                # LN target: Scalar statistics (0, 1) broadcasted to (B, H, W)
+                self._target_stats = dict(
+                    mean=torch.tensor(0.0, device=self.weight.device),
+                    var=torch.tensor(1.0, device=self.weight.device)
+                )
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
@@ -513,17 +518,47 @@ class CascadeAnchor(nn.Module):
                     del self._source_stats
 
     def forward_feature_alignment(self, x):
+        dims = None
+        match self.anchor_type:
+            case SupportedNormType.BN:
+                # BN: (B, C, H, W) -> reduce (B, H, W) -> (C,)
+                dims = (0, 2, 3)
+            case SupportedNormType.LN:
+                # LN: (B, ..., *normalized_shape) -> reduce (*normalized_shape) -> (B, ...)
+                dims = tuple(range(-len(self.norm_shape), 0))
+            case _:
+                raise ValueError(f"Unsupported anchor type: {self.anchor_type}")
+
+        # Calculate current batch stats
+        forward_mean = x.mean(dim=dims)
+        forward_var = x.var(dim=dims, unbiased=False)
+
+        # 1. Update Forward Stats (Current Batch)
+        self._forward_stats['mean'] = forward_mean
+        self._forward_stats['var'] = forward_var
+
+        # 2. Update Source Stats (Calibration / Training)
         if self.training:
             with torch.no_grad():
-                dim = tuple(range(1, x.ndim))
-                self._source_stats['mean'].extend(x.mean(dim=dim))
-                self._source_stats['var'].extend(x.var(dim=dim, unbiased=False))
+                if self.anchor_type == SupportedNormType.BN:
+                    self._source_stats['mean'].append(forward_mean.detach().cpu())
+                    self._source_stats['var'].append(forward_var.detach().cpu())
+                else: # LN
+                    # Reduce over all remaining dimensions to get scalar
+                    self._source_stats['mean'].append(forward_mean.mean().detach().cpu())
+                    self._source_stats['var'].append(forward_var.mean().detach().cpu())
 
-        self._forward_stats['mean'] = x.mean()
-        self._forward_stats['var'] = x.var(unbiased=False)
+        # 3. Check Target Stats Shape & Expand if proper
+        target_mean = self._target_stats['mean'].to(x.device)
+        target_var = self._target_stats['var'].to(x.device)
 
-        self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
-        self._target_stats['var'] = self._target_stats['var'].to(x.device)
+        if self.anchor_type == SupportedNormType.LN:
+            # Expand scalar target to match forward_stats shape (B, ...)
+            target_mean = target_mean.expand_as(forward_mean)
+            target_var = target_var.expand_as(forward_var)
+
+        self._target_stats['mean'] = target_mean
+        self._target_stats['var'] = target_var
 
         return self.norm(x)
 
