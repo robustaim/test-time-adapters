@@ -462,7 +462,6 @@ class CascadeAnchor(nn.Module):
         self.weight = original_norm.weight
         self.bias = original_norm.bias
 
-        self.register_buffer("num_samples", torch.tensor(0.0))
         if self.is_feature_alignment_mode:
             self.register_buffer("feature_mean", torch.tensor(0.0))
             self.register_buffer("feature_var", torch.tensor(1.0))
@@ -497,33 +496,27 @@ class CascadeAnchor(nn.Module):
         module_name = self.__class__.__name__
         return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
-    def _update_feature_stats(self, x: torch.Tensor):
-        n = x.shape[0]
-        batch_mean = x.mean()
-        batch_var = x.var(unbiased=False)
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.is_feature_alignment_mode:
+            if mode:
+                self._source_stats = dict(mean=[], var=[])
+            else:
+                if hasattr(self, '_source_stats'):
+                    if len(self._source_stats['mean']) > 0:  # finalize source stats
+                        with torch.no_grad():
+                            mean = torch.stack(self._source_stats['mean']).mean(dim=0)
+                            var = torch.stack(self._source_stats['var']).mean(dim=0)
+                            self.feature_mean.copy_(mean)
+                            self.feature_var.copy_(var)
 
-        if self.num_samples == 0:
-            self.feature_mean.copy_(batch_mean)
-            self.feature_var.copy_(batch_var)
-            self.num_samples.fill_(n)
-        else:
-            old_n = self.num_samples.item()
-            new_n = old_n + n
-
-            # Weighted average for mean
-            new_mean = (self.feature_mean * old_n + batch_mean * n) / new_n
-            self.feature_mean.copy_(new_mean)
-
-            # Weighted average for var (approx)
-            new_var = (self.feature_var * old_n + batch_var * n) / new_n
-            self.feature_var.copy_(new_var)
-
-            self.num_samples.fill_(new_n)
+                    del self._source_stats
 
     def forward_feature_alignment(self, x):
         if self.training:
             with torch.no_grad():
-                self._update_feature_stats(x)
+                self._source_stats['mean'].expand(*x.mean(dim=1, keepdim=True))
+                self._source_stats['var'].expand(*x.var(dim=1, unbiased=False, keepdim=True))
 
         self._forward_stats['mean'] = x.mean()
         self._forward_stats['var'] = x.var(unbiased=False)
@@ -777,14 +770,13 @@ class CascadedNormEngine(AdaptationEngine):
         for anchor in self.dist_norm.anchors:
             anchor.train()
             anchor.norm.eval()
-            anchor.num_samples.fill_(0)
 
         loader = DataLoader(source_dataset, batch_size=batch_size, collate_fn=source_dataset.collate_fn, **kwargs)
 
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = self.dist_norm.anchors[0].num_samples
+                count = len(self.dist_norm.anchors[0]._source_stats['mean'])
                 if count >= max_samples:
                     break
 
@@ -794,7 +786,7 @@ class CascadedNormEngine(AdaptationEngine):
             data_preparation=source_dataset, reset=False,
             dtype=dtype, device=self.device
         )
-        self.eval()
+        self.eval()  # finalize the stats
 
         # save the state dict of the anchors
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
