@@ -99,10 +99,6 @@ class CascadedNormConfig(AdaptationConfig):
     use_kl_divergence: bool = False
     use_feature_alignment: bool = False
 
-    # Masked Statistics
-    masked_sampling: bool = False
-    mask_value: float = -1.0
-
     @classmethod
     def from_preset(cls, base_model, **kwargs):
         """Create configuration from preset."""
@@ -117,7 +113,7 @@ class CascadedNormConfig(AdaptationConfig):
         elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET_S3.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.C3K2_S3.value, masked_sampling=True, mask_value=114.0, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.C3K2_S3.value, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
 
