@@ -516,8 +516,8 @@ class CascadeAnchor(nn.Module):
         if self.training:
             with torch.no_grad():
                 dim = tuple(range(1, x.ndim))
-                self._source_stats['mean'].extend(x.mean(dim=dim).tolist())
-                self._source_stats['var'].extend(x.var(dim=dim, unbiased=False).tolist())
+                self._source_stats['mean'].extend(x.mean(dim=dim))
+                self._source_stats['var'].extend(x.var(dim=dim, unbiased=False))
 
         self._forward_stats['mean'] = x.mean()
         self._forward_stats['var'] = x.var(unbiased=False)
@@ -585,7 +585,7 @@ class CascadeAnchor(nn.Module):
 
             self._forward_stats['mean'] = []  # reset for next forward pass
             self._forward_stats['var'] = []  # reset for next forward pass
-        except Exception as e:
+        except ValueError as e:
             raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.") from e
         return loss
 
