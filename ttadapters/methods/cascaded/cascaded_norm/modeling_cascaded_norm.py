@@ -83,14 +83,27 @@ class CLAHETransform(nn.Module):
         self.config = config
         self.clip_limit = config.clahe_clip_limit
         self.tile_size = config.clahe_tile_size
-        self.clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(self.tile_size, self.tile_size))
 
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, int]]:
+        _, H, W = image.shape  # image shape: (C=3, H, W)
+
+        # Adaptive Grid Size Calculation
+        # maintain standard tile size based on the longest edge to keep tile aspect ratio ~1:1
+        if W >= H:
+             grid_x = self.tile_size
+             grid_y = max(1, int(self.tile_size * (H / W)))
+        else:
+             grid_y = self.tile_size
+             grid_x = max(1, int(self.tile_size * (W / H)))
+
+        # Create dynamic CLAHE object
+        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(grid_x, grid_y))
+
         image_np = image.permute(1, 2, 0).cpu().numpy()  # (H, W, C), RGB
         image_np = image_np.astype(np.uint8)
 
         image_ycrcb = cv2.cvtColor(image_np, cv2.COLOR_RGB2YCrCb)
-        image_ycrcb[:, :, 0] = self.clahe.apply(image_ycrcb[:, :, 0])
+        image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
 
         image_rgb = cv2.cvtColor(image_ycrcb, cv2.COLOR_YCrCb2RGB)
         image_rgb = image_rgb.astype(np.float32)
@@ -353,16 +366,26 @@ class AnchorList(nn.ModuleList):
 
 class CascadedNorm(nn.Module):
     """
-    CascadedNorm: Cascaded Input Distribution Normalization
-        with Source (Feature) Flow Adaptation loss via Norm Linearization
+    CascadedNorm: Cascaded Input Distribution Normalization via Flow Adaptation (Synchronization).
 
-    Learns to normalize input pixel distribution through adaptive
-    transformation with cascaded layer-wise supervision.
+    [Theoretical Background]
+    This module implements Test-Time Adaptation by synchronizing the feature statistics
+    across multiple layers (Anchors) of the network.
 
     The term "normalization" refers to distribution matching
     between source and target domains, achieved through:
     - Gamma Transform: Histogram stretching with gamma correction
     - CLAHE Transform: Histogram equalization with adaptive contrast enhancement
+
+    Instead of adapting individual layers, it learns a single global input transformation
+    that satisfies the statistical constraints of all inserted anchors simultaneously.
+    (Learns to normalize input pixel distribution through adaptive transformation with cascaded layer-wise supervision.)
+
+    [Mechanism: Flow Adaptation / Synchronization]
+    By enforcing standard deviation consistency (N(0,1)) or restoring source feature statistics 
+    at multiple depths (Cascaded Anchors), we ensure that the 'information flow' remains valid
+    from the first layer to the last. This effectively synchronizes the feature response
+    of the target domain with the source domain's canonical state.
 
     Args:
         config: CascadedNormConfig with learning parameters
@@ -395,11 +418,24 @@ class CascadedNorm(nn.Module):
 
 class CascadeAnchor(nn.Module):
     """
-    Cascade Anchor Module which tries to linearize the original normalization layer.
+    Cascade Anchor Module: A checkpoint for Feature Flow Synchronization.
+
+    This module wraps normalization layers to act as 'statistical anchors'.
+    It calculates the deviation of the current feature flow from the expected 
+    source distribution (either N(0,1) or stored running statistics).
+
+    [Role in Synchronization]
+    While each anchor computes a local loss, the aggregated gradients from all anchors
+    guide the Input Transformation Module (ITM) to find a globally optimal view.
+    This ensures that the input signal propagates through the network without 
+    statistical collapse (vanishing/exploding features) at any depth.
 
     Supported normalization layers:
     - nn.BatchNorm2d / FrozenBatchNorm2d
     - nn.LayerNorm
+
+    Default behavior:
+    - Norm Linearization: Tries to linearize the original normalization layer
 
     Optional operations:
     * Feature below is only applied when specified in the config
