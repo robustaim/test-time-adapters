@@ -826,19 +826,20 @@ class CascadedNormEngine(AdaptationEngine):
                     # apply dist norm for each image in batch
                     transformed_list = []
                     for i in range(img.shape[0]):
-                        current_img = img[i]
+                        img_current = img[i]
 
                         letterbox_range = None
                         if self.config.masked_processing:
-                            letterbox_range = self._get_letterbox_range(current_img)
+                            letterbox_range = self._get_letterbox_range(img_current)
 
                         if letterbox_range:  # Apply Masked Processing if enabled (Letterbox removal)
+                            img_transformed = img_current.clone()
                             y_min, y_max = letterbox_range
-                            current_img[:, y_min:y_max, :] = self.dist_norm(current_img[:, y_min:y_max, :])
+                            img_transformed[:, y_min:y_max, :] = self.dist_norm(img_current[:, y_min:y_max, :])
                         else:  # Standard processing
-                            current_img = self.dist_norm(current_img)
+                            img_transformed = self.dist_norm(img_current)
 
-                        transformed_list.append(current_img)
+                        transformed_list.append(img_transformed)
 
                     img_batch = torch.stack(transformed_list, dim=0)
                     model_input = img_batch / 255.0 if original_scale else img_batch
