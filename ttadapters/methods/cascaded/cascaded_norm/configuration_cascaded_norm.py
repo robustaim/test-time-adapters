@@ -80,6 +80,8 @@ class CascadedNormConfig(AdaptationConfig):
     itm_combination_method: Literal["residual", "hierarchical", "frequency"] | None = None  # only used when itm_type == "clahe-gamma"
     cascade_target: List[str] = None
     exclude_target: List[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
+    mask_value: int = 114  # YOLO11 default padding value
+    masked_processing: bool = False
 
     # CLAHE parameters
     clahe_clip_limit: float = 2.0
@@ -113,7 +115,10 @@ class CascadedNormConfig(AdaptationConfig):
         elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET_S3.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.C3K2_S3.value, **kwargs)
+            return cls(
+                cascade_target=TargetKeyPreset.C3K2_S3.value,
+                masked_processing=True, mask_value=114, **kwargs
+            )
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
 

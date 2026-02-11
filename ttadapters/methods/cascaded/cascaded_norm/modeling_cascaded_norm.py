@@ -761,6 +761,25 @@ class CascadedNormEngine(AdaptationEngine):
         self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
         print(f"[CascadedNormEngine] Calibration Complete. {len(self.dist_norm.anchors)} anchors.")
 
+    def _get_letterbox_range(self, img):
+        # Create spatial mask shaped (H, W) or (1, H, W)
+        diff = (img - self.config.mask_value).abs()  # Check difference from 114 (letterbox value)
+        # Reduce channel dim: (C, H, W) -> (H, W) if all channels match padding
+        spatial_mask = (diff < 1e-2).all(dim=0)
+
+        # Find valid rows (H)
+        # spatial_mask is True for padding, False for valid
+        # So rows where ALL pixels are padding are padding rows.
+        is_padding_row = spatial_mask.all(dim=1) # (H,)
+        valid_rows = torch.where(~is_padding_row)[0]
+
+        if len(valid_rows) > 0:
+            y_min = valid_rows[0].item()
+            y_max = valid_rows[-1].item() + 1
+            return y_min, y_max
+        else:
+            return None
+
     def forward(self, *args, **kwargs):
         # Zero gradients
         self.optimizer.zero_grad()
@@ -807,8 +826,19 @@ class CascadedNormEngine(AdaptationEngine):
                     # apply dist norm for each image in batch
                     transformed_list = []
                     for i in range(img.shape[0]):
-                        img_transformed = self.dist_norm(img[i])
-                        transformed_list.append(img_transformed)
+                        current_img = img[i]
+
+                        letterbox_range = None
+                        if self.config.masked_processing:
+                            letterbox_range = self._get_letterbox_range(current_img)
+
+                        if letterbox_range:  # Apply Masked Processing if enabled (Letterbox removal)
+                            y_min, y_max = letterbox_range
+                            current_img[:, y_min:y_max, :] = self.dist_norm(current_img[:, y_min:y_max, :])
+                        else:  # Standard processing
+                            current_img = self.dist_norm(current_img)
+
+                        transformed_list.append(current_img)
 
                     img_batch = torch.stack(transformed_list, dim=0)
                     model_input = img_batch / 255.0 if original_scale else img_batch
