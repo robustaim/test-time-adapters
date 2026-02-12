@@ -186,3 +186,6 @@ results-*/
 wandb/
 logs/
 trainer_output/
+
+# Statistics files
+ttadapters/methods/baseline/statistics/
