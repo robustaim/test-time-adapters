@@ -401,8 +401,8 @@ class ForwardStats:
 class FPNAnchor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.register_buffer("mean", torch.tensor(0.0))
-        self.register_buffer("var", torch.tensor(1.0))
+        self.register_buffer("mean", torch.tensor([0.0]))
+        self.register_buffer("var", torch.tensor([1.0]))
 
 
 class CascadeAnchor(nn.Module):
@@ -413,6 +413,7 @@ class CascadeAnchor(nn.Module):
         self.loss_fn = loss_fn
 
         self.fpns = 5  # P2, P3, P4, P5, P6
+        self.fpn_target_idx = [1, 2]
 
         self._forward_stats = [ForwardStats() for _ in range(self.fpns)]
         self._target_stats = nn.ModuleList([FPNAnchor() for _ in range(self.fpns)])
@@ -439,8 +440,9 @@ class CascadeAnchor(nn.Module):
                         for i in range(self.fpns):
                             means = torch.stack([t[i].mean for t in self._forward_history]).mean(dim=0)
                             vars = torch.stack([t[i].var for t in self._forward_history]).mean(dim=0)
-                            self._target_stats[i].mean.copy_(means)
-                            self._target_stats[i].var.copy_(vars)
+                            self._target_stats[i].mean = means.clone()
+                            self._target_stats[i].var = vars.clone()
+                            print(f"FPN({i}) -> mean {self._target_stats[i].mean.shape}, var {self._target_stats[i].var.shape}")
 
                 del self._forward_history
 
@@ -448,7 +450,7 @@ class CascadeAnchor(nn.Module):
         dims = (0, 2, 3)
         y = self.wrapped(x)
 
-        for i, value in enumerate(y.values()):
+        for i, value in zip(range(self.fpns), y.values()):
             self._forward_stats[i].mean = value.mean(dim=dims)
             self._forward_stats[i].var = value.var(dim=dims, unbiased=False)
 
@@ -461,22 +463,23 @@ class CascadeAnchor(nn.Module):
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
+        total_loss = 0.0
         try:
-            for i in range(self.fpns):
+            for i in self.fpn_target_idx:
                 if isinstance(self.loss_fn, GaussianKLDivLoss):
                     input_dist = torch.stack([self._forward_stats[i].mean, self._forward_stats[i].var], dim=-1)
                     target_dist = torch.stack([self._target_stats[i].mean, self._target_stats[i].var], dim=-1)
 
-                    loss = self.loss_fn(input_dist, target_dist)
+                    total_loss += self.loss_fn(input_dist, target_dist)
                 else:
                     mean_loss = self.loss_fn(self._forward_stats[i].mean, self._target_stats[i].mean)
                     var_loss = self.loss_fn(self._forward_stats[i].var.log(), self._target_stats[i].var.log())
-                    loss = mean_loss + var_loss
+                    total_loss += mean_loss + var_loss
 
             self._forward_stats = [ForwardStats() for _ in range(self.fpns)]
         except ValueError as e:
-            raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.") from e
-        return loss
+            raise RuntimeError(f"Forward statistics not yet collected for {self.wrapped}.") from e
+        return total_loss
 
 
 class CascadedNormEngine(AdaptationEngine):
@@ -644,7 +647,7 @@ class CascadedNormEngine(AdaptationEngine):
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0]._source_stats['mean'])
+                count = len(self.dist_norm.anchors[0]._forward_history)
                 if count >= max_samples:
                     break
 
