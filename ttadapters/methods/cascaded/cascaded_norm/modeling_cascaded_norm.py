@@ -392,6 +392,19 @@ class CascadedNorm(nn.Module):
         return (align_loss + reg_loss) if reg_loss is not None else align_loss
 
 
+class ForwardStats:
+    def __init__(self):
+        self.mean = []
+        self.var = []
+
+
+class FPNAnchor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("mean", torch.tensor(0.0))
+        self.register_buffer("var", torch.tensor(1.0))
+
+
 class CascadeAnchor(nn.Module):
     def __init__(self, config: CascadedNormConfig, wrapped: nn.Module, loss_fn: nn.Module):
         super().__init__()
@@ -399,12 +412,10 @@ class CascadeAnchor(nn.Module):
         self.wrapped = wrapped
         self.loss_fn = loss_fn
 
-        self._forward_stats = dict(mean=[], var=[])
-        self._target_stats = dict(mean=[], var=[])
+        self.fpns = 5  # P2, P3, P4, P5, P6
 
-        self.register_buffer("feature_mean", torch.tensor(0.0))
-        self.register_buffer("feature_var", torch.tensor(1.0))
-        self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
+        self._forward_stats = [ForwardStats() for _ in range(self.fpns)]
+        self._target_stats = nn.ModuleList([FPNAnchor() for _ in range(self.fpns)])
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
@@ -420,59 +431,49 @@ class CascadeAnchor(nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         if mode:
-            self._source_stats = dict(mean=[], var=[])
+            self._forward_history = []
         else:
-            if hasattr(self, '_source_stats'):
-                if len(self._source_stats['mean']) > 0:  # finalize source stats
+            if hasattr(self, '_forward_history'):
+                if len(self._forward_history) > 0:  # finalize source stats
                     with torch.no_grad():
-                        mean = torch.stack(self._source_stats['mean']).mean(dim=0)
-                        var = torch.stack(self._source_stats['var']).mean(dim=0)
-                        self.feature_mean.copy_(mean)
-                        self.feature_var.copy_(var)
+                        for i in range(self.fpns):
+                            means = torch.stack([t[i].mean for t in self._forward_history]).mean(dim=0)
+                            vars = torch.stack([t[i].var for t in self._forward_history]).mean(dim=0)
+                            self._target_stats[i].mean.copy_(means)
+                            self._target_stats[i].var.copy_(vars)
 
-                del self._source_stats
+                del self._forward_history
 
     def forward(self, x):
         dims = (0, 2, 3)
         y = self.wrapped(x)
 
-        self._forward_stats['mean'] = y['f6'].mean(dim=dims)
-        self._forward_stats['var'] = y['f6'].var(dim=dims, unbiased=False)
+        for i, value in enumerate(y.values()):
+            self._forward_stats[i].mean = value.mean(dim=dims)
+            self._forward_stats[i].var = value.var(dim=dims, unbiased=False)
 
         if self.training:
             with torch.no_grad():
-                self._source_stats['mean'].extend(self._forward_stats['mean'])
-                self._source_stats['var'].extend(self._forward_stats['var'])
-
-        self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
-        self._target_stats['var'] = self._target_stats['var'].to(x.device)
+                from copy import deepcopy
+                self._forward_history.append(deepcopy(self._forward_stats))
 
         return y
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
         try:
-            if isinstance(self.loss_fn, GaussianKLDivLoss):
-                # KL Divergence requires (mean, var) pairs
-                f_mean = self._forward_stats['mean']
-                f_var = self._forward_stats['var']
-                t_mean = self._target_stats['mean']
-                t_var = self._target_stats['var']
+            for i in range(self.fpns):
+                if isinstance(self.loss_fn, GaussianKLDivLoss):
+                    input_dist = torch.stack([self._forward_stats[i].mean, self._forward_stats[i].var], dim=-1)
+                    target_dist = torch.stack([self._target_stats[i].mean, self._target_stats[i].var], dim=-1)
 
-                # Stack to form (..., 2) for GaussianKLDivLoss
-                # If scalars: (2,)
-                # If (C,): (C, 2)
-                input_dist = torch.stack([f_mean, f_var], dim=-1)
-                target_dist = torch.stack([t_mean, t_var], dim=-1)
+                    loss = self.loss_fn(input_dist, target_dist)
+                else:
+                    mean_loss = self.loss_fn(self._forward_stats[i].mean, self._target_stats[i].mean)
+                    var_loss = self.loss_fn(self._forward_stats[i].var.log(), self._target_stats[i].var.log())
+                    loss = mean_loss + var_loss
 
-                loss = self.loss_fn(input_dist, target_dist)
-            else:
-                mean_loss = self.loss_fn(self._forward_stats['mean'], self._target_stats['mean'])
-                var_loss = self.loss_fn(self._forward_stats['var'], self._target_stats['var'])
-                loss = mean_loss + var_loss
-
-            self._forward_stats['mean'] = []  # reset for next forward pass
-            self._forward_stats['var'] = []  # reset for next forward pass
+            self._forward_stats = [ForwardStats() for _ in range(self.fpns)]
         except ValueError as e:
             raise RuntimeError(f"Forward statistics not yet collected for {self.norm}.") from e
         return loss
