@@ -90,11 +90,11 @@ class CLAHETransform(nn.Module):
         # Adaptive Grid Size Calculation
         # maintain standard tile size based on the longest edge to keep tile aspect ratio ~1:1
         if W >= H:
-            grid_x = self.tile_size
-            grid_y = max(1, int(self.tile_size * (H / W)))
+             grid_x = self.tile_size
+             grid_y = max(1, int(self.tile_size * (H / W)))
         else:
-            grid_y = self.tile_size
-            grid_x = max(1, int(self.tile_size * (W / H)))
+             grid_y = self.tile_size
+             grid_x = max(1, int(self.tile_size * (W / H)))
 
         # Create dynamic CLAHE object
         clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(grid_x, grid_y))
@@ -417,22 +417,84 @@ class CascadedNorm(nn.Module):
 
 
 class CascadeAnchor(nn.Module):
-    def __init__(self, config: CascadedNormConfig, wrapped: nn.Module, loss_fn: nn.Module):
+    """
+    Cascade Anchor Module: A checkpoint for Feature Flow Synchronization.
+
+    This module wraps normalization layers to act as 'statistical anchors'.
+    It calculates the deviation of the current feature flow from the expected 
+    source distribution (either N(0,1) or stored running statistics).
+
+    [Role in Synchronization]
+    While each anchor computes a local loss, the aggregated gradients from all anchors
+    guide the Input Transformation Module (ITM) to find a globally optimal view.
+    This ensures that the input signal propagates through the network without 
+    statistical collapse (vanishing/exploding features) at any depth.
+
+    Supported normalization layers:
+    - nn.BatchNorm2d / FrozenBatchNorm2d
+    - nn.LayerNorm
+
+    Default behavior:
+    - Norm Linearization: Tries to linearize the original normalization layer
+
+    Optional operations:
+    * Feature below is only applied when specified in the config
+    - Feature Alignment: Align the feature distribution between source and target domains
+                        (will be used instead of norm linearization)
+    - KL Divergence: KL divergence between source and target domains
+    """
+
+    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
-        self.wrapped = wrapped
+        self.norm = original_norm
         self.loss_fn = loss_fn
 
-        self._forward_stats = dict(mean=[], var=[])
-        self._target_stats = dict(mean=[], var=[])
+        self.is_feature_alignment_mode = config.use_feature_alignment
+        self.anchor_type: SupportedNormType = SupportedNormType.BN
 
-        self.register_buffer("feature_mean", torch.tensor(0.0))
-        self.register_buffer("feature_var", torch.tensor(1.0))
-        self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
+        self.norm_shape: Tuple[int, ...] = tuple()
+        self.target_shape: Tuple[int, ...] = tuple()
+
+        self._forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
+        self._target_stats = dict(mean=[], var=[])  # N(0, 1)
+
+        self.weight = original_norm.weight
+        self.bias = original_norm.bias
+
+        if self.is_feature_alignment_mode:
+            self.register_buffer("feature_mean", torch.tensor(0.0))
+            self.register_buffer("feature_var", torch.tensor(1.0))
+            self._target_stats = dict(mean=self.feature_mean, var=self.feature_var)
+        elif isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
+            self.anchor_type = SupportedNormType.BN
+            self.norm_shape = original_norm.running_mean.shape  # (C,)
+            self.target_shape = self.norm_shape
+
+            # BN target: Channel-wise statistics (C,)
+            if config.use_bn_running_stat:
+                self._target_stats = dict(mean=original_norm.running_mean, var=original_norm.running_var)
+            else:
+                self._target_stats = dict(
+                    mean=torch.zeros(self.target_shape, device=self.weight.device),
+                    var=torch.ones(self.target_shape, device=self.weight.device)
+                )
+        elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
+            self.anchor_type = SupportedNormType.LN
+            self.target_shape = ()  # Scalar target for position-wise stats
+            self.norm_shape = original_norm.normalized_shape
+
+            # LN target: Scalar statistics (0, 1) broadcasted to (B, H, W)
+            self._target_stats = dict(
+                mean=torch.tensor(0.0, device=self.weight.device),
+                var=torch.tensor(1.0, device=self.weight.device)
+            )
+        else:
+            raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
-        return f"{module_name}(wrapped={self.wrapped}, loss_fn={self.loss_fn.__class__.__name__})"
+        return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -450,22 +512,57 @@ class CascadeAnchor(nn.Module):
 
                     del self._source_stats
 
-    def forward(self, x):
-        dims = (0, 2, 3)
-        y = self.wrapped(x)
-
+    def forward_feature_alignment(self, x):
         if self.training:
             with torch.no_grad():
-                self._source_stats['mean'].extend(x.mean(dim=dims))
-                self._source_stats['var'].extend(x.var(dim=dims, unbiased=False))
+                dim = tuple(range(1, x.ndim))
+                self._source_stats['mean'].extend(x.mean(dim=dim))
+                self._source_stats['var'].extend(x.var(dim=dim, unbiased=False))
 
-        self._forward_stats['mean'] = y.mean(dim=dims)
-        self._forward_stats['var'] = y.var(dim=dims, unbiased=False)
+        self._forward_stats['mean'] = x.mean()
+        self._forward_stats['var'] = x.var(unbiased=False)
 
         self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
         self._target_stats['var'] = self._target_stats['var'].to(x.device)
 
-        return y
+        return self.norm(x)
+
+    def forward_norm_linearization(self, x):
+        match self.anchor_type:
+            case SupportedNormType.BN:
+                # calculate stats -> this will be optimized to N(0,1)
+                dims = (0, 2, 3)
+                self._forward_stats['mean'] = x.mean(dim=dims)
+                self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
+                self._target_stats['var'] = self._target_stats['var'].to(x.device)
+            case SupportedNormType.LN:
+                # calculate stats -> this will be optimized to N(0,1)
+                # Input: (B, ..., *normalized_shape) → mean over normalized_shape → shape: (B, H, W)
+                # Target: Scalar (0, 1) <expanded to (B, H, W)>
+                dims = tuple(range(-len(self.norm_shape), 0))
+                self._forward_stats['mean'] = x.mean(dim=dims)
+                self._forward_stats['var'] = x.var(dim=dims, unbiased=False)
+
+                # Update target stats to match forward stats shape (using expand for efficiency)
+                # We use the initial scalar targets (0, 1) and expand them
+                self._target_stats['mean'] = torch.tensor(0.0, device=x.device).expand_as(self._forward_stats['mean'])
+                self._target_stats['var'] = torch.tensor(1.0, device=x.device).expand_as(self._forward_stats['var'])
+            case _:
+                raise ValueError(f"Unsupported anchor type: {self.anchor_type}")
+
+        # Scale and Bias
+        return self.norm(x)
+
+    def forward(self, x):
+        if self.is_feature_alignment_mode:
+            # Source Feature Alignment
+            x = self.forward_feature_alignment(x)
+        else:
+            # Norm Linearization
+            x = self.forward_norm_linearization(x)
+        return x
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
@@ -500,6 +597,10 @@ class CascadedNormEngine(AdaptationEngine):
     """
     Cascaded Norm Adaptation Engine
     Injects CascadedNorm module into the base model.
+
+    Supports:
+    - nn.BatchNorm2d / FrozenBatchNorm2d
+    - nn.LayerNorm
 
     The engine extracts normalization layers from the base model,
     overrides foward to adapt source flow.
@@ -544,7 +645,7 @@ class CascadedNormEngine(AdaptationEngine):
             print("-" * 60)
             print(f"  View Transform Method : {self.config.itm_type}")
             print(f"  Loss Function         : {self.loss_class.__name__}")
-        self._inject_anchors()
+        self._extract_norm_layers()
         if self.config.verbose:
             print("-" * 60)
             print("  Distribution Normalization Module:")
@@ -557,7 +658,20 @@ class CascadedNormEngine(AdaptationEngine):
         # Device
         self.to(self.device, dtype=self.dtype)
 
-    def _inject_anchors(self):
+    @staticmethod
+    def _is_norm_layer(module: nn.Module) -> bool:
+        return isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)) or "BatchNorm2d" in module.__class__.__name__ or "LayerNorm" in module.__class__.__name__
+
+    def _extract_norm_layers(self):
+        # count every norm layers
+        norm_layer_keys = []
+        for name, module in self.base_model.named_modules():
+            if self._is_norm_layer(module):
+                norm_layer_keys.append(name)
+
+        if self.config.verbose:
+            print(f"  Total Norm Layers     : {len(norm_layer_keys)}")
+
         # Recursively extract norm layers and replace with CascadeAnchors
         # Compile pattern: if None, match all; otherwise match provided patterns
         cascade_target_re = None if self.config.cascade_target is None else re.compile(
@@ -571,21 +685,23 @@ class CascadedNormEngine(AdaptationEngine):
         applied_list = self.dist_norm.anchors
         applied_key_list = []
         for name, module in self.base_model.named_modules():
-            # 1. Safety Check: Skip if matches exclude_target
-            if exclude_target_re and exclude_target_re.search(name):
-                continue
-
-            # 2. Target Check:
-            # If cascade_target is None -> Target All (Default)
-            # If cascade_target is Set -> Target Only Matches
-            if cascade_target_re is None or cascade_target_re.search(name):
-                # Check if already wrapped (to prevent double wrapping if called multiple times)
-                if isinstance(module, CascadeAnchor):
+            # Check if module is a norm layer
+            if self._is_norm_layer(module):
+                # 1. Safety Check: Skip if matches exclude_target
+                if exclude_target_re and exclude_target_re.search(name):
                     continue
-                anchor = CascadeAnchor(self.config, module, self.loss_function)
-                applied_list.append(anchor)
-                applied_key_list.append(name)
-                self._replace_module(name, anchor)
+
+                # 2. Target Check:
+                # If cascade_target is None -> Target All (Default)
+                # If cascade_target is Set -> Target Only Matches
+                if cascade_target_re is None or cascade_target_re.search(name):
+                    # Check if already wrapped (to prevent double wrapping if called multiple times)
+                    if isinstance(module, CascadeAnchor):
+                        continue
+                    anchor = CascadeAnchor(self.config, module, self.loss_function)
+                    applied_list.append(anchor)
+                    applied_key_list.append(name)
+                    self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
 
         if self.config.verbose:
             target_str = str(self.config.cascade_target) if self.config.cascade_target else "All (Default)"
@@ -688,7 +804,7 @@ class CascadedNormEngine(AdaptationEngine):
 
         # Find valid rows (H)
         # spatial_mask is True for padding, False for valid
-        # So rows where ALL pixels are padding rows.
+        # So rows where ALL pixels are padding are padding rows.
         is_padding_row = spatial_mask.all(dim=1) # (H,)
         valid_rows = torch.where(~is_padding_row)[0]
 
