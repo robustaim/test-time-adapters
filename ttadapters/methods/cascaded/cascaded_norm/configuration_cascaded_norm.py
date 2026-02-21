@@ -15,8 +15,8 @@ class CascadedNormConfig(AdaptationConfig):
     # Engine configuration
     itm_type: Literal["clahe", "gamma", "clahe-gamma"] = "gamma"
     itm_combination_method: Literal["residual", "hierarchical", "frequency"] | None = None  # only used when itm_type == "clahe-gamma"
-    cascade_target: List[str] = field(default_factory=lambda: [r"(^|\.)backbone$"])
-    exclude_target: List[str] = None
+    cascade_target: List[str] = [r"(^|\.)backbone$"]
+    exclude_target: List[str] = field(default_factory=lambda: [])
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 
@@ -56,3 +56,5 @@ class CascadedNormConfig(AdaptationConfig):
             )
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
+
+TARGET_KEY_PRESET = TargetKeyPreset

@@ -337,7 +337,31 @@ class SupportedNormType(Enum):
 
 class AnchorList(nn.ModuleList):
     """Wrapper for nn.ModuleList to customize __repr__."""
-    pass
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bn_count = 0
+        self.ln_count = 0
+
+    def append(self, item: "CascadeAnchor"):
+        if not isinstance(item, CascadeAnchor):
+            raise TypeError("item must be CascadeAnchor")
+
+        super().append(item)
+        if item.anchor_type == SupportedNormType.BN:
+            self.bn_count += 1
+        elif item.anchor_type == SupportedNormType.LN:
+            self.ln_count += 1
+
+    def __repr__(self) -> str:
+        params = []
+        if self.bn_count > 0:
+            params.append(f"BN={self.bn_count}")
+        if self.ln_count > 0:
+            params.append(f"LN={self.ln_count}")
+        param_str = ", ".join(params)
+        module_name = self.__class__.__name__
+        return super().__repr__().replace(module_name, f"{module_name}({param_str})")
 
 
 class CascadedNorm(nn.Module):
@@ -410,39 +434,33 @@ class CascadeAnchor(nn.Module):
         module_name = self.__class__.__name__
         return f"{module_name}(wrapped={self.wrapped}, loss_fn={self.loss_fn.__class__.__name__})"
 
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except:
-            if name != "wrapped":
-                return getattr(self.wrapped, name)
-
     def train(self, mode: bool = True):
         super().train(mode)
-        if mode:
-            self._source_stats = dict(mean=[], var=[])
-        else:
-            if hasattr(self, '_source_stats'):
-                if len(self._source_stats['mean']) > 0:  # finalize source stats
-                    with torch.no_grad():
-                        mean = torch.stack(self._source_stats['mean']).mean(dim=0)
-                        var = torch.stack(self._source_stats['var']).mean(dim=0)
-                        self.feature_mean.copy_(mean)
-                        self.feature_var.copy_(var)
+        if self.is_feature_alignment_mode:
+            if mode:
+                self._source_stats = dict(mean=[], var=[])
+            else:
+                if hasattr(self, '_source_stats'):
+                    if len(self._source_stats['mean']) > 0:  # finalize source stats
+                        with torch.no_grad():
+                            mean = torch.stack(self._source_stats['mean']).mean(dim=0)
+                            var = torch.stack(self._source_stats['var']).mean(dim=0)
+                            self.feature_mean.copy_(mean)
+                            self.feature_var.copy_(var)
 
-                del self._source_stats
+                    del self._source_stats
 
     def forward(self, x):
         dims = (0, 2, 3)
         y = self.wrapped(x)
 
-        self._forward_stats['mean'] = y['f6'].mean(dim=dims)
-        self._forward_stats['var'] = y['f6'].var(dim=dims, unbiased=False)
-
         if self.training:
             with torch.no_grad():
-                self._source_stats['mean'].extend(self._forward_stats['mean'])
-                self._source_stats['var'].extend(self._forward_stats['var'])
+                self._source_stats['mean'].extend(x.mean(dim=dims))
+                self._source_stats['var'].extend(x.var(dim=dims, unbiased=False))
+
+        self._forward_stats['mean'] = y.mean(dim=dims)
+        self._forward_stats['var'] = y.var(dim=dims, unbiased=False)
 
         self._target_stats['mean'] = self._target_stats['mean'].to(x.device)
         self._target_stats['var'] = self._target_stats['var'].to(x.device)
@@ -626,6 +644,9 @@ class CascadedNormEngine(AdaptationEngine):
             return None
 
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
+        if not self.config.use_feature_alignment:
+            return  # do nothing if feature alignment is not used
+
         from tqdm.auto import tqdm
         from torch.utils.data import DataLoader
         from ....utils.validator import DetectionEvaluator
@@ -636,7 +657,7 @@ class CascadedNormEngine(AdaptationEngine):
         self.eval()  # turn on eval mode so that the base model doesn't update its parameters
         for anchor in self.dist_norm.anchors:
             anchor.train()
-            anchor.wrapped.eval()
+            anchor.norm.eval()
 
         loader = DataLoader(source_dataset, batch_size=batch_size, collate_fn=source_dataset.collate_fn, **kwargs)
 
