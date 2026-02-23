@@ -296,11 +296,13 @@ class CascadeAnchor(nn.Module):
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         self.register_buffer("source_means", torch.tensor([0.0], device=self.device))
         self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))
-        self.source_stats = dict(mean=self.source_means, var=self.source_vars, running_means=[], running_vars=[])
+        self.source_stats = dict(
+            mean=self.source_means, var=self.source_vars, running_means=[], running_vars=[], num_samples=0
+        )
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
-        return f"{module_name}(wrapped={self.wrapped}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
+        return f"{module_name}(wrapped={self.wrapped.__class__.__name__}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -309,11 +311,12 @@ class CascadeAnchor(nn.Module):
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
                     var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
-                    self.source_means['mean'] = mean.detach().to(self.device)
-                    self.source_means['var'] = var.detach().to(self.device)
+                    self.source_means = mean.detach().to(self.device)
+                    self.source_vars = var.detach().to(self.device)
 
             self.source_stats['running_means'] = []
             self.source_stats['running_vars'] = []
+            self.source_stats['num_samples'] = 0
 
     def forward(self, x):
         out = self.wrapped(x)
@@ -325,6 +328,7 @@ class CascadeAnchor(nn.Module):
             with torch.no_grad():
                 self.source_stats['running_means'].append(self.forward_stats['mean'].detach())
                 self.source_stats['running_vars'].append(self.forward_stats['var'].detach())
+                self.source_stats['num_samples'] += x.shape[0]
 
         return out
 
@@ -521,7 +525,7 @@ class FlowAdaptationEngine(AdaptationEngine):
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0].source_stats['running_means'])
+                count = len(self.dist_norm.anchors[0].source_stats['num_samples'])
                 if count >= max_samples:
                     break
 
