@@ -521,7 +521,7 @@ class FlowAdaptationEngine(AdaptationEngine):
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0].source_stats['running_mean'])
+                count = len(self.dist_norm.anchors[0].source_stats['running_means'])
                 if count >= max_samples:
                     break
 
