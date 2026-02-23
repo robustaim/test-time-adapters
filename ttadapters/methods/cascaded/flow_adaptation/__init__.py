@@ -1,2 +1,2 @@
-from .configuration_cascaded_norm import CascadedNormConfig, TargetKeyPreset, TARGET_KEY_PRESET
-from .modeling_cascaded_norm import CascadedNorm, CascadedNormEngine
+from .configuration_flow_adaptation import FlowAdaptationConfig
+from .modeling_flow_adaptation import FlowAdaptation, FlowAdaptationEngine
