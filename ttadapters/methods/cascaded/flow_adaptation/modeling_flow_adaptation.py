@@ -78,7 +78,7 @@ class GaussianKLDivLoss(nn.Module):
 class CLAHETransform(nn.Module):
     """CLAHE Transform Module. (Not differentiable)"""
 
-    def __init__(self, config: CascadedNormConfig):
+    def __init__(self, config: FlowAdaptationConfig):
         super().__init__()
         self.config = config
         self.clip_limit = config.clahe_clip_limit
@@ -115,7 +115,7 @@ class CLAHETransform(nn.Module):
 class GammaTransform(nn.Module):
     """Differentiable Gamma Transformation Module by histogram stretching."""
 
-    def __init__(self, config: CascadedNormConfig):
+    def __init__(self, config: FlowAdaptationConfig):
         super().__init__()
         self.config = config
         self.temperature = config.gamma_temperature
@@ -285,7 +285,7 @@ class CascadeAnchor(nn.Module):
     - nn.LayerNorm
     """
 
-    def __init__(self, config: CascadedNormConfig, wrapped_module: nn.Module, loss_fn: nn.Module):
+    def __init__(self, config: FlowAdaptationConfig, wrapped_module: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
         self.wrapped = wrapped_module
