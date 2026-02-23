@@ -514,14 +514,14 @@ class FlowAdaptationEngine(AdaptationEngine):
         self.eval()  # turn on eval mode so that the base model doesn't update its parameters
         for anchor in self.dist_norm.anchors:
             anchor.train()
-            anchor.norm.eval()
+            anchor.wrapped.eval()
 
         loader = DataLoader(source_dataset, batch_size=batch_size, collate_fn=source_dataset.collate_fn, **kwargs)
 
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0]._source_stats['mean'])
+                count = len(self.dist_norm.anchors[0].source_stats['running_mean'])
                 if count >= max_samples:
                     break
 
