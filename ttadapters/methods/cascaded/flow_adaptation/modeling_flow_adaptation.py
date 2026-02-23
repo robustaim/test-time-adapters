@@ -304,17 +304,16 @@ class CascadeAnchor(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.is_feature_alignment_mode:
-            if not mode:
-                if len(self.source_stats['running_means']) > 0:  # finalize source stats
-                    with torch.no_grad():
-                        mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
-                        var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
-                        self.source_means['mean'] = mean.detach().to(self.device)
-                        self.source_means['var'] = var.detach().to(self.device)
+        if not mode:
+            if len(self.source_stats['running_means']) > 0:  # finalize source stats
+                with torch.no_grad():
+                    mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
+                    var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
+                    self.source_means['mean'] = mean.detach().to(self.device)
+                    self.source_means['var'] = var.detach().to(self.device)
 
-                self.source_stats['running_means'] = []
-                self.source_stats['running_vars'] = []
+            self.source_stats['running_means'] = []
+            self.source_stats['running_vars'] = []
 
     def forward(self, x):
         out = self.wrapped(x)
