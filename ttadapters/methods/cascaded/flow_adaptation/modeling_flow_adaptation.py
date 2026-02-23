@@ -307,7 +307,7 @@ class CascadeAnchor(nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         if not mode:
-            if len(self.source_stats['running_means']) > 0:  # finalize source stats
+            if self.source_stats['num_samples'] > 0:  # finalize source stats
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
                     var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
@@ -525,7 +525,7 @@ class FlowAdaptationEngine(AdaptationEngine):
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0].source_stats['num_samples'])
+                count = self.dist_norm.anchors[0].source_stats['num_samples']
                 if count >= max_samples:
                     break
 
