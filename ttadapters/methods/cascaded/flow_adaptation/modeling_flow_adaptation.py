@@ -505,9 +505,6 @@ class FlowAdaptationEngine(AdaptationEngine):
             return None
 
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
-        if not self.config.use_feature_alignment:
-            return  # do nothing if feature alignment is not used
-
         from tqdm.auto import tqdm
         from torch.utils.data import DataLoader
         from ....utils.validator import DetectionEvaluator
