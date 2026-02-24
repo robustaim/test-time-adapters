@@ -307,6 +307,17 @@ class CascadeAnchor(nn.Module):
         module_name = self.__class__.__name__
         return f"{module_name}(wrapped={self.wrapped.__class__.__name__}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
 
+    def __setattr__(self, name, value):
+        if name in ("H", "W"):  # for swin transformer backbone
+            setattr(self.wrapped, name, value)
+        else:
+            super().__setattr__(name, value)
+
+    def __getattr__(self, name):
+        if name in ("H", "W"):  # for swin transformer backbone
+            return getattr(self.wrapped, name)
+        return super().__getattr__(name)
+
     def train(self, mode: bool = True):
         super().train(mode)
         if not mode:
