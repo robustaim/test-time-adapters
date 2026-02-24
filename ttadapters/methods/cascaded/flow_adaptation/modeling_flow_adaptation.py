@@ -305,7 +305,9 @@ class CascadeAnchor(nn.Module):
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
-        return f"{module_name}(wrapped={self.wrapped.__class__.__name__}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
+        overrides_from = self.wrapped.__class__.__name__
+        overrides_to = f"{module_name}(wrapped={overrides_from}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
+        return self.wrapped.__repr__().replace(overrides_from, overrides_to)
 
     def __setattr__(self, name, value):
         if name in ("H", "W"):  # for swin transformer backbone
@@ -325,8 +327,8 @@ class CascadeAnchor(nn.Module):
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
                     var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
-                    self.source_means = mean.detach().to(self.device)
-                    self.source_vars = var.detach().to(self.device)
+                    self.source_stats['mean'] = self.source_means = mean.detach().to(self.device)
+                    self.source_stats['var'] = self.source_vars = var.detach().to(self.device)
 
             self.source_stats['running_means'] = []
             self.source_stats['running_vars'] = []
