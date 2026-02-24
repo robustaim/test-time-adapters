@@ -318,8 +318,8 @@ class CascadeAnchor(nn.Module):
             self.source_stats['running_vars'] = []
             self.source_stats['num_samples'] = 0
 
-    def forward(self, x):
-        out = self.wrapped(x)
+    def forward(self, x, *args, **kwargs):
+        out = self.wrapped(x, *args, **kwargs)
 
         self.forward_stats['mean'] = out.mean(dim=self.reduce_dim)
         self.forward_stats['var'] = out.var(dim=self.reduce_dim, unbiased=False)
