@@ -35,6 +35,7 @@ class FlowAdaptationConfig(AdaptationConfig):
     itm_type: Literal["clahe", "gamma", "clahe-gamma", "clahe-gamma-residual"] = "gamma"
     cascade_target: list[str] = None
     exclude_target: list[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
+    disable_blending: bool = False
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 

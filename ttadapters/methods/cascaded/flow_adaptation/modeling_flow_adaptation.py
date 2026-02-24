@@ -215,6 +215,7 @@ class InputTransformation(nn.Module):
         self.config = config
         self.applied_params: dict = {}
         self.itm_type = config.itm_type
+        self.do_blend = not config.disable_blending
 
         if config.itm_type == "clahe":
             self.transform = CLAHETransform(config)
@@ -231,6 +232,8 @@ class InputTransformation(nn.Module):
         """Weighted blending between original image and transformed image."""
         transformed, transform_params = self.transform(original)
         self.applied_params = transform_params
+        if self.do_blend:
+            return transformed * 0.5 + original * 0.5  # Blend transformed and original for stability
         return transformed
 
     def get_regularization_loss(self) -> torch.Tensor | None:
