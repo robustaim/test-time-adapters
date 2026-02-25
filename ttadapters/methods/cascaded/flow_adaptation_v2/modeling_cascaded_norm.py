@@ -351,11 +351,12 @@ class CascadeAnchor(nn.Module):
     - KL Divergence: KL divergence between source and target domains
     """
 
-    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module):
+    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module, eps: float = 1e-6):
         super().__init__()
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
+        self.eps = eps
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
@@ -399,7 +400,7 @@ class CascadeAnchor(nn.Module):
     def forward(self, x):
         target_data = x
         if self.anchor_type == SupportedNormType.LN:
-            target_data = x / (x.mean(dim=-1, keepdim=True) + eps)
+            target_data = x / (x.mean(dim=-1, keepdim=True) + self.eps)
 
         self.forward_stats['mean'] = target_data.mean(dim=self.reduce_dim)
         self.forward_stats['var'] = target_data.var(dim=self.reduce_dim, unbiased=False)
