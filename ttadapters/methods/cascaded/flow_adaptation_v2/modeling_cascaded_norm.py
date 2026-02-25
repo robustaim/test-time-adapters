@@ -366,8 +366,8 @@ class CascadeAnchor(nn.Module):
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN  # LN requires source stats to be computed
             self.reduce_dim = None  # Total
-            self.register_buffer("source_means", torch.tensor([0.0], device=self.device))  # temporal init
-            self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))  # temporal init
+            self.register_buffer("source_means", torch.tensor(0.0, device=self.device))  # temporal init
+            self.register_buffer("source_vars", torch.tensor(1.0, device=self.device))  # temporal init
         else:
             raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
         self.source_stats = dict(
@@ -389,8 +389,8 @@ class CascadeAnchor(nn.Module):
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
                     var = torch.stack(self.source_stats['running_vars']).mean(dim=0)
-                    self.source_stats['mean'] = self.source_means = mean.detach().to(self.device)
-                    self.source_stats['var'] = self.source_vars = var.detach().to(self.device)
+                    self.source_means.copy_(mean)
+                    self.source_vars.copy_(var)
 
             self.source_stats['running_means'] = []
             self.source_stats['running_vars'] = []
