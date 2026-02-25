@@ -8,19 +8,17 @@ from ...base import AdaptationConfig
 class TargetKeyPreset(Enum):
     """
     Preset patterns for cascade_target.
-    Strategies (S1~S5) are applied to the **EARLY 5 Blocks** of the backbone to fast optimization.
+    Strategies are applied to the **EARLY 5 Blocks** of the backbone to fast optimization.
     """
-    RESNET = [  # ResNet: res2 (2 blocks) + res3 (3 blocks) / stages 0 + 1 = 5 blocks
+    RESNET = [  # ResNet: res2 (3 blocks) + res3 (3 blocks) / stages 0 + 1 = 6 blocks
         r"\.res[23]\.[012]$",  # BottleneckBlock (Detectron2)
         r"\.stages\.[01]\.layers\.[012]$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
-    SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) + layer2-0 (1 block) = 5 blocks
+    SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) = 4 blocks
         r"\.layers\.[01]\.blocks\.[012]$",  # SwinTransformerBlock
-        #r"\.layers\.2\.blocks\.0$",  # SwinTransformerBlock
     ]
-    C3K2 = [  # Yolo 11: model.2(2) + model.4(2) + model.6(2) = 6 blocks
+    C3K2 = [  # Yolo 11: model.2(2) + model.4(2) = 4 blocks
         r"(^|\.)model\.[24]\.m\.0\.m\.[01]$",  # C3k2 Bottleneck
-        #r"(^|\.)model\.6\.m\.0$",  # C3k2 Bottleneck
     ]
 
 
@@ -61,14 +59,14 @@ class FlowAdaptationConfig(AdaptationConfig):
             RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.RESNET.value, reduce_dim=(0, 2, 3), **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.SWIN.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.SWIN.value, reduce_dim=(0, 1, 2), **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.RESNET.value, reduce_dim=(0, 2, 3), **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.C3K2.value,
+                cascade_target=TargetKeyPreset.C3K2.value, reduce_dim=(0, 2, 3),
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:
