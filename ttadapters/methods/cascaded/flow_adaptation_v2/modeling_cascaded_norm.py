@@ -408,8 +408,10 @@ class CascadeAnchor(nn.Module):
         if self.training:
             if self.anchor_type == SupportedNormType.LN:
                 with torch.no_grad():
-                    self.source_stats['running_means'].append(self.forward_stats['mean'].detach())
-                    self.source_stats['running_vars'].append(self.forward_stats['var'].detach())
+                    reduce_dim = self.reduce_dim
+                    reduce_dim = (d for d in reduce_dim if d != 0)
+                    self.source_stats['running_means'].extend(target_data.mean(dim=reduce_dim))
+                    self.source_stats['running_vars'].extend(target_data.var(dim=reduce_dim, unbiased=False))
                     self.source_stats['num_samples'] += x.shape[0]
 
         return self.norm(x)
