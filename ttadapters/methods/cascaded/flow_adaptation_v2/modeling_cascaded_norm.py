@@ -626,7 +626,7 @@ class CascadedNormEngine(AdaptationEngine):
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = len(self.dist_norm.anchors[0]._source_stats['mean'])
+                count = self.dist_norm.anchors[0].source_stats['num_samples']
                 if count >= max_samples:
                     break
 
