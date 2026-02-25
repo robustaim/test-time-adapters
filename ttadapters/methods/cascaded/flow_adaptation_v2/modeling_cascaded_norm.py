@@ -604,7 +604,7 @@ class CascadedNormEngine(AdaptationEngine):
             return None
 
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
-        has_ln = any(m.anchor_type == SupportedNormType.LN for m in self.dist_norm.modules())
+        has_ln = any(m.anchor_type == SupportedNormType.LN for m in self.dist_norm.anchors)
         if not has_ln:
             return  # do nothing if feature alignment is not used
 
