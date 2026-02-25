@@ -1,4 +1,4 @@
-from typing import Literal, Tuple
+from typing import Literal
 from enum import Enum
 import re
 
@@ -84,7 +84,7 @@ class CLAHETransform(nn.Module):
         self.clip_limit = config.clahe_clip_limit
         self.tile_size = config.clahe_tile_size
 
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, int]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, tuple[float, int]]:
         _, H, W = image.shape  # image shape: (C=3, H, W)
 
         # Adaptive Grid Size Calculation
@@ -155,7 +155,7 @@ class GammaTransform(nn.Module):
 
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, float, float]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, tuple[float, float, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
@@ -181,7 +181,7 @@ class CLAHEGammaTransform(nn.ModuleList):
         super().__init__([CLAHETransform(config), GammaTransform(config)])
         self.gate_raw = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         clahe_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
 
         transformed, clahe_params = self[0](image)
@@ -195,7 +195,7 @@ class CLAHEGammaTransform(nn.ModuleList):
 
 
 class CLAHEGammaResidualTransform(CLAHEGammaTransform):
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         residual_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
 
         transformed, clahe_params = self[0](image)
