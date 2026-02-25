@@ -351,12 +351,11 @@ class CascadeAnchor(nn.Module):
     - KL Divergence: KL divergence between source and target domains
     """
 
-    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module, eps: float = 1e-6):
+    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
-        self.eps = eps
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
@@ -366,7 +365,7 @@ class CascadeAnchor(nn.Module):
             self.register_buffer("source_vars", original_norm.running_var.clone())
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN  # LN requires source stats to be computed
-            self.reduce_dim = (0, 1)  # Hidden dimension-wise
+            self.reduce_dim = (0, 1, 2)  # Total
             self.register_buffer("source_means", torch.tensor([0.0], device=self.device))  # temporal init
             self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))  # temporal init
         else:
@@ -400,8 +399,6 @@ class CascadeAnchor(nn.Module):
     def forward(self, x):
         target_data = x
         reduce_dim = self.reduce_dim
-        if self.anchor_type == SupportedNormType.LN:
-            target_data = x / (x.mean(dim=-1, keepdim=True) + self.eps)
 
         self.forward_stats['mean'] = target_data.mean(dim=reduce_dim)
         self.forward_stats['var'] = target_data.var(dim=reduce_dim, unbiased=False)
