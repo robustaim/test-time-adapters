@@ -84,7 +84,7 @@ class CLAHETransform(nn.Module):
         self.clip_limit = config.clahe_clip_limit
         self.tile_size = config.clahe_tile_size
 
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, tuple[float, int]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         _, H, W = image.shape  # image shape: (C=3, H, W)
 
         # Adaptive Grid Size Calculation
@@ -109,7 +109,7 @@ class CLAHETransform(nn.Module):
         image_rgb = image_rgb.astype(np.float32)
         image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1)  # (C, H, W)
 
-        return image_tensor.to(image.device, dtype=image.dtype), (self.clip_limit, self.tile_size)
+        return image_tensor.to(image.device, dtype=image.dtype), {'clip_limit': self.clip_limit, 'tile_size': self.tile_size}
 
 
 class GammaTransform(nn.Module):
@@ -155,7 +155,7 @@ class GammaTransform(nn.Module):
 
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, tuple[float, float, float]]:
+    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
@@ -168,7 +168,7 @@ class GammaTransform(nn.Module):
                 image[c], self.noise_floor, self.saturation_limit, gamma
             )
 
-        return stretched, (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
+        return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
