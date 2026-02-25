@@ -177,7 +177,7 @@ class GammaTransform(nn.Module):
 
 
 class CLAHEGammaTransform(nn.ModuleList):
-    def __init__(self, config: FlowAdaptationConfig):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__([CLAHETransform(config), GammaTransform(config)])
         self.gate_raw = nn.Parameter(torch.tensor(0.0))
 
@@ -210,7 +210,7 @@ class InputTransformation(nn.Module):
     Input Transformation Module which creates different view of input image.
     """
 
-    def __init__(self, config: FlowAdaptationConfig):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
         self.applied_params: dict = {}
