@@ -356,7 +356,6 @@ class CascadeAnchor(nn.Module):
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
-        self.device = next(wrapped_module.parameters()).device
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
@@ -374,6 +373,10 @@ class CascadeAnchor(nn.Module):
         self.source_stats = dict(
             mean=self.source_means, var=self.source_vars, running_means=[], running_vars=[], num_samples=0
         )
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.norm.parameters()).device
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
