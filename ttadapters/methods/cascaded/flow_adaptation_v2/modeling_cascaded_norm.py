@@ -365,7 +365,7 @@ class CascadeAnchor(nn.Module):
             self.register_buffer("source_vars", original_norm.running_var.clone())
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN  # LN requires source stats to be computed
-            self.reduce_dim = (0, 1, 2)  # Total
+            self.reduce_dim = None  # Total
             self.register_buffer("source_means", torch.tensor([0.0], device=self.device))  # temporal init
             self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))  # temporal init
         else:
@@ -406,9 +406,9 @@ class CascadeAnchor(nn.Module):
         if self.training:
             if self.anchor_type == SupportedNormType.LN:
                 with torch.no_grad():
-                    reduce_dim = tuple(d for d in reduce_dim if d != 0)
-                    self.source_stats['running_means'].extend(target_data.mean(dim=reduce_dim))
-                    self.source_stats['running_vars'].extend(target_data.var(dim=reduce_dim, unbiased=False))
+                    dim = tuple(range(1, x.ndim))  # exclude batch dim
+                    self.source_stats['running_means'].extend(target_data.mean(dim=dim))
+                    self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
                     self.source_stats['num_samples'] += x.shape[0]
 
         return self.norm(x)
