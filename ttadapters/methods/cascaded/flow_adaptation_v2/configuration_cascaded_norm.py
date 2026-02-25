@@ -11,7 +11,7 @@ class TargetKeyPreset(Enum):
     Strategies are applied to the **EARLY Blocks** of the backbone to fast optimization.
     """
     RESNET = [  # ResNet: res2 (3 blocks) / stages 0 = 3 blocks
-        r"\.res3.*\.conv[123]\.norm$",  # BottleneckBlock (Detectron2)
+        r"\.res2.*\.conv[123]\.norm$",  # BottleneckBlock (Detectron2)
         r"\.stages\.0.*\.layer\.[012]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
     ]
     SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) = 4 blocks
