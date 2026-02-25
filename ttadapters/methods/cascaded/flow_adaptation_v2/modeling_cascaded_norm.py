@@ -1,4 +1,4 @@
-from typing import Literal, Tuple, Dict
+from typing import Literal, Tuple
 from enum import Enum
 import re
 
@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from ...base import AdaptationEngine
 from ....models.base import BaseModel, ModelProvider, DataPreparation
 
-from .configuration_flow_adaptation import FlowAdaptationConfig
+from .configuration_cascaded_norm import CascadedNormConfig
 
 
 class GaussianKLDivLoss(nn.Module):
@@ -78,13 +78,13 @@ class GaussianKLDivLoss(nn.Module):
 class CLAHETransform(nn.Module):
     """CLAHE Transform Module. (Not differentiable)"""
 
-    def __init__(self, config: FlowAdaptationConfig):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
         self.clip_limit = config.clahe_clip_limit
         self.tile_size = config.clahe_tile_size
 
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, int]]:
         _, H, W = image.shape  # image shape: (C=3, H, W)
 
         # Adaptive Grid Size Calculation
@@ -109,13 +109,13 @@ class CLAHETransform(nn.Module):
         image_rgb = image_rgb.astype(np.float32)
         image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1)  # (C, H, W)
 
-        return image_tensor.to(image.device, dtype=image.dtype), {'clip_limit': self.clip_limit, 'tile_size': self.tile_size}
+        return image_tensor.to(image.device, dtype=image.dtype), (self.clip_limit, self.tile_size)
 
 
 class GammaTransform(nn.Module):
     """Differentiable Gamma Transformation Module by histogram stretching."""
 
-    def __init__(self, config: FlowAdaptationConfig):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
         self.temperature = config.gamma_temperature
@@ -155,7 +155,7 @@ class GammaTransform(nn.Module):
 
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, Tuple[float, float, float]]:
         """Apply stretching to image with gamma correction."""
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
@@ -168,7 +168,7 @@ class GammaTransform(nn.Module):
                 image[c], self.noise_floor, self.saturation_limit, gamma
             )
 
-        return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
+        return stretched, (self.noise_floor.item(), self.saturation_limit.item(), gamma.item())
 
     def get_regularization_loss(self):
         """Compute regularization loss relative to initialization anchors."""
@@ -240,9 +240,47 @@ class InputTransformation(nn.Module):
         return self.transform.get_regularization_loss()
 
 
+class SupportedNormType(Enum):
+    BN = "BN"
+    LN = "LN"
+
+
+class AnchorList(nn.ModuleList):
+    """Wrapper for nn.ModuleList to customize __repr__."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bn_count = 0
+        self.ln_count = 0
+
+    def append(self, item: "CascadeAnchor"):
+        if not isinstance(item, CascadeAnchor):
+            raise TypeError("item must be CascadeAnchor")
+
+        super().append(item)
+        if item.anchor_type == SupportedNormType.BN:
+            self.bn_count += 1
+        elif item.anchor_type == SupportedNormType.LN:
+            self.ln_count += 1
+
+    def __repr__(self) -> str:
+        params = []
+        if self.bn_count > 0:
+            params.append(f"BN={self.bn_count}")
+        if self.ln_count > 0:
+            params.append(f"LN={self.ln_count}")
+        param_str = ", ".join(params)
+        module_name = self.__class__.__name__
+        return super().__repr__().replace(module_name, f"{module_name}({param_str})")
+
+
 class CascadedNorm(nn.Module):
     """
-    CascadedNorm: Cascaded Input Distribution Normalization via Flow Adaptation.
+    CascadedNorm: Cascaded Input Distribution Normalization via Flow Adaptation (Synchronization).
+
+    [Theoretical Background]
+    This module implements Test-Time Adaptation by synchronizing the feature statistics
+    across multiple layers (Anchors) of the network.
 
     The term "normalization" refers to distribution matching
     between source and target domains, achieved through:
@@ -253,16 +291,22 @@ class CascadedNorm(nn.Module):
     that satisfies the statistical constraints of all inserted anchors simultaneously.
     (Learns to normalize input pixel distribution through adaptive transformation with cascaded layer-wise supervision.)
 
+    [Mechanism: Flow Adaptation / Synchronization]
+    By enforcing standard deviation consistency (N(0,1)) or restoring source feature statistics 
+    at multiple depths (Cascaded Anchors), we ensure that the 'information flow' remains valid
+    from the first layer to the last. This effectively synchronizes the feature response
+    of the target domain with the source domain's canonical state.
+
     Args:
-        config: FlowAdaptationConfig with learning parameters
+        config: CascadedNormConfig with learning parameters
     """
 
-    def __init__(self, config: FlowAdaptationConfig):
+    def __init__(self, config: CascadedNormConfig):
         super().__init__()
         self.config = config
 
         self.itm = InputTransformation(config)  # Input Transformation Module
-        self.anchors = nn.ModuleList()
+        self.anchors = AnchorList()
 
     def online_parameters(self):
         """Get learnable parameters for optimization."""
@@ -281,48 +325,63 @@ class CascadedNorm(nn.Module):
 
 class CascadeAnchor(nn.Module):
     """
-    Cascade Anchor Module: A checkpoint for Feature Flow Adaptation.
+    Cascade Anchor Module: A checkpoint for Feature Flow Synchronization.
+
+    This module wraps normalization layers to act as 'statistical anchors'.
+    It calculates the deviation of the current feature flow from the expected 
+    source distribution (either N(0,1) or stored running statistics).
+
+    [Role in Synchronization]
+    While each anchor computes a local loss, the aggregated gradients from all anchors
+    guide the Input Transformation Module (ITM) to find a globally optimal view.
+    This ensures that the input signal propagates through the network without 
+    statistical collapse (vanishing/exploding features) at any depth.
 
     Supported normalization layers:
     - nn.BatchNorm2d / FrozenBatchNorm2d
     - nn.LayerNorm
+
+    Default behavior:
+    - Norm Linearization: Tries to linearize the original normalization layer
+
+    Optional operations:
+    * Feature below is only applied when specified in the config
+    - Feature Alignment: Align the feature distribution between source and target domains
+                        (will be used instead of norm linearization)
+    - KL Divergence: KL divergence between source and target domains
     """
 
-    def __init__(self, config: FlowAdaptationConfig, wrapped_module: nn.Module, loss_fn: nn.Module):
+    def __init__(self, config: CascadedNormConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
-        self.wrapped = wrapped_module
+        self.norm = original_norm
         self.loss_fn = loss_fn
-        self.reduce_dim: tuple[int, ...] | None = self.config.reduce_dim
         self.device = next(wrapped_module.parameters()).device
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
-        self.register_buffer("source_means", torch.tensor([0.0], device=self.device))
-        self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))
+        if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
+            self.anchor_type = SupportedNormType.BN  # BN uses running stats
+            self.reduce_dim = (0, 2, 3)  # Channel-wise
+            self.register_buffer("source_means", original_norm.running_mean.clone())
+            self.register_buffer("source_vars", original_norm.running_var.clone())
+        elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
+            self.anchor_type = SupportedNormType.LN  # LN requires source stats to be computed
+            self.reduce_dim = (0, 1)  # Hidden dimension-wise
+            self.register_buffer("source_means", torch.tensor([0.0], device=self.device))  # temporal init
+            self.register_buffer("source_vars", torch.tensor([1.0], device=self.device))  # temporal init
+        else:
+            raise NotImplementedError(f"Unsupported normalization layer: {type(original_norm)}")
         self.source_stats = dict(
             mean=self.source_means, var=self.source_vars, running_means=[], running_vars=[], num_samples=0
         )
 
     def __repr__(self) -> str:
         module_name = self.__class__.__name__
-        overrides_from = self.wrapped.__class__.__name__
-        overrides_to = f"{module_name}(wrapped={overrides_from}, reduce_dim={self.reduce_dim}, loss_fn={self.loss_fn.__class__.__name__})"
-        return self.wrapped.__repr__().replace(overrides_from, overrides_to)
-
-    def __setattr__(self, name, value):
-        if name in ("H", "W"):  # for swin transformer backbone
-            setattr(self.wrapped, name, value)
-        else:
-            super().__setattr__(name, value)
-
-    def __getattr__(self, name):
-        if name in ("H", "W"):  # for swin transformer backbone
-            return getattr(self.wrapped, name)
-        return super().__getattr__(name)
+        return f"{module_name}(norm={self.norm}, loss_fn={self.loss_fn.__class__.__name__})"
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if not mode:
+        if not mode and self.anchor_type == SupportedNormType.LN:  # only for LN
             if self.source_stats['num_samples'] > 0:  # finalize source stats
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
@@ -334,19 +393,22 @@ class CascadeAnchor(nn.Module):
             self.source_stats['running_vars'] = []
             self.source_stats['num_samples'] = 0
 
-    def forward(self, x, *args, **kwargs):
-        out = self.wrapped(x, *args, **kwargs)
+    def forward(self, x):
+        target_data = x
+        if self.anchor_type == SupportedNormType.LN:
+            target_data = x / (x.mean(dim=-1, keepdim=True) + eps)
 
-        self.forward_stats['mean'] = out.mean(dim=self.reduce_dim)
-        self.forward_stats['var'] = out.var(dim=self.reduce_dim, unbiased=False)
+        self.forward_stats['mean'] = target_data.mean(dim=self.reduce_dim)
+        self.forward_stats['var'] = target_data.var(dim=self.reduce_dim, unbiased=False)
 
         if self.training:
-            with torch.no_grad():
-                self.source_stats['running_means'].append(self.forward_stats['mean'].detach())
-                self.source_stats['running_vars'].append(self.forward_stats['var'].detach())
-                self.source_stats['num_samples'] += x.shape[0]
+            if self.anchor_type == SupportedNormType.LN:
+                with torch.no_grad():
+                    self.source_stats['running_means'].append(self.forward_stats['mean'].detach())
+                    self.source_stats['running_vars'].append(self.forward_stats['var'].detach())
+                    self.source_stats['num_samples'] += x.shape[0]
 
-        return out
+        return self.norm(x)
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
@@ -372,9 +434,9 @@ class CascadeAnchor(nn.Module):
         return loss
 
 
-class FlowAdaptationEngine(AdaptationEngine):
+class CascadedNormEngine(AdaptationEngine):
     """
-    Flow Adaptation Engine
+    Cascaded Norm Adaptation Engine
     Injects CascadedNorm module into the base model.
 
     Supports:
@@ -386,20 +448,20 @@ class FlowAdaptationEngine(AdaptationEngine):
 
     Args:
         base_model: Pre-trained model
-        config: FlowAdaptationConfig with learning parameters
+        config: CascadedNormConfig with learning parameters
 
     Example:
-        >>> config = FlowAdaptationConfig(
+        >>> config = CascadedNormConfig(
         ...     itm_type="gamma",
         ...     cascade_target=["layer4"]
         ... )
-        >>> adaptive_model = FlowAdaptationEngine(base_model, config)
+        >>> adaptive_model = CascadedNormEngine(base_model, config)
         >>> output = adaptive_model(batch)
     """
-    model_name: str = "FlowAdaptationEngine"
+    model_name: str = "CascadedNormEngine"
     loss_class = nn.MSELoss
 
-    def __init__(self, base_model: BaseModel, config: FlowAdaptationConfig):
+    def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
         self.dist_norm: CascadedNorm  # will be initialized in _pre_init()
         self.dist_norm_state: dict
         self.config = config
@@ -437,8 +499,21 @@ class FlowAdaptationEngine(AdaptationEngine):
         # Device
         self.to(self.device, dtype=self.dtype)
 
-    def _extract_target_layers(self):
-        # Recursively extract layers and replace with CascadeAnchors
+    @staticmethod
+    def _is_norm_layer(module: nn.Module) -> bool:
+        return isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)) or "BatchNorm2d" in module.__class__.__name__ or "LayerNorm" in module.__class__.__name__
+
+    def _extract_norm_layers(self):
+        # count every norm layers
+        norm_layer_keys = []
+        for name, module in self.base_model.named_modules():
+            if self._is_norm_layer(module):
+                norm_layer_keys.append(name)
+
+        if self.config.verbose:
+            print(f"  Total Norm Layers     : {len(norm_layer_keys)}")
+
+        # Recursively extract norm layers and replace with CascadeAnchors
         # Compile pattern: if None, match all; otherwise match provided patterns
         cascade_target_re = None if self.config.cascade_target is None else re.compile(
             "|".join(f"({p})" for p in self.config.cascade_target), flags=re.IGNORECASE
@@ -451,21 +526,23 @@ class FlowAdaptationEngine(AdaptationEngine):
         applied_list = self.dist_norm.anchors
         applied_key_list = []
         for name, module in self.base_model.named_modules():
-            # 1. Safety Check: Skip if matches exclude_target
-            if exclude_target_re and exclude_target_re.search(name):
-                continue
-
-            # 2. Target Check:
-            # If cascade_target is None -> Target All (Default)
-            # If cascade_target is Set -> Target Only Matches
-            if cascade_target_re is None or cascade_target_re.search(name):
-                # Check if already wrapped (to prevent double wrapping if called multiple times)
-                if isinstance(module, CascadeAnchor):
+            # Check if module is a norm layer
+            if self._is_norm_layer(module):
+                # 1. Safety Check: Skip if matches exclude_target
+                if exclude_target_re and exclude_target_re.search(name):
                     continue
-                anchor = CascadeAnchor(self.config, module, self.loss_function)
-                applied_list.append(anchor)
-                applied_key_list.append(name)
-                self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
+
+                # 2. Target Check:
+                # If cascade_target is None -> Target All (Default)
+                # If cascade_target is Set -> Target Only Matches
+                if cascade_target_re is None or cascade_target_re.search(name):
+                    # Check if already wrapped (to prevent double wrapping if called multiple times)
+                    if isinstance(module, CascadeAnchor):
+                        continue
+                    anchor = CascadeAnchor(self.config, module, self.loss_function)
+                    applied_list.append(anchor)
+                    applied_key_list.append(name)
+                    self._replace_module(name, anchor)  # Replace the original norm layer with the anchor
 
         if self.config.verbose:
             target_str = str(self.config.cascade_target) if self.config.cascade_target else "All (Default)"
@@ -524,6 +601,10 @@ class FlowAdaptationEngine(AdaptationEngine):
             return None
 
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
+        has_ln = any(m.anchor_type == SupportedNormType.LN for m in self.dist_norm.modules())
+        if not has_ln:
+            return  # do nothing if feature alignment is not used
+
         from tqdm.auto import tqdm
         from torch.utils.data import DataLoader
         from ....utils.validator import DetectionEvaluator
@@ -534,14 +615,14 @@ class FlowAdaptationEngine(AdaptationEngine):
         self.eval()  # turn on eval mode so that the base model doesn't update its parameters
         for anchor in self.dist_norm.anchors:
             anchor.train()
-            anchor.wrapped.eval()
+            anchor.norm.eval()
 
         loader = DataLoader(source_dataset, batch_size=batch_size, collate_fn=source_dataset.collate_fn, **kwargs)
 
         def limit_samples():
             for batch in loader:
                 yield batch
-                count = self.dist_norm.anchors[0].source_stats['num_samples']
+                count = len(self.dist_norm.anchors[0]._source_stats['mean'])
                 if count >= max_samples:
                     break
 
