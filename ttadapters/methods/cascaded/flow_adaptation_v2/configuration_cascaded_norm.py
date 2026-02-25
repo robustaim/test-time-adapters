@@ -72,7 +72,7 @@ class CascadedNormConfig(AdaptationConfig):
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(cascade_target=TargetKeyPreset.SWINT.value, **kwargs)
+            return cls(cascade_target=TargetKeyPreset.SWIN.value, **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
