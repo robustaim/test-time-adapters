@@ -503,7 +503,7 @@ class CascadedNormEngine(AdaptationEngine):
     def _is_norm_layer(module: nn.Module) -> bool:
         return isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)) or "BatchNorm2d" in module.__class__.__name__ or "LayerNorm" in module.__class__.__name__
 
-    def _extract_norm_layers(self):
+    def _extract_target_layers(self):
         # count every norm layers
         norm_layer_keys = []
         for name, module in self.base_model.named_modules():
