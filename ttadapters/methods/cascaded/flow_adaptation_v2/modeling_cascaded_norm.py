@@ -399,17 +399,17 @@ class CascadeAnchor(nn.Module):
 
     def forward(self, x):
         target_data = x
+        reduce_dim = self.reduce_dim
         if self.anchor_type == SupportedNormType.LN:
             target_data = x / (x.mean(dim=-1, keepdim=True) + self.eps)
 
-        self.forward_stats['mean'] = target_data.mean(dim=self.reduce_dim)
-        self.forward_stats['var'] = target_data.var(dim=self.reduce_dim, unbiased=False)
+        self.forward_stats['mean'] = target_data.mean(dim=reduce_dim)
+        self.forward_stats['var'] = target_data.var(dim=reduce_dim, unbiased=False)
 
         if self.training:
             if self.anchor_type == SupportedNormType.LN:
                 with torch.no_grad():
-                    reduce_dim = self.reduce_dim
-                    reduce_dim = (d for d in reduce_dim if d != 0)
+                    reduce_dim = tuple(d for d in reduce_dim if d != 0)
                     self.source_stats['running_means'].extend(target_data.mean(dim=reduce_dim))
                     self.source_stats['running_vars'].extend(target_data.var(dim=reduce_dim, unbiased=False))
                     self.source_stats['num_samples'] += x.shape[0]
