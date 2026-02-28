@@ -10,9 +10,9 @@ METHODS=("norm_engine" "dua_engine" "actmad_engine" "mean_teacher_engine" "test_
 
 ERRORS=()
 
-echo "Running norm_engine with --adapt-batch 5"
-if ! uv run example.py --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 5; then
-    ERRORS+=("FAILED: method=norm_engine --adapt-batch 5")
+echo "Running norm_engine with --adapt-batch 4"
+if ! uv run example.py --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 4; then
+    ERRORS+=("FAILED: method=norm_engine --adapt-batch 4")
 fi
 
 for METHOD in "${METHODS[@]}"; do
