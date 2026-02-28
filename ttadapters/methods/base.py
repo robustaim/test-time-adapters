@@ -100,7 +100,7 @@ class AdaptationEngine(BaseModel, OnlineMixin):
             cls.model_type = re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', '_', cls.model_name).lower()
 
     def __init__(self, config: AdaptationConfig, base_model: BaseModel, **kwargs):
-        super(BaseModel, self).__init__(config, **kwargs)
+        super(BaseModel, self).__init__(**kwargs)
         self.config = config
         self.dataset_name = config.dataset_name
 
