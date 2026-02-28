@@ -121,7 +121,8 @@ class SwinAdapter(nn.Module):
 
 # WHW method
 class WHWEngine(AdaptationEngine):
-    model_name: str = "WHWEngine"
+    model_name = "WHWEngine"
+    config_class = WHWConfig
 
     def __init__(self, config: WHWConfig, base_model: BaseModel):
         super().__init__(config, base_model)
