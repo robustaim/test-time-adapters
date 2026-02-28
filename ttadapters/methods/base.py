@@ -94,7 +94,7 @@ class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if "model_name" in cls.__dict__:  # auto configuration
-            cls.model_type = re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', '_', cls.adaptation_name).lower()
+            cls.model_type = re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', '_', cls.model_name).lower()
 
     def __init__(self, config: AdaptationConfig, base_model: BaseModel, **kwargs):
         super(BaseModel, self).__init__(config, **kwargs)
