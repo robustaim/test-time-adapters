@@ -71,6 +71,9 @@ class AdaptationConfig(PretrainedConfig):
     momentum: float = 0.9
     verbose: bool = True
 
+    def __post_init__(self):
+        super().__init__()
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if "adaptation_name" in cls.__dict__:  # auto configuration
@@ -132,6 +135,14 @@ class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
     def _post_init(self):
         """Required init tasks after base model registration"""
         pass
+
+    def __getattr__(self, name):
+        if name == "base_model":
+            raise AttributeError(name)
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
 
     @property
     def device(self) -> torch.device:
