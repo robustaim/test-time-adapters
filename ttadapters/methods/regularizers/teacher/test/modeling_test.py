@@ -28,7 +28,8 @@ from .configuration_test import TeSTConfig
 
 
 class TeSTEngine(AdaptationEngine):
-    model_name: str = "TeSTEngine"
+    model_name = "TeSTEngine"
+    config_class = TeSTConfig
 
     def __init__(self, config: TeSTConfig, base_model: BaseModel):
         self.config: TeSTConfig

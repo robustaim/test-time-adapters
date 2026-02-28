@@ -101,7 +101,8 @@ class SaveOutputSwinT:
 
 # ActMAD method
 class ActMADEngine(AdaptationEngine):
-    model_name: str = "ActMADEngine"
+    model_name = "ActMADEngine"
+    config_class = ActMADConfig
 
     def __init__(self, config: ActMADConfig, base_model: BaseModel):
         super().__init__(config, base_model)

@@ -11,7 +11,8 @@ from .configuration_norm import NORMConfig
 
 
 class NORMEngine(AdaptationEngine):
-    model_name: str = "NORMEngine"
+    model_name = "NORMEngine"
+    config_class = NORMConfig
 
     def __init__(self, config: NORMConfig, base_model: BaseModel):
         super().__init__(config, base_model)

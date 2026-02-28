@@ -415,7 +415,8 @@ class PITEngine(AdaptationEngine):
         >>> adaptive_model = PITEngine(config, base_model)
         >>> output = adaptive_model(batch)
     """
-    model_name: str = "PITEngine"
+    model_name = "PITEngine"
+    config_class = PITConfig
     loss_class = nn.MSELoss
 
     def __init__(self, config: PITConfig, base_model: BaseModel):
@@ -602,7 +603,7 @@ class PITEngine(AdaptationEngine):
 
         # Find valid rows (H)
         # spatial_mask is True for padding, False for valid
-        # So rows where ALL pixels are padding are padding rows.
+        # So rows where ALL pixels are padding rows.
         is_padding_row = spatial_mask.all(dim=1) # (H,)
         valid_rows = torch.where(~is_padding_row)[0]
 

@@ -12,7 +12,8 @@ from .configuration_dua import DUAConfig
 
 
 class DUAEngine(AdaptationEngine):
-    model_name: str = "DUAEngine"
+    model_name = "DUAEngine"
+    config_class = DUAConfig
 
     def __init__(self, config: DUAConfig, base_model: BaseModel):
         super().__init__(config, base_model)

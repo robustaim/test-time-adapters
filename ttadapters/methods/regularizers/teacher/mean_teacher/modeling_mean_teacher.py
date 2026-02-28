@@ -29,7 +29,8 @@ from .configuration_mean_teacher import MeanTeacherConfig
 
 
 class MeanTeacherEngine(AdaptationEngine):
-    model_name: str = "MeanTeacherEngine"
+    model_name = "MeanTeacherEngine"
+    config_class = MeanTeacherConfig
 
     def __init__(self, config: MeanTeacherConfig, base_model: BaseModel):
         self.config: MeanTeacherConfig
