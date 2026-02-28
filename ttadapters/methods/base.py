@@ -84,7 +84,7 @@ class AdaptationConfig(PretrainedConfig):
         pass
 
 
-class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
+class AdaptationEngine(BaseModel, OnlineMixin):
     model_name: str = "AdaptationEngine"
     model_provider: ModelProvider = ModelProvider.HuggingFace
     loss_class = nn.MSELoss
@@ -135,14 +135,6 @@ class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
     def _post_init(self):
         """Required init tasks after base model registration"""
         pass
-
-    def __getattr__(self, name):
-        if name == "base_model":
-            raise AttributeError(name)
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.base_model, name)
 
     @property
     def device(self) -> torch.device:
