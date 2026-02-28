@@ -271,11 +271,22 @@ class AdaptationEngine(BaseModel, OnlineMixin):
             return getattr(self.base_model, name)
 
 
-class AutoAdaptationEngine(AutoModel):
-    pass
+class AutoAdaptationEngine:
+    _model_mapping = {}
+
+    @classmethod
+    def register(cls, config_class, model_class, exist_ok=False):
+        cls._model_mapping[config_class] = model_class
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        model_class = cls._model_mapping.get(type(config))
+        if model_class is None:
+            raise ValueError(f"No model registered for config type {type(config).__name__}")
+        return model_class(config, **kwargs)
 
 
-class AutoAdaptationEngineForObjectDetection(AutoModel):
+class AutoAdaptationEngineForObjectDetection(AutoAdaptationEngine):
     pass
 
 
