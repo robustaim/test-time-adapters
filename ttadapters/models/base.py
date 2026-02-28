@@ -4,6 +4,7 @@ from os import path, makedirs
 from enum import Enum
 import gc
 
+from transformers.util import PushToHHubMixin
 from torch import nn, load, save, hub, cuda
 from tqdm.auto import tqdm
 
@@ -27,11 +28,14 @@ class WeightsInfo:
     exclude_keys: Optional[list[str]] = None
 
 
-class BaseModel(nn.Module):
+class BaseModel(nn.Module, PushToHHubMixin):
     model_name: str = "BaseModel"
     model_provider: ModelProvider = ModelProvider.Detectron2  # Default provider
     DataPreparation = DataPreparation
     class Trainer:
+        pass
+
+    class Weights:
         pass
 
     def __init__(self, dataset: Union[BaseDataset, str] = ""):

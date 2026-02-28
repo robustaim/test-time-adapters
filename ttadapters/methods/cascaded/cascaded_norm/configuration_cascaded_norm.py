@@ -97,8 +97,8 @@ class CascadedNormConfig(AdaptationConfig):
     frequency_combination_kernel_size: int = 3
     frequency_combination_sigma: float = 1.0
 
-    # Anchor configutation
-    use_kl_divergence: bool = False
+    # Anchor configuration
+    use_kl_divergence: bool = True
     use_feature_alignment: bool = False
     use_bn_running_stat: bool = False
 

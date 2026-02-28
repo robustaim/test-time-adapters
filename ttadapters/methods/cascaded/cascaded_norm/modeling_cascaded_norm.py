@@ -620,7 +620,7 @@ class CascadedNormEngine(AdaptationEngine):
     model_name: str = "CascadedNormEngine"
     loss_class = nn.MSELoss
 
-    def __init__(self, base_model: BaseModel, config: CascadedNormConfig):
+    def __init__(self, config: CascadedNormConfig, base_model: BaseModel):
         self.dist_norm: CascadedNorm  # will be initialized in _pre_init()
         self.dist_norm_state: dict
         self.config = config
@@ -628,7 +628,7 @@ class CascadedNormEngine(AdaptationEngine):
         if self.config.use_kl_divergence:
             self.loss_class = GaussianKLDivLoss
 
-        super().__init__(base_model, config)
+        super().__init__(config, base_model)
 
     def _pre_init(self):
         # Transformation modules

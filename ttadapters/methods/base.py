@@ -1,27 +1,58 @@
-from typing import Literal, Self, Iterator
+from typing import Literal, Self, Iterator, ClassVar
 from dataclasses import dataclass
+import random
+import re
+
+import numpy as np
 
 import torch
 from torch import nn, optim
 from muon import Muon, MuonWithAuxAdam
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.models.auto.auto_factory import _BaseAutoModelClass, auto_class_update
 
 from ..models.base import BaseModel, ModelProvider, DataPreparation
 
 
 class MethodContainer(dict):
-    def __init__(self, *args, suffix: str = "Round", **kwargs):
+    seed_base = 42
+
+    def __init__(self, *args, total_round: int = 1, suffix: str = "Round", **kwargs):
         super().__init__(*args, **kwargs)
         self.current_round = 0
+        self.total_round = total_round
         self.suffix = suffix
 
     def names(self, round: int = None):
         if round is None:
             self.current_round += 1
             round = self.current_round
+            self.set_seed(self.seed_base + round)  # fixed seed per rounds
         return tuple(f"{name} {self.suffix} {round}" for name in self.keys())
 
     def methods(self):
         return tuple(self.values())
+
+    def go_rounds(self, start_round: int | None = None, end_round: int | None = None):
+        originals = torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        if start_round and start_round != self.current_round + 1:
+            self.current_round = start_round - 1
+        if end_round and end_round != self.total_round:
+            self.total_round = end_round
+
+        for i in range(self.current_round + 1, self.total_round + 1):
+            yield self.names()
+
+        torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = originals
+
+    def set_seed(self, seed: int = 42):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
 
 
 class OnlineMixin(nn.Module):
@@ -30,16 +61,27 @@ class OnlineMixin(nn.Module):
 
 
 @dataclass
-class AdaptationConfig:
-    adaptation_name: str = "AdaptationEngine"
+class AdaptationConfig(PretrainedConfig):
+    adaptation_name: ClassVar[str] = "AdaptationEngine"
+    model_type: ClassVar[str] = "adaptation_engine"
+
     dataset_name: str = ""
     optim: Literal["SGD", "Adam", "AdamW", "Muon", "MuonWithAuxAdam"] = "SGD"
     adapt_lr: float = 1e-4
     momentum: float = 0.9
     verbose: bool = True
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "adaptation_name" in cls.__dict__:  # auto configuration
+            cls.model_type = re.sub(r'(?<!^)(?=[A-Z])', '_', cls.adaptation_name).lower()
 
-class AdaptationEngine(BaseModel):
+    @classmethod
+    def from_preset(cls, base_model: BaseModel, **kwargs):
+        pass
+
+
+class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
     model_name: str = "AdaptationEngine"
     model_provider: ModelProvider = ModelProvider.HuggingFace
     loss_class = nn.MSELoss
@@ -49,8 +91,13 @@ class AdaptationEngine(BaseModel):
     class TrainingArguments:
         pass
 
-    def __init__(self, base_model: BaseModel, config: AdaptationConfig):
-        super(BaseModel, self).__init__()
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "model_name" in cls.__dict__:  # auto configuration
+            cls.model_type = re.sub(r'(?<!^)(?=[A-Z])', '_', cls.model_name).lower()
+
+    def __init__(self, config: AdaptationConfig, base_model: BaseModel, **kwargs):
+        super(BaseModel, self).__init__(config, **kwargs)
         self.config = config
         self.dataset_name = config.dataset_name
 
@@ -181,7 +228,7 @@ class AdaptationEngine(BaseModel):
     def _reset_stats(self):
         self._stats = {}
 
-    def fit(self, *args, **kwargs):
+    def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
         """
         Fitting adaptation engine to base model
         Implement this method if the adaptation method requires few-shot pretraining before adaptation
@@ -193,7 +240,9 @@ class AdaptationEngine(BaseModel):
         Reset model state (Return to basemodel state to get new experiment setup)
         Required for StandardTTA, GradualTTA Scenarios
         """
-        self.base_model.load_state_dict(self.base_state)
+        with torch.no_grad():
+            self.base_model.load_state_dict(self.base_state)
+
         self.online(self.adapting)
         self.to(self.device)
         self.to(self.dtype)
@@ -217,3 +266,17 @@ class AdaptationEngine(BaseModel):
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.base_model, name)
+
+
+class AutoAdaptationEngine(_BaseAutoModelClass):
+    """Auto class for Test-time Adaptation"""
+    _model_mapping = {}
+
+
+class AutoAdaptationEngineForObjectDetection(_BaseAutoModelClass):
+    """Auto class for TTA-OD"""
+    _model_mapping = {}
+
+
+AutoAdaptationEngine = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation")
+AutoAdaptationEngineForObjectDetection = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation - object detection")
