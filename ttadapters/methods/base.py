@@ -278,5 +278,6 @@ class AutoAdaptationEngineForObjectDetection(_BaseAutoModelClass):
     _model_mapping = {}
 
 
-AutoAdaptationEngine = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation")
-AutoAdaptationEngineForObjectDetection = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation - object detection")
+# TODO: Fix auto_class_update
+#AutoAdaptationEngine = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation")
+#AutoAdaptationEngineForObjectDetection = auto_class_update(AutoAdaptationEngine, head_doc="test time adaptation - object detection")
