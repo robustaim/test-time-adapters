@@ -44,7 +44,7 @@ class MethodContainer(dict):
             self.total_round = end_round
 
         for i in range(self.current_round + 1, self.total_round + 1):
-            yield self.names()
+            yield i, self.names()
 
         torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = originals
 
