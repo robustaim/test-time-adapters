@@ -1,10 +1,10 @@
-from typing import Union, Any, Optional
+from typing import Union, Optional
 from dataclasses import dataclass
 from os import path, makedirs
 from enum import Enum
 import gc
 
-from transformers.util import PushToHHubMixin
+from transformers.utils import PushToHubMixin
 from torch import nn, load, save, hub, cuda
 from tqdm.auto import tqdm
 
@@ -28,7 +28,7 @@ class WeightsInfo:
     exclude_keys: Optional[list[str]] = None
 
 
-class BaseModel(nn.Module, PushToHHubMixin):
+class BaseModel(nn.Module, PushToHubMixin):
     model_name: str = "BaseModel"
     model_provider: ModelProvider = ModelProvider.Detectron2  # Default provider
     DataPreparation = DataPreparation
