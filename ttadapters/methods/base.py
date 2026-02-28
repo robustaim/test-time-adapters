@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 from muon import Muon, MuonWithAuxAdam
-from transformers import PretrainedConfig, PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel, AutoModel
 from transformers.models.auto.auto_factory import _BaseAutoModelClass, auto_class_update
 
 from ..models.base import BaseModel, ModelProvider, DataPreparation
@@ -268,14 +268,22 @@ class AdaptationEngine(BaseModel, OnlineMixin, PreTrainedModel):
             return getattr(self.base_model, name)
 
 
-class AutoAdaptationEngine(_BaseAutoModelClass):
-    """Auto class for Test-time Adaptation"""
-    _model_mapping = {}
+class AutoAdaptationEngine(AutoModel):
+    pass
 
 
-class AutoAdaptationEngineForObjectDetection(_BaseAutoModelClass):
-    """Auto class for TTA-OD"""
-    _model_mapping = {}
+class AutoAdaptationEngineForObjectDetection(AutoModel):
+    pass
+
+
+#class AutoAdaptationEngine(_BaseAutoModelClass):
+#    """Auto class for Test-time Adaptation"""
+#    _model_mapping = {}
+
+
+#class AutoAdaptationEngineForObjectDetection(_BaseAutoModelClass):
+#    """Auto class for TTA-OD"""
+#    _model_mapping = {}
 
 
 # TODO: Fix auto_class_update
