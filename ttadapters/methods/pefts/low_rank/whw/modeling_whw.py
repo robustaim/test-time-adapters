@@ -589,10 +589,7 @@ class WHWEngine(AdaptationEngine):
             collate_fn = getattr(data_preparation, 'collate_fn', None)
             dataloader = DataLoader(data_preparation, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
             self.collect_source_stats(dataloader)
-            if self.config.source_stats_path:
-                self.base_model.s_stats = self.save_source_stats(self.config.source_stats_path)
-            else:
-                print("[WHWEngine] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
+            self.base_model.s_stats = self.save_source_stats(self.config.source_stats_path)
         self.initialize()
 
     def online_parameters(self) -> Iterator[nn.Parameter]:
@@ -826,8 +823,11 @@ class WHWEngine(AdaptationEngine):
                 print(f"[WHWEngine] KL divergence calculation failed for {k}: {e}")
 
         # Save
-        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
-        torch.save(feat_stats, save_path)
+        if save_path:
+            os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+            torch.save(feat_stats, save_path)
+            print(f"[WHWEngine] Saved source statistics to {save_path}")
+        else:
+            print("[WHWEngine] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
 
-        print(f"[WHWEngine] Saved source statistics to {save_path}")
         return feat_stats
