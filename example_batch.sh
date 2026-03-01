@@ -12,21 +12,36 @@ ERRORS=()
 
 uv run --no-sync jupyter nbconvert --to script ${NOTEBOOK}.ipynb
 
-echo "Running norm_engine with --adapt-batch 4 --total-rounds 1"
+# ----------------------------------------
+# norm_engine: --adapt-batch 4 --total-rounds 1
+# ----------------------------------------
+echo "▶ [1/8] norm_engine | adapt-batch=4  total-rounds=1"
+echo "----------------------------------------"
 if ! uv run --no-sync ${NOTEBOOK}.py --disable-datalog --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 4 --total-rounds 1; then
     ERRORS+=("FAILED: method=norm_engine --adapt-batch 4 --total-rounds 1")
 fi
+echo "----------------------------------------"
 
-echo "Running norm_engine with --adapt-batch 1 --total-rounds 1"
+# ----------------------------------------
+# norm_engine: --adapt-batch 1
+# ----------------------------------------
+echo "▶ [2/8] norm_engine | adapt-batch=1"
+echo "----------------------------------------"
 if ! uv run --no-sync ${NOTEBOOK}.py --disable-datalog --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 1; then
     ERRORS+=("FAILED: method=norm_engine --adapt-batch 1 --total-rounds 1")
 fi
+echo "----------------------------------------"
 
-for METHOD in "${METHODS[@]}"; do
-    echo "Running method: $METHOD"
+TOTAL=${#METHODS[@]}
+for i in "${!METHODS[@]}"; do
+    METHOD="${METHODS[$i]}"
+    IDX=$((i + 3))
+    echo "▶ [$IDX/$((TOTAL + 2))] $METHOD"
+    echo "----------------------------------------"
     if ! uv run --no-sync ${NOTEBOOK}.py --disable-datalog --dataset $DATASET --model $MODEL --method $METHOD --device $DEVICE; then
         ERRORS+=("FAILED: method=$METHOD")
     fi
+    echo "----------------------------------------"
 done
 
 # Error summary
@@ -40,5 +55,7 @@ if [ ${#ERRORS[@]} -gt 0 ]; then
     done
 else
     echo ""
+    echo "========================================"
     echo "All runs completed successfully!"
+    echo "========================================"
 fi
