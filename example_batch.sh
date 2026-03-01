@@ -1,23 +1,30 @@
 #!/bin/bash
 
-uv run jupyter nbconvert --to script example.ipynb
+# ./example_batch.sh [NOTEBOOK] [DATASET] [MODEL] [DEVICE]
+NOTEBOOK="${1:-example}"
+DATASET="${2:-shift}"
+MODEL="${3:-rcnn}"
+DEVICE="${4:-0}"
 
-DATASET="shift"
-MODEL="rcnn"
-DEVICE=0
-
-METHODS=("norm_engine" "dua_engine" "actmad_engine" "mean_teacher_engine" "test_engine" "whw_engine" "pit_engine")
+METHODS=("dua_engine" "actmad_engine" "mean_teacher_engine" "test_engine" "whw_engine" "pit_engine")
 
 ERRORS=()
 
-echo "Running norm_engine with --adapt-batch 4"
-if ! uv run example.py --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 4; then
-    ERRORS+=("FAILED: method=norm_engine --adapt-batch 4")
+uv run --no-sync jupyter nbconvert --to script ${NOTEBOOK}.ipynb
+
+echo "Running norm_engine with --adapt-batch 4 --total-rounds 1"
+if ! uv run --no-sync ${NOTEBOOK}.py --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 4 --total-rounds 1; then
+    ERRORS+=("FAILED: method=norm_engine --adapt-batch 4 --total-rounds 1")
+fi
+
+echo "Running norm_engine with --adapt-batch 1 --total-rounds 1"
+if ! uv run --no-sync ${NOTEBOOK}.py --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 1; then
+    ERRORS+=("FAILED: method=norm_engine --adapt-batch 1 --total-rounds 1")
 fi
 
 for METHOD in "${METHODS[@]}"; do
     echo "Running method: $METHOD"
-    if ! uv run example.py --dataset $DATASET --model $MODEL --method $METHOD --device $DEVICE; then
+    if ! uv run --no-sync ${NOTEBOOK}.py --dataset $DATASET --model $MODEL --method $METHOD --device $DEVICE; then
         ERRORS+=("FAILED: method=$METHOD")
     fi
 done
