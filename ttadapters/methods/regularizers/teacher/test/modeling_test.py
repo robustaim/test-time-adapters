@@ -449,7 +449,10 @@ class TeSTEngine(AdaptationEngine):
                 )
         return self._teacher_optimizer
 
-    def fit(self, dataloader, n_epochs: int = None):
+    def fit(self, dataloader, n_epochs: int = None, **kwargs):
+        if self.config.stage == "online":
+            return
+
         n_epochs = n_epochs or self.config.n_teacher_epochs
 
         self.teacher_model.train()
