@@ -26,11 +26,11 @@ class NORMEngine(AdaptationEngine):
         self.to(self.device)
 
     def _apply_norm_adaptation(self):
-        if self.config.model_type == "rcnn":
+        if self.config.base_type == "rcnn":
             self._apply_rcnn_norm()
-        elif self.config.model_type == "rtdetr":
+        elif self.config.base_type == "rtdetr":
             self._apply_rtdetr_norm()
-        elif self.config.model_type == "yolo11":
+        elif self.config.base_type == "yolo11":
             self._apply_yolo_norm()
 
     def _apply_rcnn_norm(self):
