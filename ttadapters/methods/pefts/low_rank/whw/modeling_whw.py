@@ -584,12 +584,15 @@ class WHWEngine(AdaptationEngine):
             self._div_thr = 2 * sum(self.base_model.s_div.values()) * self.config.skip_tau
 
     def fit(self, data_preparation=None, batch_size=1, **kwargs):
-        if self.base_model.s_stats is None and self.config.source_stats_path and data_preparation is not None:
+        if self.base_model.s_stats is None and data_preparation is not None:
             from torch.utils.data import DataLoader
             collate_fn = getattr(data_preparation, 'collate_fn', None)
             dataloader = DataLoader(data_preparation, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
             self.collect_source_stats(dataloader)
-            self.base_model.s_stats = self.save_source_stats(self.config.source_stats_path)
+            if self.config.source_stats_path:
+                self.base_model.s_stats = self.save_source_stats(self.config.source_stats_path)
+            else:
+                print("[WHWEngine] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
         self.initialize()
 
     def online_parameters(self) -> Iterator[nn.Parameter]:

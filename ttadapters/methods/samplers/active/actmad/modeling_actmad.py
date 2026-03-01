@@ -339,12 +339,15 @@ class ActMADEngine(AdaptationEngine):
                 warnings.warn(f"[ActMADEngine] Layer {layer_name} not found!")
 
     def fit(self, source_preparation=None, batch_size=None, **kwargs):
-        if self.clean_mean_list_final is None and self.config.statistic_save_path and source_preparation is not None:
+        if self.clean_mean_list_final is None  and source_preparation is not None:
             batch_size = batch_size or self.config.clean_bn_extract_batch
             collate_fn = getattr(source_preparation, 'collate_fn', None)
             dataloader = DataLoader(source_preparation, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
             self.extract_clean_statistics(dataloader)
-            self.save_statistics(self.config.statistic_save_path)
+            if self.config.statistic_save_path:
+                self.save_statistics(self.config.statistic_save_path)
+            else:
+                print("[ActMADEngine] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
 
     def online_parameters(self) -> Iterator[nn.Parameter]:
         return self.base_model.parameters()
