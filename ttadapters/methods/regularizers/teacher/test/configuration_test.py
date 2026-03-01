@@ -49,12 +49,12 @@ class TeSTConfig(AdaptationConfig):
             RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
-            return cls(base_type="rcnn", adapt_lr=5e-7, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=10, **kwargs)
+            return cls(base_type="rcnn", adapt_lr=5e-7, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=1, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(base_type="swinrcnn", adapt_lr=1e-8, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=10, **kwargs)
+            return cls(base_type="swinrcnn", adapt_lr=1e-8, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=1, **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
-            return cls(base_type="rtdetr", adapt_lr=1e-6, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=10, **kwargs)
+            return cls(base_type="rtdetr", adapt_lr=1e-6, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=1, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
-            return cls(base_type="yolo11", adapt_lr=1e-9, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=10, **kwargs)
+            return cls(base_type="yolo11", adapt_lr=1e-9, lambda_ent=0.5, n_teacher_epochs=10, n_student_steps=1, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
