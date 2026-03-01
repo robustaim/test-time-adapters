@@ -27,7 +27,7 @@ echo "----------------------------------------"
 # ----------------------------------------
 echo "▶ [2/8] norm_engine | adapt-batch=1"
 echo "----------------------------------------"
-if ! uv run --no-sync ${NOTEBOOK}.py --disable-datalog --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 1; then
+if ! uv run --no-sync ${NOTEBOOK}.py --disable-datalog --dataset $DATASET --model $MODEL --method norm_engine --device $DEVICE --adapt-batch 1 --total-rounds 1; then
     ERRORS+=("FAILED: method=norm_engine --adapt-batch 1 --total-rounds 1")
 fi
 echo "----------------------------------------"
