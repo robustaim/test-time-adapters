@@ -57,8 +57,8 @@ class PITConfig(AdaptationConfig):
     # Gamma parameters
     gamma_temperature: float = 0.01
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
-    gamma_noise_floor: float = 2.0
-    gamma_saturation_limit: float = 98.0
+    gamma_noise_floor: float = 0.0
+    gamma_saturation_limit: float = 100.0
 
     # Anchor configuration
     use_kl_divergence: bool = True  # if false, use MSE loss
