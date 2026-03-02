@@ -87,6 +87,9 @@ class CityScapesContinuousScenarioForGradualTTA(BaseGradualTTAScenario):
         CityScapesContinuousCorruptionType.BASE_TO_FOGGY,
         CityScapesContinuousCorruptionType.BASE_TO_RAIN,
         CityScapesContinuousCorruptionType.BASE_TO_SNOW,
+        CityScapesContinuousCorruptionType.FOG_TO_RAIN,
+        CityScapesContinuousCorruptionType.RAIN_TO_SNOW,
+        CityScapesContinuousCorruptionType.SNOW_TO_FROST,
     ]
     description = "CityScapes-Continuous Scenario For GradualTTA"
     dataset_class = CityScapesContinuousDatasetForObjectDetection

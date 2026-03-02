@@ -12,7 +12,9 @@ Usage:
     )
 """
 from typing import Optional, Callable, List, Tuple
-from os import makedirs
+from concurrent.futures import ProcessPoolExecutor
+from os import makedirs, path, walk
+from functools import partial
 from pathlib import Path
 from enum import Enum
 import json
@@ -26,6 +28,10 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import utils
 import torch
 
+from PIL import Image
+import numpy as np
+
+from imagecorruptions import corrupt
 from cityscapesscripts.helpers.labels import labels as cs_labels
 from cityscapesscripts.download import downloader
 from cityscapesscripts.download.downloader import login, download_packages
@@ -159,28 +165,40 @@ class CityScapesDataset(BaseDataset):
         if not silent:
             print("INFO: Dataset download and extraction completed.")
 
-    def _collect_files(self):
+    def _collect_files(
+        self, images_dir: Path | None = None, targets_dir: Path | None = None,
+        image_file_suffix: str | None = None, annotation_file_suffix: str | None = None
+    ):
         """Collect image and target file pairs"""
-        if not self.images_dir.exists():
+        if images_dir is None:
+            images_dir = self.images_dir
+        if targets_dir is None:
+            targets_dir = self.targets_dir
+        if image_file_suffix is None:
+            image_file_suffix = self.IMAGE_FILE_SUFFIX
+        if annotation_file_suffix is None:
+            annotation_file_suffix = self.ANNOTATION_FILE_SUFFIX
+
+        if not images_dir.exists():
             raise RuntimeError(
-                f"Dataset not found at {self.images_dir}. "
+                f"Dataset not found at {images_dir}. "
                 f"Please check if download was successful."
             )
 
         # Collect files for each city
         images, targets = [], []
-        for city_dir in sorted(self.images_dir.iterdir()):
+        for city_dir in sorted(images_dir.iterdir()):
             if not city_dir.is_dir():
                 continue
 
-            for img_path in sorted(city_dir.glob(f"*_{self.IMAGE_FILE_SUFFIX}.png")):
+            for img_path in sorted(city_dir.glob(f"*_{image_file_suffix}.png")):
                 images.append(img_path)
 
                 # Generate target file path
                 city = city_dir.name
-                base_name = img_path.stem.replace(f"_{self.IMAGE_FILE_SUFFIX}", "")
-                target_name = f"{base_name}_{self.ANNOTATION_FILE_SUFFIX}.json"
-                target_path = self.targets_dir / city / target_name
+                base_name = img_path.stem.replace(f"_{image_file_suffix}", "")
+                target_name = f"{base_name}_{annotation_file_suffix}.json"
+                target_path = targets_dir / city / target_name
 
                 if target_path.exists():
                     targets.append(target_path)
@@ -360,15 +378,91 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
         FOGGY = "foggy"
         RAIN = "rain"
         SNOW = "snow"
+        FROST = "frost"
+        BRIGHTNESS = "brightness"
+
+    IMAGE_PACKAGE_PREFIX_MAPPING = {
+        CorruptionType.BASE: "leftImg8bit",
+        CorruptionType.FOGGY: "leftImg8bit_foggyDBF",
+        CorruptionType.RAIN: "leftImg8bit_rain",
+        CorruptionType.SNOW: "leftImg8bit_snow",
+        CorruptionType.FROST: "leftImg8bit_frost",
+        CorruptionType.BRIGHTNESS: "leftImg8bit_brightness"
+    }
 
     def __init__(
-        self, root: str, force_download: bool = False, train: bool = True, valid: bool = False, min_area: int = 0,
+        self, root: str, force_download: bool = False,
+        train: bool = True, valid: bool = False,
+        corruption_type: CorruptionType | None = None, min_area: int = 0,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None,
     ):
         super().__init__(
             root=root, force_download=force_download, train=train, valid=valid, min_area=min_area,
             transform=transform, target_transform=target_transform, transforms=transforms
         )
+        self.corruption_type = corruption_type
+        domains = self._prepare_domains()
+        if self.corruption_type is None:  # all domains
+            for (dm_images, dm_targets) in domains.values():
+                self.images.extend(dm_images)
+                self.targets.extend(dm_targets)
+        else:
+            self.images, self.targets = domains[self.corruption_type.value]
+
+    def _prepare_domains(self) -> dict[str, tuple[list, list]]:
+        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS]
+        domains, domains_images_dir = {}, {}
+        for tp in self.CorruptionType:
+            if tp == self.CorruptionType.BASE:  # base domain is not corrupted
+                continue
+
+            prefix_mapping = self.IMAGE_PACKAGE_PREFIX_MAPPING[tp]
+            domains_images_dir[tp] = self.root / prefix_mapping / self.split
+            dir = Path(domains_images_dir[tp])
+
+            # Manual Corruption for Snow/Frost
+            if tp in manual_corruptions and (not dir.exists() or not any(dir.iterdir())):
+                dir.mkdir(parents=True, exist_ok=True)
+                tasks = []
+                for root, _, files in walk(self.images_dir):
+                    for file in files:
+                        if file.lower().endswith(".png"):
+                            tasks.append((root, file))
+                total_files = len(tasks)
+                print(f"INFO: Starting parallel processing for {total_files} files...")
+                with ProcessPoolExecutor() as executor:
+                    func = partial(self.process_single_image, input_root=self.images_dir, output_root=dir, corruption_name=tp.value)
+                    list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value} Corrupting"))
+                print(f"\nINFO: {tp.value} corrupting completed.")
+
+            domains[tp] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
+        return domains
+
+    @staticmethod
+    def process_single_image(
+        file_info, input_root, output_root,
+        original_file_suffix, new_file_suffix,
+        severities=(1, 3, 5), corruption_name="snow"
+    ):
+        root, file = file_info
+        input_path = path.join(root, file)
+
+        try:
+            img = Image.open(input_path).convert("RGB")
+            img_array = np.array(img, dtype=np.uint8)
+
+            for sev in severities:
+                corrupted_arr = corrupt(img_array, severity=sev, corruption_name=corruption_name)
+                new_filename = file.replace(original_file_suffix, f"{new_file_suffix}_severity_{sev}")
+
+                rel_path = path.relpath(root, input_root)
+                save_dir = path.join(output_root, rel_path)
+                makedirs(save_dir, exist_ok=True)
+                Image.fromarray(corrupted_arr).save(path.join(save_dir, new_filename))
+            return True
+        except Exception as e:
+            print(f"\nError processing {file}: {e}")
+            return False
 
 
 class CityScapesCorruptedDatasetForObjectDetection(CityScapesDiscreteDatasetForObjectDetection):
@@ -381,3 +475,72 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
         BASE_TO_FOGGY = "base_to_foggy"
         BASE_TO_RAIN = "base_to_rain"
         BASE_TO_SNOW = "base_to_snow"
+        FOG_TO_RAIN = "fog_to_rain"
+        RAIN_TO_SNOW = "rain_to_snow"
+        SNOW_TO_FROST = "snow_to_frost"
+
+    IMAGE_PACKAGE_PREFIX_MAPPING = {
+        CorruptionType.BASE_TO_FOGGY: "leftImg8bit_base2foggy",
+        CorruptionType.BASE_TO_RAIN: "leftImg8bit_base2rain",
+        CorruptionType.BASE_TO_SNOW: "leftImg8bit_base2snow",
+        CorruptionType.FOG_TO_RAIN: "leftImg8bit_fog2rain",
+        CorruptionType.RAIN_TO_SNOW: "leftImg8bit_rain2snow",
+        CorruptionType.SNOW_TO_FROST: "leftImg8bit_snow2frost"
+    }
+
+    def __init__(
+        self, root: str, force_download: bool = False,
+        train: bool = True, valid: bool = False,
+        corruption_type: CorruptionType = CorruptionType.BASE_TO_FOGGY, min_area: int = 0,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None,
+    ):
+        super(CityScapesDiscreteDatasetForObjectDetection, self).__init__(
+            root=root, force_download=force_download, train=train, valid=valid, min_area=min_area,
+            transform=transform, target_transform=target_transform, transforms=transforms
+        )
+        self.corruption_type = corruption_type
+        domains = self._prepare_domains()
+        self.images, self.targets = self._gather_combinations(*domains[self.corruption_type.value])
+
+    def _prepare_domains(self) -> dict[str, tuple[list, list]]:
+        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS]
+        domains, domains_images_dir = {}, {}
+        for tp in self.CorruptionType:
+            if tp == self.CorruptionType.BASE:  # base domain is not corrupted
+                continue
+
+            prefix_mapping = self.IMAGE_PACKAGE_PREFIX_MAPPING[tp]
+            domains_images_dir[tp] = self.root / prefix_mapping / self.split
+            dir = Path(domains_images_dir[tp])
+
+            # Manual Corruption for Snow/Frost
+            if tp in manual_corruptions and (not dir.exists() or not any(dir.iterdir())):
+                dir.mkdir(parents=True, exist_ok=True)
+                tasks = []
+                for root, _, files in walk(self.images_dir):
+                    for file in files:
+                        if file.lower().endswith(".png"):
+                            tasks.append((root, file))
+                total_files = len(tasks)
+                print(f"INFO: Starting parallel processing for {total_files} files...")
+                with ProcessPoolExecutor() as executor:
+                    func = partial(self.process_single_image, input_root=self.images_dir, output_root=dir, corruption_name=tp.value)
+                    list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value} Corrupting"))
+                print(f"\nINFO: {tp.value} corrupting completed.")
+
+            domains[tp] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
+        return domains
+
+    def _gather_combinations(self, corrupted_images, corrupted_targets):
+        base_images, base_targets = self.images, self.targets
+        if self.corruption_type == self.CorruptionType.BASE_TO_FOGGY:
+            suffix = ("_beta_0.005", "_beta_0.01", "_beta_0.02")
+        elif self.corruption_type == self.CorruptionType.BASE_TO_RAIN:
+            beta_suffix = ("_alpha_0.01_beta_0.005_dropsize_0.01", "_alpha_0.02_beta_0.01_dropsize_0.005", "_alpha_0.03_beta_0.015_dropsize_0.002")
+            pattern_sufix = tuple([f"_pattern_{i}" for i in range(1, 13)])
+            pass
+        elif self.corruption_type == self.CorruptionType.BASE_TO_SNOW:
+            suffix = ("_severity_1", "_severity_3", "_severity_5")
+            pass
+
+        return [], []

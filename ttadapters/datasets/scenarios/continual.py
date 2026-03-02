@@ -31,6 +31,8 @@ class CityScapesDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
         CityScapesDiscreteCorruptionType.FOGGY,
         CityScapesDiscreteCorruptionType.RAIN,
         CityScapesDiscreteCorruptionType.SNOW,
+        CityScapesDiscreteCorruptionType.FROST,
+        CityScapesDiscreteCorruptionType.BRIGHTNESS,
         CityScapesDiscreteCorruptionType.BASE,
     ]
     description = "CityScapes-Discrete Scenario For ContinualTTA"
