@@ -13,7 +13,7 @@ Usage:
 """
 from typing import Optional, Callable, List, Tuple
 from concurrent.futures import ProcessPoolExecutor
-from os import makedirs, path, walk
+from os import makedirs, path, walk, cpu_count
 from functools import partial
 from pathlib import Path
 from enum import Enum
@@ -107,7 +107,7 @@ class CityScapesDataset(BaseDataset):
         # Check which packages need to be downloaded
         packages_to_download = []
         for package in cls.REQUIRED_PACKAGES:
-            package_path = root_path / package.split("_")[0]
+            package_path = root_path / "_".join([p for p in package.replace(".zip", "").split("_") if "train" not in p])
             download_path = root_path / package
             if not package_path.exists() and not download_path.exists():
                 packages_to_download.append(package)
@@ -379,15 +379,13 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
         RAIN = "rain"
         SNOW = "snow"
         FROST = "frost"
-        BRIGHTNESS = "brightness"
 
     IMAGE_PACKAGE_PREFIX_MAPPING = {
         CorruptionType.BASE: "leftImg8bit",
         CorruptionType.FOGGY: "leftImg8bit_foggyDBF",
         CorruptionType.RAIN: "leftImg8bit_rain",
         CorruptionType.SNOW: "leftImg8bit_snow",
-        CorruptionType.FROST: "leftImg8bit_frost",
-        CorruptionType.BRIGHTNESS: "leftImg8bit_brightness"
+        CorruptionType.FROST: "leftImg8bit_frost"
     }
 
     def __init__(
@@ -402,15 +400,24 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
         )
         self.corruption_type = corruption_type
         domains = self._prepare_domains()
-        if self.corruption_type is None:  # all domains
-            for (dm_images, dm_targets) in domains.values():
+        if self.corruption_type == self.CorruptionType.BASE:
+            pass  # Do nothing
+        elif self.corruption_type is None:  # all domains
+            for dm_images, dm_targets in domains.values():
+                dm_images, dm_targets = self._gather_collections(dm_images, dm_targets)
                 self.images.extend(dm_images)
                 self.targets.extend(dm_targets)
         else:
-            self.images, self.targets = domains[self.corruption_type.value]
+            self.images, self.targets = self._gather_collections(*domains[self.corruption_type.value])
+
+    def _gather_collections(self, images, targets):
+        if self.corruption_type in [self.CorruptionType.FOGGY, self.CorruptionType.SNOW, self.CorruptionType.FROST]:
+            return self.filter_keep_skip(images), self.filter_keep_skip(targets)  # reduce dataset size
+        else:
+            return images, targets
 
     def _prepare_domains(self) -> dict[str, tuple[list, list]]:
-        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS]
+        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST]
         domains, domains_images_dir = {}, {}
         for tp in self.CorruptionType:
             if tp == self.CorruptionType.BASE:  # base domain is not corrupted
@@ -429,19 +436,32 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                         if file.lower().endswith(".png"):
                             tasks.append((root, file))
                 total_files = len(tasks)
-                print(f"INFO: Starting parallel processing for {total_files} files...")
-                with ProcessPoolExecutor() as executor:
-                    func = partial(self.process_single_image, input_root=self.images_dir, output_root=dir, corruption_name=tp.value)
-                    list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value} Corrupting"))
-                print(f"\nINFO: {tp.value} corrupting completed.")
+                workers = cpu_count() // 2
+                print(f"INFO: Starting parallel processing for {total_files} files using {workers} workers...")
+                with ProcessPoolExecutor(max_workers=workers, mp_context=__import__("multiprocessing").get_context("spawn")) as executor:
+                    func = partial(
+                        self.process_single_image, input_root=self.images_dir, output_root=dir,
+                        original_file_suffix=self.IMAGE_PACKAGE_PREFIX, new_file_suffix=prefix_mapping, corruption_name=tp.value
+                    )
+                    list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value.title()} Corrupting"))
+                print(f"\nINFO: {tp.value.title()} corrupting completed.")
 
-            domains[tp] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
+            domains[tp.value] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
         return domains
 
     @staticmethod
+    def filter_keep_skip(lst, keep=3, skip=3):
+        result = []
+        i = 0
+        while i < len(lst):
+            result.extend(lst[i:i+keep])
+            i += keep
+            i += skip
+        return result
+
+    @staticmethod
     def process_single_image(
-        file_info, input_root, output_root,
-        original_file_suffix, new_file_suffix,
+        file_info, input_root, output_root, original_file_suffix, new_file_suffix,
         severities=(1, 3, 5), corruption_name="snow"
     ):
         root, file = file_info
@@ -498,38 +518,9 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
             root=root, force_download=force_download, train=train, valid=valid, min_area=min_area,
             transform=transform, target_transform=target_transform, transforms=transforms
         )
-        self.corruption_type = corruption_type
-        domains = self._prepare_domains()
-        self.images, self.targets = self._gather_combinations(*domains[self.corruption_type.value])
-
-    def _prepare_domains(self) -> dict[str, tuple[list, list]]:
-        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS]
-        domains, domains_images_dir = {}, {}
-        for tp in self.CorruptionType:
-            if tp == self.CorruptionType.BASE:  # base domain is not corrupted
-                continue
-
-            prefix_mapping = self.IMAGE_PACKAGE_PREFIX_MAPPING[tp]
-            domains_images_dir[tp] = self.root / prefix_mapping / self.split
-            dir = Path(domains_images_dir[tp])
-
-            # Manual Corruption for Snow/Frost
-            if tp in manual_corruptions and (not dir.exists() or not any(dir.iterdir())):
-                dir.mkdir(parents=True, exist_ok=True)
-                tasks = []
-                for root, _, files in walk(self.images_dir):
-                    for file in files:
-                        if file.lower().endswith(".png"):
-                            tasks.append((root, file))
-                total_files = len(tasks)
-                print(f"INFO: Starting parallel processing for {total_files} files...")
-                with ProcessPoolExecutor() as executor:
-                    func = partial(self.process_single_image, input_root=self.images_dir, output_root=dir, corruption_name=tp.value)
-                    list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value} Corrupting"))
-                print(f"\nINFO: {tp.value} corrupting completed.")
-
-            domains[tp] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
-        return domains
+        #self.corruption_type = corruption_type
+        #domains = self._prepare_domains()
+        #self.images, self.targets = self._gather_combinations(*domains[self.corruption_type.value])
 
     def _gather_combinations(self, corrupted_images, corrupted_targets):
         base_images, base_targets = self.images, self.targets

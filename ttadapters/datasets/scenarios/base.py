@@ -1,5 +1,6 @@
 from typing import Optional, Callable
 from enum import Enum
+import inspect
 
 from torch.utils.data import DataLoader
 
@@ -35,11 +36,18 @@ class BaseScenario(dict):
             if exclude_list is not None and key in exclude_list:
                 continue
 
-            self[key] = self.dataset_class(
-                root=root, force_download=force_download,
-                train=train, valid=valid, subset_type=key,
-                transform=transform, target_transform=target_transform, transforms=transforms
-            )
+            if "subset_type" in inspect.signature(self.dataset_class).parameters:
+                self[key] = self.dataset_class(
+                    root=root, force_download=force_download,
+                    train=train, valid=valid, subset_type=key,
+                    transform=transform, target_transform=target_transform, transforms=transforms
+                )
+            else:
+                self[key] = self.dataset_class(
+                    root=root, force_download=force_download,
+                    train=train, valid=valid, corruption_type=key,
+                    transform=transform, target_transform=target_transform, transforms=transforms
+                )
 
     def __call__(self, *args, **kwargs):
         return self.load(*args, **kwargs)

@@ -238,6 +238,9 @@ class AdaptationEngine(BaseModel, OnlineMixin):
         """
         pass
 
+    def reset_adaptation(self, *args, **kwargs):
+        return self.reset(*args, **kwargs)
+
     def reset(self, reset_stats=False) -> dict | None:
         """
         Reset model state (Return to basemodel state to get new experiment setup)
