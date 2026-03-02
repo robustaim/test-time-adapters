@@ -13,7 +13,7 @@ class ActMADConfig(AdaptationConfig):
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
-    adapt_lr: float = 1e-5
+    adapt_lr: float = 1e-6
     momentum: float = 0.9
     weight_decay: float = 1e-4
 
