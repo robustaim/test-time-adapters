@@ -191,12 +191,12 @@ class CityScapesDataset(BaseDataset):
             if not city_dir.is_dir():
                 continue
 
-            for img_path in sorted(city_dir.glob(f"*_{image_file_suffix}.png")):
+            for img_path in sorted(city_dir.glob(f"*_{image_file_suffix}*png")):
                 images.append(img_path)
 
                 # Generate target file path
                 city = city_dir.name
-                base_name = img_path.stem.replace(f"_{image_file_suffix}", "")
+                base_name = img_path.stem.split(f"_{image_file_suffix}")[0]
                 target_name = f"{base_name}_{annotation_file_suffix}.json"
                 target_path = targets_dir / city / target_name
 
@@ -409,6 +409,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 self.targets.extend(dm_targets)
         else:
             self.images, self.targets = self._gather_collections(*domains[self.corruption_type.value])
+            print(len(self.images), len(self.targets))
 
     def _gather_collections(self, images, targets):
         if self.corruption_type in [self.CorruptionType.FOGGY, self.CorruptionType.SNOW, self.CorruptionType.FROST]:
@@ -426,6 +427,13 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
             prefix_mapping = self.IMAGE_PACKAGE_PREFIX_MAPPING[tp]
             domains_images_dir[tp] = self.root / prefix_mapping / self.split
             dir = Path(domains_images_dir[tp])
+
+            # Rename image file for Foggy
+            if tp == self.CorruptionType.FOGGY and not any(dir.rglob("*_foggyDBF_*.png")):
+                for img_path in dir.rglob("*_foggy_*.png"):
+                    new_name = img_path.stem.replace("_foggy_", "_foggyDBF_")
+                    new_path = img_path.parent / f"{new_name}.png"
+                    img_path.rename(new_path)
 
             # Manual Corruption for Snow/Frost
             if tp in manual_corruptions and (not dir.exists() or not any(dir.iterdir())):
