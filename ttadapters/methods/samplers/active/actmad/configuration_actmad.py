@@ -13,7 +13,7 @@ class ActMADConfig(AdaptationConfig):
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
-    adapt_lr: float = 1e-6
+    adapt_lr: float = 1e-7
     momentum: float = 0.9
     weight_decay: float = 1e-4
 
@@ -32,12 +32,12 @@ class ActMADConfig(AdaptationConfig):
             RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
-            return cls(base_type="rcnn", adaptation_layers="backbone", **kwargs)
+            return cls(base_type="rcnn", adapt_lr=1e-7, adaptation_layers="backbone", **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(base_type="swinrcnn", adaptation_layers="backbone", **kwargs)
+            return cls(base_type="swinrcnn", adapt_lr=1e-6, adaptation_layers="backbone", **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
-            return cls(base_type="rtdetr", adaptation_layers="backbone+encoder", **kwargs)
+            return cls(base_type="rtdetr", adapt_lr=1e-7, adaptation_layers="backbone+encoder", **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
-            return cls(base_type="yolo11", adaptation_layers="backbone", **kwargs)
+            return cls(base_type="yolo11", adapt_lr=1e-7, adaptation_layers="backbone", **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
