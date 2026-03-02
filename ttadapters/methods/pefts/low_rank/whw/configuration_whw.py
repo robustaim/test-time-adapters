@@ -57,8 +57,8 @@ class WHWConfig(AdaptationConfig):
         """Create configuration from preset."""
         from .....models import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection
         if isinstance(base_model, FasterRCNNForObjectDetection):
-            return cls(backbone="rcnn", skip_redundant="stat-period-ema", **kwargs)
+            return cls(backbone="rcnn", skip_redundant="stat-period-ema", adapt_lr=5e-4, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(backbone="swinrcnn", skip_redundant="stat-period-ema", **kwargs)
+            return cls(backbone="swinrcnn", skip_redundant="stat-period-ema", adapt_lr=5e-4, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
