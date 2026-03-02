@@ -1,14 +1,16 @@
 from typing import Optional, Callable
 
-from .base import BaseGradualTTAScenario, ScenarioType
+from .base import BaseGradualTTAScenario
 from .. import (
     SHIFTContinuousSubsetForObjectDetection,
     SHIFTContinuous10SubsetForObjectDetection,
-    SHIFTContinuous100SubsetForObjectDetection
+    SHIFTContinuous100SubsetForObjectDetection,
+    CityScapesContinuousDatasetForObjectDetection,
 )
 
 
-ContinuousSubsetType = SHIFTContinuousSubsetForObjectDetection.ContinuousSubsetType
+SHIFTContinuousCorruptionType = SHIFTContinuousSubsetForObjectDetection.ContinuousSubsetType
+CityScapesContinuousCorruptionType = CityScapesContinuousDatasetForObjectDetection.CorruptionType
 
 
 class SHIFTContinuousSubsetAggregationForObjectDetection(tuple):
@@ -20,7 +22,7 @@ class SHIFTContinuousSubsetAggregationForObjectDetection(tuple):
 
     def __init__(
         self, root: str, force_download: bool = False,
-        train: bool = True, valid: bool = False, subset_type: ContinuousSubsetType = ContinuousSubsetType.DAYTIME_TO_NIGHT,
+        train: bool = True, valid: bool = False, subset_type: SHIFTContinuousCorruptionType = SHIFTContinuousCorruptionType.DAYTIME_TO_NIGHT,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         super().__init__()
@@ -68,13 +70,23 @@ class SHIFTContinuousSubsetAggregationForObjectDetection(tuple):
 
 class SHIFTContinuousScenarioForGradualTTA(BaseGradualTTAScenario):
     DEFAULT = [
-        ContinuousSubsetType.DAYTIME_TO_NIGHT,
-        ContinuousSubsetType.CLEAR_TO_FOGGY,
-        ContinuousSubsetType.CLEAR_TO_RAINY,
+        SHIFTContinuousCorruptionType.DAYTIME_TO_NIGHT,
+        SHIFTContinuousCorruptionType.CLEAR_TO_FOGGY,
+        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY,
     ]
-    WHWPAPER = [
-        ContinuousSubsetType.CLEAR_TO_FOGGY,
-        ContinuousSubsetType.CLEAR_TO_RAINY,
+    WHWPAPER = [  # What-How-When Paper Setting
+        SHIFTContinuousCorruptionType.CLEAR_TO_FOGGY,
+        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY,
     ]
     description = "SHIFT-Continuous Scenario For GradualTTA"
     dataset_class = SHIFTContinuousSubsetAggregationForObjectDetection
+
+
+class CityScapesContinuousScenarioForGradualTTA(BaseGradualTTAScenario):
+    DEFAULT = [
+        CityScapesContinuousCorruptionType.BASE_TO_FOGGY,
+        CityScapesContinuousCorruptionType.BASE_TO_RAIN,
+        CityScapesContinuousCorruptionType.BASE_TO_SNOW,
+    ]
+    description = "CityScapes-Continuous Scenario For GradualTTA"
+    dataset_class = CityScapesContinuousDatasetForObjectDetection

@@ -351,19 +351,15 @@ class CityScapesDatasetForObjectDetection(CityScapesDataset):
 
 class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDetection):
     REQUIRED_PACKAGES = [
-        "leftImg8bit_trainvaltest.zip",  # Train/val/test images
-        "gtFine_trainvaltest.zip",       # Fine annotations
+        "leftImg8bit_trainvaltest.zip", "gtFine_trainvaltest.zip",
+        "leftImg8bit_trainval_foggyDBF.zip", "leftImg8bit_trainval_rain.zip"
     ]
 
-    IMAGE_PACKAGE_PREFIX = "leftImg8bit"
-    ANNOTATION_PACKAGE_PREFIX = "gtFine"
-    IMAGE_FILE_SUFFIX = "leftImg8bit"
-    ANNOTATION_FILE_SUFFIX = "gtFine_polygons"
-
     class CorruptionType(Enum):
-        DAYTIME_TO_NIGHT = "daytime_to_night"
-        CLEAR_TO_FOGGY = "clear_to_foggy"
-        CLEAR_TO_RAINY = "clear_to_rainy"
+        BASE = "base"
+        FOGGY = "foggy"
+        RAIN = "rain"
+        SNOW = "snow"
 
     def __init__(
         self, root: str, force_download: bool = False, train: bool = True, valid: bool = False, min_area: int = 0,
@@ -376,8 +372,12 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
 
 
 class CityScapesCorruptedDatasetForObjectDetection(CityScapesDiscreteDatasetForObjectDetection):
+    """CityScapes-C Dataset for Object Detection (Discrete Scenario Only)"""
     pass
 
 
 class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetForObjectDetection):
-    pass
+    class CorruptionType(Enum):
+        BASE_TO_FOGGY = "base_to_foggy"
+        BASE_TO_RAIN = "base_to_rain"
+        BASE_TO_SNOW = "base_to_snow"

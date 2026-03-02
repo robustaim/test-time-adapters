@@ -6,9 +6,11 @@ from .base import (
 from .standard import *
 from .gradual import (
     SHIFTContinuousScenarioForGradualTTA,
+    CityScapesContinuousScenarioForGradualTTA
 )
 from .continual import (
     SHIFTDiscreteScenarioForContinualTTA,
-    ACDCScenarioForContinualTTA
+    ACDCScenarioForContinualTTA,
+    CityScapesDiscreteScenarioForContinualTTA
 )
 from .universal import *

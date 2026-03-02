@@ -357,6 +357,7 @@ class SHIFTClearDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection)
 
 
 class SHIFTCorruptedDatasetForObjectDetection(SHIFTDiscreteSubsetForObjectDetection):
+    """SHIFT-C Dataset for Object Detection (Discrete Scenario Only)"""
     def __init__(
         self, root: str, force_download: bool = False,
         train: bool = True, valid: bool = False,

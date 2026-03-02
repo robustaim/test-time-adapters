@@ -21,6 +21,8 @@ class BaseScenario(dict):
     dataset_class = BaseDataset
     scenario_type: ScenarioType = ScenarioType.CONTINUAL
 
+    DEFAULT = []
+
     def __init__(
         self, root: str, force_download: bool = False, order: Optional[list] = None,
         train: bool = True, valid: bool = False, exclude_list: Optional[list] = None,

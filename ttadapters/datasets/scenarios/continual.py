@@ -1,44 +1,49 @@
-from .base import BaseContinualTTAScenario, ScenarioType
+from .base import BaseContinualTTAScenario
 from .. import (
     SHIFTDiscreteSubsetForObjectDetection,
+    CityScapesDiscreteDatasetForObjectDetection,
     ACDCDatasetForObjectDetection
 )
 
 
-DiscreteSubsetType = SHIFTDiscreteSubsetForObjectDetection.SubsetType
+SHIFTDiscreteCorruptionType = SHIFTDiscreteSubsetForObjectDetection.SubsetType
+CityScapesDiscreteCorruptionType = CityScapesDiscreteDatasetForObjectDetection.CorruptionType
+ACDCCorruptionType = ACDCDatasetForObjectDetection.CorruptionType
 
 
 class SHIFTDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
     DEFAULT = [
-        DiscreteSubsetType.CLEAR_DAYTIME,  # same as NORMAL
-        DiscreteSubsetType.CLEAR_NIGHT,
-        DiscreteSubsetType.CLEAR_DAWN,
-        DiscreteSubsetType.CLOUDY_DAYTIME,
-        DiscreteSubsetType.OVERCAST_DAYTIME,
-        DiscreteSubsetType.FOGGY_DAYTIME,
-        DiscreteSubsetType.RAINY_DAYTIME,
-        DiscreteSubsetType.CLEAR_DAYTIME  # same as NORMAL
+        SHIFTDiscreteCorruptionType.CLOUDY_DAYTIME,
+        SHIFTDiscreteCorruptionType.OVERCAST_DAYTIME,
+        SHIFTDiscreteCorruptionType.FOGGY_DAYTIME,
+        SHIFTDiscreteCorruptionType.RAINY_DAYTIME,
+        SHIFTDiscreteCorruptionType.CLEAR_DAWN,
+        SHIFTDiscreteCorruptionType.CLEAR_NIGHT,
+        SHIFTDiscreteCorruptionType.CLEAR_DAYTIME  # same as NORMAL
     ]
-    WHWPAPER = [
-        DiscreteSubsetType.CLOUDY_DAYTIME,
-        DiscreteSubsetType.OVERCAST_DAYTIME,
-        DiscreteSubsetType.FOGGY_DAYTIME,
-        DiscreteSubsetType.RAINY_DAYTIME,
-        DiscreteSubsetType.CLEAR_DAWN,
-        DiscreteSubsetType.CLEAR_NIGHT,
-        DiscreteSubsetType.CLEAR_DAYTIME  # same as NORMAL
-    ]
+    WHWPAPER = DEFAULT  # What-How-When Paper Setting
     description = "SHIFT-Discrete Scenario For ContinualTTA"
     dataset_class = SHIFTDiscreteSubsetForObjectDetection
 
 
+class CityScapesDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
+    DEFAULT = [
+        CityScapesDiscreteCorruptionType.FOGGY,
+        CityScapesDiscreteCorruptionType.RAIN,
+        CityScapesDiscreteCorruptionType.SNOW,
+        CityScapesDiscreteCorruptionType.BASE,
+    ]
+    description = "CityScapes-Discrete Scenario For ContinualTTA"
+    dataset_class = CityScapesDiscreteDatasetForObjectDetection
+
+
 class ACDCScenarioForContinualTTA(BaseContinualTTAScenario):
     DEFAULT = [
-        ACDCDatasetForObjectDetection.CorruptionType.FOG,
-        ACDCDatasetForObjectDetection.CorruptionType.NIGHT,
-        ACDCDatasetForObjectDetection.CorruptionType.RAIN,
-        ACDCDatasetForObjectDetection.CorruptionType.SNOW,
-        #ACDCDatasetForObjectDetection.CorruptionType.NORMAL
+        ACDCCorruptionType.FOG,
+        ACDCCorruptionType.NIGHT,
+        ACDCCorruptionType.RAIN,
+        ACDCCorruptionType.SNOW,
+        ACDCCorruptionType.NORMAL
     ]
     description = "ACDC Scenario For ContinualTTA"
     dataset_class = ACDCDatasetForObjectDetection
