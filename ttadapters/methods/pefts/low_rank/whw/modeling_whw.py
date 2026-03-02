@@ -127,6 +127,9 @@ class WHWEngine(AdaptationEngine):
     def __init__(self, config: WHWConfig, base_model: BaseModel):
         super().__init__(config, base_model)
         self.config = config
+        self.num_classes = self.base_model.num_classes
+        if self.num_classes == 0:
+            raise ValueError("num_classes must be set in base_model")
 
     def _pre_init(self):
         # Skip state tracking
@@ -328,7 +331,6 @@ class WHWEngine(AdaptationEngine):
         config = self.config
 
         # Set model attributes
-        model.num_classes = config.num_classes
         model.alpha_gl = config.alpha_gl
         model.alpha_fg = config.alpha_fg
         model.ema_gamma = config.ema_gamma
@@ -790,7 +792,7 @@ class WHWEngine(AdaptationEngine):
         # Foreground features statistics
         feat_stats["fg"] = {}
         for k in model.fg_features:
-            if k == model.num_classes:
+            if k == self.num_classes:
                 continue
             feats = model.fg_features[k].cpu()
             if feats.shape[0] < 2:

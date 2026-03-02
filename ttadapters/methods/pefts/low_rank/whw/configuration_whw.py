@@ -41,7 +41,6 @@ class WHWConfig(AdaptationConfig):
     skip_beta: float = 1.05
 
     # Misc
-    num_classes: int = 6
     collect_iou_thr: float = 0.5
 
     # SwinT adapter

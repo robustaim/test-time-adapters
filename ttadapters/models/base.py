@@ -41,6 +41,7 @@ class BaseModel(nn.Module, PushToHubMixin):
     def __init__(self, dataset: Union[BaseDataset, str] = ""):
         super().__init__()
         self.dataset_name = dataset if isinstance(dataset, str) else dataset.dataset_name
+        self.num_classes = len(dataset.classes) if isinstance(dataset, BaseDataset) else 0
 
     def forward(self, x, *args, **kwargs):
         raise NotImplementedError("The forward method must be implemented in subclasses.")
