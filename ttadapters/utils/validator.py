@@ -162,8 +162,8 @@ class DetectionEvaluator:
         m_ap = map_metric.compute()
 
         per_class_map = {
-            f"{classes[idx]}_mAP@0.50:0.95": m_ap.ap_per_class[idx].mean().item()
-            for idx in m_ap.matched_classes
+            f"{classes[cls_id]}_mAP@0.50:0.95": m_ap.ap_per_class[idx].mean().item()
+            for idx, cls_id in enumerate(m_ap.matched_classes)
         }
         performances = {
             "fps": total_images / collapse_time,
