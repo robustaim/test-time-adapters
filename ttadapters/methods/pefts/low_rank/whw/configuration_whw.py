@@ -13,7 +13,7 @@ class WHWConfig(AdaptationConfig):
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
-    adapt_lr: float = 4e-5
+    adapt_lr: float = 4e-5  # for swin 9e-6
     momentum: float = 0.9
     weight_decay: float = 1e-4
     clip_grad_enabled: bool = True
@@ -58,6 +58,6 @@ class WHWConfig(AdaptationConfig):
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(backbone="rcnn", skip_redundant="stat-period-ema", adapt_lr=5e-4, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(backbone="swinrcnn", skip_redundant="stat-period-ema", adapt_lr=5e-4, **kwargs)
+            return cls(backbone="swinrcnn", skip_redundant="stat-period-ema", adapt_lr=9e-6, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
