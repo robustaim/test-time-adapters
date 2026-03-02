@@ -276,7 +276,7 @@ class MeanTeacherEngine(AdaptationEngine):
             )
             return output.loss if output.loss is not None else None
 
-        elif self.config.base_type == "rcnn":
+        elif self.config.base_type in ("rcnn", "swinrcnn"):
             with EventStorage():
                 output = self.base_model(pseudo_labeled_batch)
                 if isinstance(output, dict):
@@ -324,7 +324,7 @@ class MeanTeacherEngine(AdaptationEngine):
             }
             return weak_batch, strong_batch
 
-        elif self.config.base_type == "rcnn":
+        elif self.config.base_type in ("rcnn", "swinrcnn"):
             weak_batch = []
             strong_batch = []
             for item in batch:
@@ -371,7 +371,7 @@ class MeanTeacherEngine(AdaptationEngine):
                 'labels': annotation,
             }
 
-        elif self.config.base_type == "rcnn":
+        elif self.config.base_type in ("rcnn", "swinrcnn"):
             pseudo_labels = []
             for img, label in zip(strong_batch, teacher_outputs):
                 inst = label['instances'][label['instances'].scores > self.config.conf_threshold]

@@ -8,7 +8,7 @@ from ....base import AdaptationConfig
 class MeanTeacherConfig(AdaptationConfig):
     adaptation_name = "MeanTeacherEngine"
 
-    base_type: Literal["rcnn", "rtdetr", "yolo11"] = "rcnn"  # TODO: Add swinrcnn
+    base_type: Literal["rcnn", "swinrcnn", "rtdetr", "yolo11"] = "rcnn"  # TODO: Add swinrcnn
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
@@ -30,10 +30,13 @@ class MeanTeacherConfig(AdaptationConfig):
     def from_preset(cls, base_model, **kwargs):
         """Create configuration from preset."""
         from .....models import (
-            FasterRCNNForObjectDetection, RTDetrForObjectDetection, YOLO11ForObjectDetection
+            FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
+            RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(base_type="rcnn", **kwargs)
+        elif isinstance(base_model, SwinRCNNForObjectDetection):
+            return cls(base_type="swinrcnn", **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(base_type="rtdetr", **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
