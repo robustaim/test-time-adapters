@@ -36,7 +36,7 @@ class ActMADConfig(AdaptationConfig):
         elif isinstance(base_model, SwinRCNNForObjectDetection):
             return cls(base_type="swinrcnn", adapt_lr=1e-6, adaptation_layers="backbone", **kwargs)
         elif isinstance(base_model, RTDetrForObjectDetection):
-            return cls(base_type="rtdetr", adapt_lr=1e-6, adaptation_layers="backbone+encoder", **kwargs)
+            return cls(base_type="rtdetr", adapt_lr=1e-7, adaptation_layers="backbone+encoder", **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(base_type="yolo11", adapt_lr=1e-9, adaptation_layers="backbone", **kwargs)
         else:
