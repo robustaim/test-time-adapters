@@ -13,7 +13,7 @@ class WHWConfig(AdaptationConfig):
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
-    adapt_lr: float = 4e-3
+    adapt_lr: float = 9e-3
     momentum: float = 0.9
     weight_decay: float = 1e-4
     clip_grad_enabled: bool = True
