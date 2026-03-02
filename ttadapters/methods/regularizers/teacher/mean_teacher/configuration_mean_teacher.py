@@ -8,7 +8,7 @@ from ....base import AdaptationConfig
 class MeanTeacherConfig(AdaptationConfig):
     adaptation_name = "MeanTeacherEngine"
 
-    base_type: Literal["rcnn", "swinrcnn", "rtdetr", "yolo11"] = "rcnn"  # TODO: Add swinrcnn
+    base_type: Literal["rcnn", "swinrcnn", "rtdetr", "yolo11"] = "rcnn"
 
     # Optimizer
     optim: Literal["SGD", "AdamW"] = "SGD"
