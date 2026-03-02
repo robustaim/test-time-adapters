@@ -36,7 +36,7 @@ class MeanTeacherConfig(AdaptationConfig):
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(base_type="rcnn", **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
-            return cls(base_type="swinrcnn", adapt_lr=3e-4, **kwargs)
+            return cls(base_type="swinrcnn", adapt_lr=1e-5, **kwargs)  # SwinRCNN is too sensitive
         elif isinstance(base_model, RTDetrForObjectDetection):
             return cls(base_type="rtdetr", **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
