@@ -14,6 +14,7 @@ Usage:
 from typing import Optional, Callable, List, Tuple
 from concurrent.futures import ProcessPoolExecutor
 from os import makedirs, path, walk, cpu_count
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
 from enum import Enum
@@ -418,7 +419,25 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
             self.CorruptionType.FOGGY, self.CorruptionType.SNOW,
             self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS
         ]:
-            return self.filter_keep_skip(images), self.filter_keep_skip(targets)  # reduce dataset size
+            prefix = self.IMAGE_PACKAGE_PREFIX_MAPPING[self.corruption_type]
+
+            img_groups = defaultdict(list)
+            tgt_groups = defaultdict(list)
+
+            for img, tgt in zip(images, targets):
+                stem = Path(img).stem
+                suffix = stem.split(prefix)[-1]
+                img_groups[suffix].append(img)
+                tgt_groups[suffix].append(tgt)
+
+            result_images, result_targets = [], []
+            for suffix in sorted(img_groups.keys()):
+                sorted_imgs = sorted(img_groups[suffix])
+                sorted_tgts = sorted(tgt_groups[suffix])
+                result_images.extend(self.filter_keep_skip(sorted_imgs, keep=1, skip=1))
+                result_targets.extend(self.filter_keep_skip(sorted_tgts, keep=1, skip=1))
+
+            return result_images, result_targets
         else:
             return images, targets
 
