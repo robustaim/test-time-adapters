@@ -55,8 +55,8 @@ class PITConfig(AdaptationConfig):
     clahe_tile_size: int = 8
 
     # Gamma parameters
+    use_differentiable_stretch: bool = True
     gamma_temperature: float = 0.01
-    gamma_contrast_threshold: float = 0.25
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
     gamma_noise_floor: float = 0.0
     gamma_saturation_limit: float = 100.0

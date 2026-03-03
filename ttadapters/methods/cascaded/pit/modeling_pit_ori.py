@@ -119,7 +119,7 @@ class GammaTransform(nn.Module):
         super().__init__()
         self.config = config
         self.temperature = config.gamma_temperature
-        self.contrast_threshold = config.gamma_contrast_threshold
+        self.use_differentiable_stretch = config.use_differentiable_stretch
 
         self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
         self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
@@ -146,27 +146,20 @@ class GammaTransform(nn.Module):
         """
         Calcluate intensity from percentile
 
-        Contrast-adaptive hard switch:
-          - Low contrast (instable gradient) → no_grad boundaries (exact quantile + hard clamp)
-          - High contrast (stable gradient) → differentiable boundaries (soft_percentile + softplus)
+        Supports two implementations of histogram stretching:
+            - differentiable (soft_percentile)
+            - non-differentiable (torch.quantile)
         """
-        with torch.no_grad():  # Compute exact quantiles for contrast detection (no gradient)
-            low_val_exact  = torch.quantile(channel.float(), self.noise_floor_q)
-            high_val_exact = torch.quantile(channel.float(), self.saturation_q)
-            # Use p5~p95 for contrast detection (robust to outlier pixels like headlights/shadows)
-            p5  = torch.quantile(channel.float(), 0.05)
-            p95 = torch.quantile(channel.float(), 0.95)
-            contrast = ((p95 - p5) / 255.0).clamp(0, 1).item()
-
-        if contrast < self.contrast_threshold:  # Low-contrast path: no gradient for boundaries
-            low_val  = low_val_exact
-            high_val = high_val_exact
-            clipped  = torch.clamp(channel, low_val, high_val)
-        else:  # High-contrast path: differentiable boundaries → rich gradient for gamma
+        if self.use_differentiable_stretch:
             low_val  = self.soft_percentile(channel, self.noise_floor)
             high_val = self.soft_percentile(channel, self.saturation_limit)
             clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
             clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
+        else:
+            with torch.no_grad():
+                low_val  = torch.quantile(channel.float(), self.noise_floor_q)
+                high_val = torch.quantile(channel.float(), self.saturation_q)
+                clipped  = torch.clamp(channel, low_val, high_val)
 
         return clipped, low_val, high_val
 
