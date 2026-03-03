@@ -153,7 +153,10 @@ class GammaTransform(nn.Module):
         with torch.no_grad():  # Compute exact quantiles for contrast detection (no gradient)
             low_val_exact  = torch.quantile(channel.float(), self.noise_floor_q)
             high_val_exact = torch.quantile(channel.float(), self.saturation_q)
-            contrast = ((high_val_exact - low_val_exact) / 255.0).clamp(0, 1).item()
+            # Use p5~p95 for contrast detection (robust to outlier pixels like headlights/shadows)
+            p5  = torch.quantile(channel.float(), 0.05)
+            p95 = torch.quantile(channel.float(), 0.95)
+            contrast = ((p95 - p5) / 255.0).clamp(0, 1).item()
 
         if contrast < self.contrast_threshold:  # Low-contrast path: no gradient for boundaries
             low_val  = low_val_exact
