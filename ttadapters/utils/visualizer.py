@@ -186,4 +186,3 @@ def visualize_metrics(operations, cols=("mAP@0.50:0.95", "fps", "fwd", "bwd"), e
                 display(pd.DataFrame(visuals, ids))
         except StopIteration:
             return results
-ㅣ
