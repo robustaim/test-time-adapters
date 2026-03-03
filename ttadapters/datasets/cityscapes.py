@@ -434,6 +434,8 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 ):
                     img_groups[suffix].append(img)
                     tgt_groups[suffix].append(tgt)
+                elif prefix == "leftImg8bit_rain":
+                    print(prefix+suffix)
 
             print(img_groups.keys())
 
