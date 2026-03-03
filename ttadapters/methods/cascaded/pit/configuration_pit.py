@@ -50,11 +50,12 @@ class PITConfig(AdaptationConfig):
     # Gamma parameters
     gamma_temperature: float = 0.001  # Reduced from 0.01: prevents soft_percentile from collapsing to mean on high-res images (e.g. CityScapes 1024x2048)
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
-    gamma_noise_floor: float = 0.0
-    gamma_saturation_limit: float = 100.0
+    gamma_noise_floor: float = 2.0    # Use 2nd percentile (not 0th) for outlier-robust low clip
+    gamma_saturation_limit: float = 98.0  # Use 98th percentile (not 100th) for outlier-robust high clip
 
     # Anchor configuration
     use_kl_divergence: bool = True  # if false, use MSE loss
+    reg_weight: float = 1.0  # Weight for regularization loss relative to alignment loss
 
     @classmethod
     def from_preset(cls, base_model, **kwargs):

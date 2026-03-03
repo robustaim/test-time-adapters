@@ -191,7 +191,9 @@ class CLAHEGammaTransform(nn.ModuleList):
         return transformed, {**clahe_params, **gamma_params}
 
     def get_regularization_loss(self):
-        return self[1].get_regularization_loss()
+        gamma_reg = self[1].get_regularization_loss()
+        gate_reg = self.gate_raw.pow(2)  # Pull gate_raw towards 0.0 (50% CLAHE blend)
+        return gamma_reg + gate_reg
 
 
 class CLAHEGammaResidualTransform(CLAHEGammaTransform):
@@ -300,8 +302,8 @@ class DistNorm(nn.Module):
         align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
         reg_loss = self.itm.get_regularization_loss()
 
-        # Combined Loss: Alignment + Regularization
-        return (align_loss + reg_loss) if reg_loss is not None else align_loss
+        # Combined Loss: Alignment + weighted Regularization
+        return (align_loss + self.config.reg_weight * reg_loss) if reg_loss is not None else align_loss
 
 
 class CascadeAnchor(nn.Module):
