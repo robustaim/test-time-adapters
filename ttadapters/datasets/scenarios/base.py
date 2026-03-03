@@ -73,9 +73,11 @@ class BaseScenario(dict):
 
         for res in result:
             res_list = list(res.values())
+            all_keys = set().union(*[d.keys() for d in res_list])
+            count = {key: sum(1 for d in res_list if key in d) for key in all_keys}
             res_mean = {
-                key: sum(d[key] for d in res_list) / len(res_list)
-                for key in res_list[0].keys()
+                key: sum(d.get(key, 0) for d in res_list) / count[key]
+                for key in all_keys
             }
             res["avg"] = res_mean
 
