@@ -118,7 +118,7 @@ class GammaTransform(nn.Module):
     def __init__(self, config: PITConfig):
         super().__init__()
         self.config = config
-        self.temperature = config.gamma_temperature
+        self.base_temperature = config.base_gamma_temperature
 
         self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
         self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
@@ -126,7 +126,7 @@ class GammaTransform(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
         self.gamma_range = tuple(config.gamma_range)
 
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor, temperature: float) -> torch.Tensor:
         """Differentiable percentile approximation."""
         x_flat = x.flatten()
         n = x_flat.shape[0]
@@ -134,21 +134,35 @@ class GammaTransform(nn.Module):
 
         idx = (p / 100.0) * (n - 1)
         indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
+        weights = F.softmax(-(indices - idx).abs() / (temperature * n), dim=0)
 
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
+    def calculate_temperature(self, channel: torch.Tensor, clip_low: torch.Tensor, clip_high: torch.Tensor) -> float:
+        """Compute contrast-adaptive temperature from the channel's histogram range.
+
+        Low contrast (foggy)  → small temperature → sharp, accurate percentile.
+        High contrast (clear) → large temperature → rich gradient signal.
+        """
+        with torch.no_grad():
+            low_q = torch.quantile(channel.float(), (clip_low / 100.0).clamp(0, 1))
+            high_q = torch.quantile(channel.float(), (clip_high / 100.0).clamp(0, 1))
+            contrast_ratio = ((high_q - low_q) / 255.0).clamp(min=0.05).item()
+        return self.base_temperature * contrast_ratio
+
     def stretch_channel(self, channel, clip_low, clip_high, gamma):
         """Apply stretching to single channel with gamma correction."""
-        low_val = self.soft_percentile(channel, clip_low)
-        high_val = self.soft_percentile(channel, clip_high)
+        temperature = self.calculate_temperature(channel, clip_low, clip_high)
+
+        low_val = self.soft_percentile(channel, clip_low, temperature)
+        high_val = self.soft_percentile(channel, clip_high, temperature)
 
         scale = 50.0
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
         clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
 
-        range_val = high_val - low_val + 1e-6
+        range_val = (high_val - low_val).clamp(min=1.0)
         normalized = (clipped - low_val) / range_val
 
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
