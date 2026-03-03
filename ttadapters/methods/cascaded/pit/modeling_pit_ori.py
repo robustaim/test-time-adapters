@@ -182,14 +182,11 @@ class GammaTransform(nn.Module):
         """
         Apply stretching to image with gamma correction.
         """
-        C = image.shape[0]  # batch size will be 1 cause this is online learning
-        stretched = torch.zeros_like(image, device=image.device)
-
         # self.gamma init 0.0 -> gamma = 1.0 (Identity)
         gamma = (self.gamma + 1.0).clamp(*self.gamma_range)
 
-        for c in range(C):
-            stretched[c] = self.stretch_channel(image[c], gamma)
+        # histogram stretching
+        stretched = torch.stack([self.stretch_channel(image[c], gamma) for c in range(image.shape[0])])
 
         return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
 
