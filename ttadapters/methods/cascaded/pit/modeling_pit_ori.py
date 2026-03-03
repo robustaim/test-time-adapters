@@ -132,10 +132,9 @@ class GammaTransform(nn.Module):
         n = x_flat.shape[0]
         p = p.to(x.device)
 
-        # Normalize indices to [0, 1] so temperature is resolution-independent
-        idx_norm = p / 100.0
-        indices_norm = torch.arange(n, device=x.device, dtype=x.dtype) / (n - 1)
-        weights = F.softmax(-(indices_norm - idx_norm).abs() / self.temperature, dim=0)
+        idx = (p / 100.0) * (n - 1)
+        indices = torch.arange(n, device=x.device, dtype=x.dtype)
+        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
 
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
@@ -149,7 +148,7 @@ class GammaTransform(nn.Module):
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
         clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
 
-        range_val = (high_val - low_val).clamp(min=1.0)  # clamp(min=1.0): prevents division instability on low-contrast images
+        range_val = high_val - low_val + 1e-6
         normalized = (clipped - low_val) / range_val
 
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
