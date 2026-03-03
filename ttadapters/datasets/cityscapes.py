@@ -429,7 +429,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 suffix = stem.split(prefix)[-1]
                 if (
                     prefix+suffix == "leftImg8bit_foggyDBF_beta_0.01" or
-                    (prefix+suffix).startswith("leftImg8bit_rain_alpha_0.01_beta_0.005_dropsize_0101") or
+                    (prefix+suffix).startswith("leftImg8bit_rain_alpha_0.01_beta_0.005_dropsize_0.01") or
                     suffix == "_severity_3"
                 ):
                     img_groups[suffix].append(img)
