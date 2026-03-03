@@ -122,6 +122,8 @@ class GammaTransform(nn.Module):
 
         self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
         self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
+        self.saturation_q  = config.gamma_saturation_limit / 100.0
+        self.noise_floor_q = config.gamma_noise_floor / 100.0
 
         self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
         self.gamma_range = tuple(config.gamma_range)
@@ -139,24 +141,24 @@ class GammaTransform(nn.Module):
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
-    def calculate_temperature(self, channel: torch.Tensor, clip_low: torch.Tensor, clip_high: torch.Tensor) -> float:
+    def calculate_temperature(self, channel: torch.Tensor) -> float:
         """Compute contrast-adaptive temperature from the channel's histogram range.
 
         Low contrast (foggy)  → small temperature → sharp, accurate percentile.
         High contrast (clear) → large temperature → rich gradient signal.
         """
         with torch.no_grad():
-            low_q = torch.quantile(channel.float(), (clip_low / 100.0).clamp(0, 1))
-            high_q = torch.quantile(channel.float(), (clip_high / 100.0).clamp(0, 1))
+            low_q = torch.quantile(channel.float(), self.noise_floor_q)
+            high_q = torch.quantile(channel.float(), self.saturation_q)
             contrast_ratio = ((high_q - low_q) / 255.0).clamp(min=0.05).item()
         return self.base_temperature * contrast_ratio
 
-    def stretch_channel(self, channel, clip_low, clip_high, gamma):
+    def stretch_channel(self, channel, gamma):
         """Apply stretching to single channel with gamma correction."""
-        temperature = self.calculate_temperature(channel, clip_low, clip_high)
+        temperature = self.calculate_temperature(channel)
 
-        low_val = self.soft_percentile(channel, clip_low, temperature)
-        high_val = self.soft_percentile(channel, clip_high, temperature)
+        low_val = self.soft_percentile(channel, self.noise_floor, temperature)
+        high_val = self.soft_percentile(channel, self.saturation_limit, temperature)
 
         scale = 50.0
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
@@ -178,9 +180,7 @@ class GammaTransform(nn.Module):
         gamma = (self.gamma + 1.0).clamp(*self.gamma_range)
 
         for c in range(C):
-            stretched[c] = self.stretch_channel(
-                image[c], self.noise_floor, self.saturation_limit, gamma
-            )
+            stretched[c] = self.stretch_channel(image[c], gamma)
 
         return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
 
