@@ -29,10 +29,6 @@ class TargetKeyPreset(Enum):
         r"(^|\.)model\.[246]\.cv2\.bn$",  # C3k2 shortcut path final BN
         r"(^|\.)model\.[246]\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
     ]
-    YOLO11_STAGE1 = [  # YOLO11: 1st C3k2 stage only (model.2), closest to input
-        r"(^|\.)model\.2\.cv2\.bn$",  # C3k2 shortcut path final BN
-        r"(^|\.)model\.2\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
-    ]
     YOLO11 = [  # YOLO11: all C3k2 blocks (backbone + neck + head-side), concat-prior pathway BNs
         r"(^|\.)model\.\d+\.cv2\.bn$",  # C3k2 shortcut path final BN
         r"(^|\.)model\.\d+\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
@@ -84,7 +80,7 @@ class PITConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.YOLO11_STAGE1.value,
+                cascade_target=TargetKeyPreset.YOLO11_STEM_C3K2.value,
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:
