@@ -55,6 +55,10 @@ class DetectionEvaluator:
             except (NotImplementedError, AttributeError):
                 print("WARNING: reset_adaptation() is not implemented for this model. Assuming the evaluation is running with deep-copy mode.")
                 model = copy.deepcopy(model)
+                if hasattr(model, '_optimizer'):
+                    model._optimizer = None
+                if hasattr(model, '_loss_function'):
+                    model._loss_function = None
 
         map_metric = MeanAveragePrecision()
         predictions_list = []
