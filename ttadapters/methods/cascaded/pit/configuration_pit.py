@@ -36,26 +36,18 @@ class PITConfig(AdaptationConfig):
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     # Engine configuration
-    itm_type: Literal["clahe", "gamma", "clahe-gamma", "clahe-gamma-residual"] = "gamma"
     cascade_target: list[str] = None
     exclude_target: list[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
-    disable_blending: bool = False
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 
-    # CLAHE parameters
-    clahe_clip_limit: float = 2.0
-    clahe_tile_size: int = 8
-
     # Gamma parameters
-    gamma_temperature: float = 0.001  # Reduced from 0.01: prevents soft_percentile from collapsing to mean on high-res images (e.g. CityScapes 1024x2048)
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
-    gamma_noise_floor: float = 2.0    # Use 2nd percentile (not 0th) for outlier-robust low clip
-    gamma_saturation_limit: float = 98.0  # Use 98th percentile (not 100th) for outlier-robust high clip
+    gamma_noise_floor: float = 0.0
+    gamma_saturation_limit: float = 100.0
 
     # Anchor configuration
     use_kl_divergence: bool = True  # if false, use MSE loss
-    reg_weight: float = 1.0  # Weight for regularization loss relative to alignment loss
 
     @classmethod
     def from_preset(cls, base_model, **kwargs):

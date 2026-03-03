@@ -75,136 +75,41 @@ class GaussianKLDivLoss(nn.Module):
             raise ValueError(f"Invalid reduction mode: {self.reduction}")
 
 
-class CLAHETransform(nn.Module):
-    """CLAHE Transform Module. (Not differentiable)"""
-
-    def __init__(self, config: PITConfig):
-        super().__init__()
-        self.config = config
-        self.clip_limit = config.clahe_clip_limit
-        self.tile_size = config.clahe_tile_size
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        _, H, W = image.shape  # image shape: (C=3, H, W)
-
-        # Adaptive Grid Size Calculation
-        # maintain standard tile size based on the longest edge to keep tile aspect ratio ~1:1
-        if W >= H:
-            grid_x = self.tile_size
-            grid_y = max(1, int(self.tile_size * (H / W)))
-        else:
-            grid_y = self.tile_size
-            grid_x = max(1, int(self.tile_size * (W / H)))
-
-        # Create dynamic CLAHE object
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(grid_x, grid_y))
-
-        image_np = image.permute(1, 2, 0).cpu().numpy()  # (H, W, C), RGB
-        image_np = image_np.astype(np.uint8)
-
-        image_ycrcb = cv2.cvtColor(image_np, cv2.COLOR_RGB2YCrCb)
-        image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
-
-        image_rgb = cv2.cvtColor(image_ycrcb, cv2.COLOR_YCrCb2RGB)
-        image_rgb = image_rgb.astype(np.float32)
-        image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1)  # (C, H, W)
-
-        return image_tensor.to(image.device, dtype=image.dtype), {'clip_limit': self.clip_limit, 'tile_size': self.tile_size}
-
-
 class GammaTransform(nn.Module):
-    """Differentiable Gamma Transformation Module by histogram stretching."""
+    """Gamma Transformation Module."""
 
     def __init__(self, config: PITConfig):
         super().__init__()
         self.config = config
-        self.temperature = config.gamma_temperature
-
-        self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
-        self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
+        self.noise_floor = config.gamma_noise_floor / 100.0
+        self.saturation_limit = config.gamma_saturation_limit / 100.0
 
         self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
         self.gamma_range = tuple(config.gamma_range)
 
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        """Differentiable percentile approximation."""
-        x_flat = x.flatten()
-        n = x_flat.shape[0]
-        p = p.to(x.device)
+    def stretch_channel(self, channel: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+        """Apply histogram stretching with gamma correction to a single channel."""
+        with torch.no_grad():
+            low_val = torch.quantile(channel, self.noise_floor)
+            high_val = torch.quantile(channel, self.saturation_limit)
 
-        idx = (p / 100.0) * (n - 1)
-        indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
-
-        sorted_x, _ = torch.sort(x_flat)
-        return (weights * sorted_x).sum()
-
-    def stretch_channel(self, channel, clip_low, clip_high, gamma):
-        """Apply stretching to single channel with gamma correction."""
-        low_val = self.soft_percentile(channel, clip_low)
-        high_val = self.soft_percentile(channel, clip_high)
-
-        scale = 50.0
-        clipped = low_val + F.softplus((channel - low_val) * scale) / scale
-        clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
-
-        range_val = (high_val - low_val).clamp(min=5.0)  # Prevent division instability on low-contrast images (e.g. foggy CityScapes)
+        clipped = torch.clamp(channel, low_val, high_val)
+        range_val = (high_val - low_val).clamp(min=1e-6)
         normalized = (clipped - low_val) / range_val
 
-        gamma_corrected = torch.pow(normalized + 1e-6, gamma)
-
-        return torch.clamp(gamma_corrected * 255.0, 0, 255)
+        return torch.clamp(torch.pow(normalized + 1e-6, gamma) * 255.0, 0, 255)
 
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        """Apply stretching to image with gamma correction."""
-        C = image.shape[0]  # batch size will be 1 cause this is online learning
-        stretched = torch.zeros_like(image, device=image.device)
-
+        """Apply histogram stretching with gamma correction to each channel."""
         # self.gamma init 0.0 -> gamma = 1.0 (Identity)
         gamma = (self.gamma + 1.0).clamp(*self.gamma_range)
 
-        for c in range(C):
-            stretched[c] = self.stretch_channel(
-                image[c], self.noise_floor, self.saturation_limit, gamma
-            )
+        stretched = torch.stack([self.stretch_channel(image[c], gamma) for c in range(image.shape[0])])
+        return stretched, {'gamma': gamma.item()}
 
-        return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
-
-    def get_regularization_loss(self):
-        """Compute regularization loss relative to initialization anchors."""
+    def get_regularization_loss(self) -> torch.Tensor:
         # Pull towards Identity (gamma=1.0 -> self.gamma=0.0)
         return self.gamma.pow(2)
-
-
-class CLAHEGammaTransform(nn.ModuleList):
-    def __init__(self, config: PITConfig):
-        super().__init__([CLAHETransform(config), GammaTransform(config)])
-        self.gate_raw = nn.Parameter(torch.tensor(0.0))
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        clahe_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-
-        transformed, clahe_params = self[0](image)
-        transformed = clahe_gate * transformed + (1 - clahe_gate) * image
-        transformed, gamma_params = self[1](transformed)
-
-        return transformed, {**clahe_params, **gamma_params}
-
-    def get_regularization_loss(self):
-        gamma_reg = self[1].get_regularization_loss()
-        gate_reg = self.gate_raw.pow(2)  # Pull gate_raw towards 0.0 (50% CLAHE blend)
-        return gamma_reg + gate_reg
-
-
-class CLAHEGammaResidualTransform(CLAHEGammaTransform):
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        residual_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-
-        transformed, clahe_params = self[0](image)
-        residual_base, residual_params = self[1](transformed)
-        transformed = transformed + residual_gate * (residual_base - transformed)
-
-        return transformed, {**clahe_params, **residual_params}
 
 
 class InputTransformation(nn.Module):
@@ -216,27 +121,13 @@ class InputTransformation(nn.Module):
         super().__init__()
         self.config = config
         self.applied_params: dict = {}
-        self.itm_type = config.itm_type
-        self.do_blend = not config.disable_blending
-
-        if config.itm_type == "clahe":
-            self.transform = CLAHETransform(config)
-        elif config.itm_type == "gamma":
-            self.transform = GammaTransform(config)
-        elif config.itm_type == "clahe-gamma":
-            self.transform = CLAHEGammaTransform(config)
-        elif config.itm_type == "clahe-gamma-residual":
-            self.transform = CLAHEGammaResidualTransform(config)
-        else:
-            raise ValueError(f"Unsupported itm_type: {config.itm_type}")
+        self.transform = CLAHETransform(config)
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
         transformed, transform_params = self.transform(original)
         self.applied_params = transform_params
-        if self.do_blend:
-            return transformed * 0.5 + original * 0.5  # Blend transformed and original for stability
-        return transformed
+        return transformed * 0.5 + original * 0.5  # Blend transformed and original for stability
 
     def get_regularization_loss(self) -> torch.Tensor | None:
         return self.transform.get_regularization_loss()
@@ -408,14 +299,6 @@ class PITEngine(AdaptationEngine):
     Args:
         config: PITConfig with learning parameters
         base_model: Pre-trained model
-
-    Example:
-        >>> config = PITConfig(
-        ...     itm_type="gamma",
-        ...     cascade_target=["layer4"]
-        ... )
-        >>> adaptive_model = PITEngine(config, base_model)
-        >>> output = adaptive_model(batch)
     """
     model_name = "PITEngine"
     config_class = PITConfig
@@ -444,7 +327,6 @@ class PITEngine(AdaptationEngine):
             print("=" * 60)
             print(f"[{self.model_name}] Initialization Summary")
             print("-" * 60)
-            print(f"  View Transform Method : {self.config.itm_type}")
             print(f"  Loss Function         : {self.loss_class.__name__}")
         self._extract_target_layers()
         if self.config.verbose:
