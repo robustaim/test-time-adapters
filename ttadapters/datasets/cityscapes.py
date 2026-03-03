@@ -427,7 +427,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
             for img, tgt in zip(images, targets):
                 stem = Path(img).stem
                 suffix = stem.split(prefix)[-1]
-                if (
+                if (  # select middle severity images
                     prefix+suffix == "leftImg8bit_foggyDBF_beta_0.01" or
                     (prefix+suffix).startswith("leftImg8bit_rain_alpha_0.01_beta_0.005_dropsize_0.01") or
                     suffix == "_severity_3"
@@ -479,7 +479,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 print(f"INFO: Starting parallel processing for {total_files} files using {workers} workers...")
                 with ProcessPoolExecutor(max_workers=workers, mp_context=__import__("multiprocessing").get_context("spawn")) as executor:
                     func = partial(
-                        self.process_single_image, input_root=self.images_dir, output_root=dir, severities=(3, ),
+                        self.process_single_image, input_root=self.images_dir, output_root=dir,
                         original_file_suffix=self.IMAGE_PACKAGE_PREFIX, new_file_suffix=prefix_mapping, corruption_name=tp.value
                     )
                     list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value.title()} Corrupting"))
@@ -526,16 +526,20 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
         BASE_TO_SNOW = "base_to_snow"
         FOG_TO_RAIN = "fog_to_rain"
         RAIN_TO_SNOW = "rain_to_snow"
-        SNOW_TO_FROST = "snow_to_frost"
+        # SNOW_TO_FROST removed
 
-    IMAGE_PACKAGE_PREFIX_MAPPING = {
-        CorruptionType.BASE_TO_FOGGY: "leftImg8bit_base2foggy",
-        CorruptionType.BASE_TO_RAIN: "leftImg8bit_base2rain",
-        CorruptionType.BASE_TO_SNOW: "leftImg8bit_base2snow",
-        CorruptionType.FOG_TO_RAIN: "leftImg8bit_fog2rain",
-        CorruptionType.RAIN_TO_SNOW: "leftImg8bit_rain2snow",
-        CorruptionType.SNOW_TO_FROST: "leftImg8bit_snow2frost"
-    }
+    # Suffixes (weak → strong)
+    FOG_BETAS  = ["_beta_0.005", "_beta_0.01", "_beta_0.02"]
+    SNOW_SEVS  = ["_severity_1", "_severity_3", "_severity_5"]
+    RAIN_BETAS = [
+        "_alpha_0.01_beta_0.005_dropsize_0.01",
+        "_alpha_0.02_beta_0.01_dropsize_0.005",
+        "_alpha_0.03_beta_0.015_dropsize_0.002",
+    ]
+    RAIN_PATTERNS = [f"_pattern_{i}" for i in range(1, 13)]
+
+    # Not used directly; kept for interface compatibility
+    IMAGE_PACKAGE_PREFIX_MAPPING = {}
 
     def __init__(
         self, root: str, force_download: bool = False,
@@ -543,24 +547,251 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
         corruption_type: CorruptionType = CorruptionType.BASE_TO_FOGGY, min_area: int = 0,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None,
     ):
+        # Skip CityScapesDiscreteDatasetForObjectDetection.__init__
+        # → calls CityScapesDatasetForObjectDetection.__init__ (collects base images only)
         super(CityScapesDiscreteDatasetForObjectDetection, self).__init__(
             root=root, force_download=force_download, train=train, valid=valid, min_area=min_area,
             transform=transform, target_transform=target_transform, transforms=transforms
         )
-        #self.corruption_type = corruption_type
-        #domains = self._prepare_domains()
-        #self.images, self.targets = self._gather_combinations(*domains[self.corruption_type.value])
+        self.corruption_type = corruption_type
+        self.images, self.targets = self._build_continuous_sequence()
 
-    def _gather_combinations(self, corrupted_images, corrupted_targets):
-        base_images, base_targets = self.images, self.targets
-        if self.corruption_type == self.CorruptionType.BASE_TO_FOGGY:
-            suffix = ("_beta_0.005", "_beta_0.01", "_beta_0.02")
-        elif self.corruption_type == self.CorruptionType.BASE_TO_RAIN:
-            beta_suffix = ("_alpha_0.01_beta_0.005_dropsize_0.01", "_alpha_0.02_beta_0.01_dropsize_0.005", "_alpha_0.03_beta_0.015_dropsize_0.002")
-            pattern_sufix = tuple([f"_pattern_{i}" for i in range(1, 13)])
-            pass
-        elif self.corruption_type == self.CorruptionType.BASE_TO_SNOW:
-            suffix = ("_severity_1", "_severity_3", "_severity_5")
-            pass
+    def _collect_domain_by_city(self, prefix: str) -> dict:
+        """
+        Collect images for a domain grouped by city and scene key.
 
+        Returns:
+            {city: {scene_key: {suffix: (img_path, tgt_path)}}}
+            where suffix is the part of the stem AFTER '_{prefix}'.
+            For the base domain (prefix='leftImg8bit'), suffix is ''.
+        """
+        images_dir = self.root / prefix / self.split
+        if not images_dir.exists():
+            return {}
+
+        result: dict = defaultdict(lambda: defaultdict(dict))
+        for city_dir in sorted(images_dir.iterdir()):
+            if not city_dir.is_dir():
+                continue
+            city = city_dir.name
+            for img_path in sorted(city_dir.glob(f"*_{prefix}*.png")):
+                stem = img_path.stem
+                parts = stem.split(f"_{prefix}")
+                scene_key = parts[0]
+                suffix = parts[1] if len(parts) > 1 else ""
+                tgt_name = f"{scene_key}_gtFine_polygons.json"
+                tgt_path = self.targets_dir / city / tgt_name
+                if tgt_path.exists():
+                    result[city][scene_key][suffix] = (img_path, tgt_path)
+        return result
+
+    def _build_continuous_sequence(self):
+        ct = self.corruption_type
+        if ct == self.CorruptionType.BASE_TO_FOGGY:
+            return self._build_base_to_severity("leftImg8bit_foggyDBF", self.FOG_BETAS)
+        elif ct == self.CorruptionType.BASE_TO_SNOW:
+            return self._build_base_to_severity("leftImg8bit_snow", self.SNOW_SEVS)
+        elif ct == self.CorruptionType.BASE_TO_RAIN:
+            return self._build_base_to_rain()
+        elif ct == self.CorruptionType.FOG_TO_RAIN:
+            return self._build_severity_transition(
+                src_prefix="leftImg8bit_foggyDBF", src_suffixes=self.FOG_BETAS,
+                dst_prefix="leftImg8bit_rain",    dst_suffixes=self.RAIN_BETAS,
+                dst_is_rain=True,
+            )
+        elif ct == self.CorruptionType.RAIN_TO_SNOW:
+            return self._build_severity_transition(
+                src_prefix="leftImg8bit_rain",  src_suffixes=self.RAIN_BETAS,
+                dst_prefix="leftImg8bit_snow",  dst_suffixes=self.SNOW_SEVS,
+                src_is_rain=True,
+            )
         return [], []
+
+    def _build_base_to_severity(self, corrupted_prefix: str, ordered_suffixes: list):
+        """
+        Per-city forward + return sequence.
+
+        With N valid scenes per city and q = N // 4:
+
+          Forward  (first q scenes): base → weak → mid → strong
+          Return   (next  q scenes): mid  → weak → base   (unused segments)
+
+        Total = 7 * q images per city.
+        """
+        base_domain = self._collect_domain_by_city("leftImg8bit")
+        corr_domain = self._collect_domain_by_city(corrupted_prefix)
+        cities = sorted(set(base_domain) & set(corr_domain))
+
+        result_imgs, result_tgts = [], []
+        weak_sfx, mid_sfx, strong_sfx = ordered_suffixes
+
+        for city in cities:
+            # Scenes that have ALL required corrupted variants
+            common = sorted(set(base_domain[city]) & set(corr_domain[city]))
+            valid = [sk for sk in common
+                     if all(sfx in corr_domain[city][sk] for sfx in ordered_suffixes)]
+            N = len(valid)
+            q = N // 4
+            if q == 0:
+                continue
+
+            fwd = valid[:q]    # used in forward pass
+            ret = valid[q:2*q] # used in return pass (different scenes → "unused")
+
+            def _add(domain, city, scenes, sfx):
+                for sk in scenes:
+                    entry = domain[city][sk].get(sfx)
+                    if entry:
+                        result_imgs.append(entry[0])
+                        result_tgts.append(entry[1])
+
+            # Forward: base → weak → mid → strong
+            _add(base_domain, city, fwd, "")
+            _add(corr_domain, city, fwd, weak_sfx)
+            _add(corr_domain, city, fwd, mid_sfx)
+            _add(corr_domain, city, fwd, strong_sfx)
+            # Return: mid → weak → base  (unused ret scenes)
+            _add(corr_domain, city, ret, mid_sfx)
+            _add(corr_domain, city, ret, weak_sfx)
+            _add(base_domain, city, ret, "")
+
+        return result_imgs, result_tgts
+
+    def _build_base_to_rain(self):
+        """
+        Use only cities present in rain domain.
+        For each city, n = number of scenes (per weak-beta reference).
+
+        Sequence (per city): base[n] → weak_rain[n] → mid_rain[n] → strong_rain[n]
+        Pattern 1-12 cycles within each rain severity segment independently.
+        """
+        base_domain = self._collect_domain_by_city("leftImg8bit")
+        rain_domain = self._collect_domain_by_city("leftImg8bit_rain")
+        cities = sorted(set(base_domain) & set(rain_domain))
+
+        result_imgs, result_tgts = [], []
+        weak_beta, mid_beta, strong_beta = self.RAIN_BETAS
+
+        for city in cities:
+            # Scene keys present in rain (use weak beta as reference)
+            rain_scenes = sorted(
+                sk for sk in rain_domain[city]
+                if any(weak_beta + p in rain_domain[city][sk] for p in self.RAIN_PATTERNS)
+            )
+            # Intersect with base
+            rain_scenes = [sk for sk in rain_scenes if sk in base_domain[city]]
+            if not rain_scenes:
+                continue
+
+            # base segment
+            for sk in rain_scenes:
+                entry = base_domain[city][sk].get("")
+                if entry:
+                    result_imgs.append(entry[0])
+                    result_tgts.append(entry[1])
+
+            # rain segments (weak → mid → strong), pattern cycling per segment
+            for beta in [weak_beta, mid_beta, strong_beta]:
+                for i, sk in enumerate(rain_scenes):
+                    pattern = self.RAIN_PATTERNS[i % len(self.RAIN_PATTERNS)]
+                    suffix = beta + pattern
+                    entry = rain_domain[city][sk].get(suffix)
+                    if entry:
+                        result_imgs.append(entry[0])
+                        result_tgts.append(entry[1])
+
+        return result_imgs, result_tgts
+
+    def _build_severity_transition(
+        self,
+        src_prefix: str, src_suffixes: list,
+        dst_prefix: str, dst_suffixes: list,
+        src_is_rain: bool = False,
+        dst_is_rain: bool = False,
+    ):
+        """
+        Generic builder for cross-domain transitions.
+
+        Sequence (ascending src, descending dst):
+          weak_src(n) → mid_src(3n//5) → strong_src(2n//5)
+            → strong_dst(2n//5) → mid_dst(3n//5) → weak_dst(n)
+
+        Reference city list comes from rain domain (src or dst).
+        n = scenes per city per one reference beta in rain domain.
+        For rain segments, patterns 1-12 cycle independently.
+        """
+        rain_prefix = src_prefix if src_is_rain else dst_prefix
+        rain_domain = self._collect_domain_by_city(rain_prefix)
+        src_domain  = self._collect_domain_by_city(src_prefix)
+        dst_domain  = self._collect_domain_by_city(dst_prefix)
+
+        # Reference beta for counting rain scenes
+        rain_betas = self.RAIN_BETAS
+        ref_beta = rain_betas[0]
+
+        cities = sorted(set(rain_domain) & set(src_domain) & set(dst_domain))
+
+        result_imgs, result_tgts = [], []
+        weak_src, mid_src, strong_src = src_suffixes
+        weak_dst, mid_dst, strong_dst = dst_suffixes
+
+        def _add_plain(domain, city, scenes, sfx):
+            for sk in scenes:
+                entry = domain[city][sk].get(sfx)
+                if entry:
+                    result_imgs.append(entry[0])
+                    result_tgts.append(entry[1])
+
+        def _add_rain(domain, city, scenes, beta, pat_offset=0):
+            for i, sk in enumerate(scenes):
+                pattern = self.RAIN_PATTERNS[(i + pat_offset) % len(self.RAIN_PATTERNS)]
+                suffix = beta + pattern
+                entry = domain[city][sk].get(suffix)
+                if entry:
+                    result_imgs.append(entry[0])
+                    result_tgts.append(entry[1])
+
+        for city in cities:
+            # Use rain domain to determine scene list
+            if src_is_rain:
+                all_scenes = sorted(
+                    sk for sk in src_domain[city]
+                    if any(ref_beta + p in src_domain[city][sk] for p in self.RAIN_PATTERNS)
+                    and sk in dst_domain[city]
+                )
+            else:
+                all_scenes = sorted(
+                    sk for sk in dst_domain[city]
+                    if any(ref_beta + p in dst_domain[city][sk] for p in self.RAIN_PATTERNS)
+                    and sk in src_domain[city]
+                )
+
+            n = len(all_scenes)
+            split = 3 * n // 5   # mid count
+            if n == 0 or split == 0:
+                continue
+
+            mid_scenes    = all_scenes[:split]      # first 3/5
+            strong_scenes = all_scenes[split:]       # last 2/5
+
+            # ------ ascending (src side) ------
+            if src_is_rain:
+                _add_rain(src_domain, city, all_scenes,    weak_src)
+                _add_rain(src_domain, city, mid_scenes,    mid_src,    pat_offset=n)
+                _add_rain(src_domain, city, strong_scenes, strong_src, pat_offset=n + split)
+            else:
+                _add_plain(src_domain, city, all_scenes,    weak_src)
+                _add_plain(src_domain, city, mid_scenes,    mid_src)
+                _add_plain(src_domain, city, strong_scenes, strong_src)
+
+            # ------ descending (dst side) ------
+            if dst_is_rain:
+                _add_rain(dst_domain, city, strong_scenes, strong_dst)
+                _add_rain(dst_domain, city, mid_scenes,    mid_dst,    pat_offset=n - split)
+                _add_rain(dst_domain, city, all_scenes,    weak_dst,   pat_offset=n)
+            else:
+                _add_plain(dst_domain, city, strong_scenes, strong_dst)
+                _add_plain(dst_domain, city, mid_scenes,    mid_dst)
+                _add_plain(dst_domain, city, all_scenes,    weak_dst)
+
+        return result_imgs, result_tgts
