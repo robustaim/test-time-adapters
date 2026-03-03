@@ -121,7 +121,7 @@ class InputTransformation(nn.Module):
         super().__init__()
         self.config = config
         self.applied_params: dict = {}
-        self.transform = CLAHETransform(config)
+        self.transform = GammaTransform(config)
 
     def forward(self, original: torch.Tensor) -> torch.Tensor:
         """Weighted blending between original image and transformed image."""
