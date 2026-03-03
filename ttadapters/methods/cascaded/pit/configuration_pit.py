@@ -17,20 +17,13 @@ class TargetKeyPreset(Enum):
     SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) = 4 blocks
         r"\.layers\.[01]\.blocks\..*\.norm[12]$"  # SwinTransformerBlock
     ]
-    C3K2 = [  # YOLO11 Early stages only (layers 2, 4)
-        r"(^|\.)model\.[24]\..*\.bn$",  # C3k2 block
+    C3K2 = [  # YOLO11: backbone C3k2 only (model.2,4,6), concat-prior pathway BNs
+        r"(^|\.)model\.[246]\.cv2\.bn$",  # C3k2 shortcut path final BN
+        r"(^|\.)model\.[246]\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
     ]
-    C3K2_S1 = [
-        r"(^|\.)model\.[24]\.cv1\.bn$",  # C3k2 block
-        r"(^|\.)model\.[24]\.m\.0\.cv1\.bn$",  # C3k block
-    ]
-    C3K2_S2 = [
-        r"(^|\.)model\.[24]\.cv2\.bn$",  # C3k2 block
-        r"(^|\.)model\.[24]\.m\.0\.cv3\.bn$",  # C3k block
-    ]
-    C3K2_S3 = [
-        r"(^|\.)model\.[24]\.cv1\.bn$",  # C3k2 block
-        r"(^|\.)model\.[24]\.m\.0\.cv[12]\.bn$",  # C3k block
+    YOLO11 = [  # YOLO11: all C3k2 blocks (backbone + neck + head-side), concat-prior pathway BNs
+        r"(^|\.)model\.\d+\.cv2\.bn$",  # C3k2 shortcut path final BN
+        r"(^|\.)model\.\d+\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
     ]
 
 
@@ -55,7 +48,7 @@ class PITConfig(AdaptationConfig):
     clahe_tile_size: int = 8
 
     # Gamma parameters
-    gamma_temperature: float = 0.01
+    gamma_temperature: float = 0.001  # Reduced from 0.01: prevents soft_percentile from collapsing to mean on high-res images (e.g. CityScapes 1024x2048)
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
     gamma_noise_floor: float = 0.0
     gamma_saturation_limit: float = 100.0
@@ -78,7 +71,7 @@ class PITConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.C3K2.value,
+                cascade_target=TargetKeyPreset.YOLO11.value,
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:

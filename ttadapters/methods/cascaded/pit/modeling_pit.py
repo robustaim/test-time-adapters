@@ -148,7 +148,7 @@ class GammaTransform(nn.Module):
         clipped = low_val + F.softplus((channel - low_val) * scale) / scale
         clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
 
-        range_val = high_val - low_val + 1e-6
+        range_val = (high_val - low_val).clamp(min=5.0)  # Prevent division instability on low-contrast images (e.g. foggy CityScapes)
         normalized = (clipped - low_val) / range_val
 
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
