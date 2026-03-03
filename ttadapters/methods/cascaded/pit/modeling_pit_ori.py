@@ -155,7 +155,7 @@ class GammaTransform(nn.Module):
             high_val_exact = torch.quantile(channel.float(), self.saturation_q)
             contrast = ((high_val_exact - low_val_exact) / 255.0).clamp(0, 1).item()
 
-        if contrast < self.low_contrast_threshold:  # Low-contrast path: no gradient for boundaries
+        if contrast < self.contrast_threshold:  # Low-contrast path: no gradient for boundaries
             low_val  = low_val_exact
             high_val = high_val_exact
             clipped  = torch.clamp(channel, low_val, high_val)
