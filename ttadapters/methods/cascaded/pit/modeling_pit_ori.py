@@ -159,21 +159,23 @@ class GammaTransform(nn.Module):
                 high_val = torch.quantile(channel.float(), self.saturation_q)
         return low_val, high_val
 
-    def stretch_channel(self, channel, gamma, scale: float = 50.0):
+    def stretch_channel(self, channel, gamma, scale: float = 50.0, eps: float = 1e-6):
         """
         Apply stretching to single channel with gamma correction.
         """
+        channel = channel.float()
         low_val, high_val = self.intensity_mapping(channel)
+
         if self.use_differentiable_stretch:
             clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
             clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
         else:
             clipped  = torch.clamp(channel, low_val, high_val)
 
-        range_val  = (high_val - low_val).clamp(min=1e-6)
+        range_val  = (high_val - low_val).clamp(min=eps)
         normalized = (clipped - low_val) / range_val
 
-        gamma_corrected = torch.pow(normalized + 1e-6, gamma)
+        gamma_corrected = torch.pow(normalized + eps, gamma)
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
