@@ -129,7 +129,7 @@ class GammaTransform(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
         self.gamma_range = tuple(config.gamma_range)
 
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor, temperature: float) -> torch.Tensor:
+    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """Differentiable percentile approximation."""
         x_flat = x.flatten()
         n = x_flat.shape[0]
@@ -137,7 +137,7 @@ class GammaTransform(nn.Module):
 
         idx = (p / 100.0) * (n - 1)
         indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (temperature * n), dim=0)
+        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
 
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
@@ -160,8 +160,8 @@ class GammaTransform(nn.Module):
             high_val = high_val_exact
             clipped  = torch.clamp(channel, low_val, high_val)
         else:  # High-contrast path: differentiable boundaries → rich gradient for gamma
-            low_val  = self.soft_percentile(channel, self.noise_floor, self.temperature)
-            high_val = self.soft_percentile(channel, self.saturation_limit, self.temperature)
+            low_val  = self.soft_percentile(channel, self.noise_floor)
+            high_val = self.soft_percentile(channel, self.saturation_limit)
             clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
             clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
 
