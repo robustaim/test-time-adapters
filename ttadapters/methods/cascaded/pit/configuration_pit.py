@@ -72,7 +72,7 @@ class PITConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.YOLO11.value,
+                cascade_target=TargetKeyPreset.C3K2.value,  # backbone early layers only (2,4,6)
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:
