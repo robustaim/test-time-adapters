@@ -188,7 +188,7 @@ class CLAHEGammaTransform(nn.ModuleList):
         transformed = clahe_gate * transformed + (1 - clahe_gate) * image
         transformed, gamma_params = self[1](transformed)
 
-        return transformed, clahe_params + gamma_params
+        return transformed, {**clahe_params, **gamma_params}
 
     def get_regularization_loss(self):
         return self[1].get_regularization_loss()
@@ -202,7 +202,7 @@ class CLAHEGammaResidualTransform(CLAHEGammaTransform):
         residual_base, residual_params = self[1](transformed)
         transformed = transformed + residual_gate * (residual_base - transformed)
 
-        return transformed, clahe_params + residual_params
+        return transformed, {**clahe_params, **residual_params}
 
 
 class InputTransformation(nn.Module):
