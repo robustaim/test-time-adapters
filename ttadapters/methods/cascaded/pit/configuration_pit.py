@@ -36,12 +36,20 @@ class PITConfig(AdaptationConfig):
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
 
     # Engine configuration
+    itm_type: Literal["clahe", "gamma", "clahe-gamma", "clahe-gamma-residual"] = "gamma"
     cascade_target: list[str] = None
     exclude_target: list[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
+    disable_blending: bool = False
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 
+    # CLAHE parameters
+    clahe_clip_limit: float = 2.0
+    clahe_tile_size: int = 8
+
     # Gamma parameters
+    use_differentiable_stretch: bool = True
+    gamma_temperature: float = 0.01
     gamma_range: tuple[float, float] = (0.5, 2.0)  # *2 to /2
     gamma_noise_floor: float = 0.0
     gamma_saturation_limit: float = 100.0
