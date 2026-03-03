@@ -17,7 +17,7 @@ class TargetKeyPreset(Enum):
     SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) = 4 blocks
         r"\.layers\.[01]\.blocks\..*\.norm[12]$"  # SwinTransformerBlock
     ]
-    C3K2 = [  # YOLO11: backbone C3k2 only (model.2,4,6), concat-prior pathway BNs
+    YOLO11_C3K2 = [  # YOLO11: backbone C3k2 only (model.2,4,6), concat-prior pathway BNs
         r"(^|\.)model\.[246]\.cv2\.bn$",  # C3k2 shortcut path final BN
         r"(^|\.)model\.[246]\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
     ]
@@ -28,6 +28,10 @@ class TargetKeyPreset(Enum):
         r"(^|\.)model\.0\.bn$",  # stem BN (closest to input)
         r"(^|\.)model\.[246]\.cv2\.bn$",  # C3k2 shortcut path final BN
         r"(^|\.)model\.[246]\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
+    ]
+    YOLO11_STAGE1 = [  # YOLO11: 1st C3k2 stage only (model.2), closest to input
+        r"(^|\.)model\.2\.cv2\.bn$",  # C3k2 shortcut path final BN
+        r"(^|\.)model\.2\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
     ]
     YOLO11 = [  # YOLO11: all C3k2 blocks (backbone + neck + head-side), concat-prior pathway BNs
         r"(^|\.)model\.\d+\.cv2\.bn$",  # C3k2 shortcut path final BN
@@ -80,7 +84,7 @@ class PITConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.YOLO11_STEM.value,
+                cascade_target=TargetKeyPreset.YOLO11_STAGE1.value,
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:
