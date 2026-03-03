@@ -427,15 +427,22 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
             for img, tgt in zip(images, targets):
                 stem = Path(img).stem
                 suffix = stem.split(prefix)[-1]
-                img_groups[suffix].append(img)
-                tgt_groups[suffix].append(tgt)
+                if (
+                    prefix+suffix == "leftImg8bit_foggyDBF_beta_0.01" or
+                    (prefix+suffix).startswith("leftImg8bit_rain_alpha_0.01_beta_0.005_dropsize_0101") or
+                    suffix == "_severity_3"
+                ):
+                    img_groups[suffix].append(img)
+                    tgt_groups[suffix].append(tgt)
+
+            print(img_groups.keys())
 
             result_images, result_targets = [], []
             for suffix in sorted(img_groups.keys()):
                 sorted_imgs = sorted(img_groups[suffix])
                 sorted_tgts = sorted(tgt_groups[suffix])
-                result_images.extend(self.filter_keep_skip(sorted_imgs, keep=1, skip=1))
-                result_targets.extend(self.filter_keep_skip(sorted_tgts, keep=1, skip=1))
+                result_images.extend(sorted_imgs)
+                result_targets.extend(sorted_tgts)
 
             return result_images, result_targets
         else:
@@ -472,7 +479,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 print(f"INFO: Starting parallel processing for {total_files} files using {workers} workers...")
                 with ProcessPoolExecutor(max_workers=workers, mp_context=__import__("multiprocessing").get_context("spawn")) as executor:
                     func = partial(
-                        self.process_single_image, input_root=self.images_dir, output_root=dir,
+                        self.process_single_image, input_root=self.images_dir, output_root=dir, severities=(3, ),
                         original_file_suffix=self.IMAGE_PACKAGE_PREFIX, new_file_suffix=prefix_mapping, corruption_name=tp.value
                     )
                     list(tqdm(executor.map(func, tasks), total=total_files, desc=f"{tp.value.title()} Corrupting"))
@@ -480,16 +487,6 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
 
             domains[tp.value] = self._collect_files(domains_images_dir[tp], image_file_suffix=prefix_mapping)
         return domains
-
-    @staticmethod
-    def filter_keep_skip(lst, keep=3, skip=3):
-        result = []
-        i = 0
-        while i < len(lst):
-            result.extend(lst[i:i+keep])
-            i += keep
-            i += skip
-        return result
 
     @staticmethod
     def process_single_image(
