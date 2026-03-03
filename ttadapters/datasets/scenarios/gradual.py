@@ -72,11 +72,11 @@ class SHIFTContinuousScenarioForGradualTTA(BaseGradualTTAScenario):
     DEFAULT = [
         SHIFTContinuousCorruptionType.DAYTIME_TO_NIGHT,
         SHIFTContinuousCorruptionType.CLEAR_TO_FOGGY,
-        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY,
+        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY
     ]
     WHWPAPER = [  # What-How-When Paper Setting
         SHIFTContinuousCorruptionType.CLEAR_TO_FOGGY,
-        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY,
+        SHIFTContinuousCorruptionType.CLEAR_TO_RAINY
     ]
     description = "SHIFT-Continuous Scenario For GradualTTA"
     dataset_class = SHIFTContinuousSubsetAggregationForObjectDetection
@@ -88,8 +88,7 @@ class CityScapesContinuousScenarioForGradualTTA(BaseGradualTTAScenario):
         CityScapesContinuousCorruptionType.BASE_TO_RAIN,
         CityScapesContinuousCorruptionType.BASE_TO_SNOW,
         CityScapesContinuousCorruptionType.FOG_TO_RAIN,
-        CityScapesContinuousCorruptionType.RAIN_TO_SNOW,
-        CityScapesContinuousCorruptionType.SNOW_TO_FROST,
+        CityScapesContinuousCorruptionType.RAIN_TO_SNOW
     ]
     description = "CityScapes-Continuous Scenario For GradualTTA"
     dataset_class = CityScapesContinuousDatasetForObjectDetection
