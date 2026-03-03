@@ -193,9 +193,7 @@ class DistNorm(nn.Module):
     def diff(self) -> torch.Tensor:
         align_loss = torch.stack([anchor.diff() for anchor in self.anchors]).sum()
         reg_loss = self.itm.get_regularization_loss()
-
-        # Combined Loss: Alignment + weighted Regularization
-        return (align_loss + self.config.reg_weight * reg_loss) if reg_loss is not None else align_loss
+        return align_loss + reg_loss
 
 
 class CascadeAnchor(nn.Module):
