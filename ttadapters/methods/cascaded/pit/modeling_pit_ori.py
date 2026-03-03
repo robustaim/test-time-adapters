@@ -118,7 +118,8 @@ class GammaTransform(nn.Module):
     def __init__(self, config: PITConfig):
         super().__init__()
         self.config = config
-        self.base_temperature = config.base_gamma_temperature
+        self.temperature = config.gamma_temperature
+        self.contrast_threshold = config.gamma_contrast_threshold
 
         self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
         self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
@@ -141,38 +142,47 @@ class GammaTransform(nn.Module):
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
-    def calculate_temperature(self, channel: torch.Tensor) -> float:
-        """Compute contrast-adaptive temperature from the channel's histogram range.
-
-        Low contrast (foggy)  → small temperature → sharp, accurate percentile.
-        High contrast (clear) → large temperature → rich gradient signal.
+    def intensity_mapping(self, channel, scale: float = 50.0):
         """
-        with torch.no_grad():
-            low_q = torch.quantile(channel.float(), self.noise_floor_q)
-            high_q = torch.quantile(channel.float(), self.saturation_q)
-            contrast_ratio = ((high_q - low_q) / 255.0).clamp(min=0.05).item()
-        return self.base_temperature * contrast_ratio
+        Calcluate intensity from percentile
+
+        Contrast-adaptive hard switch:
+          - Low contrast (instable gradient) → no_grad boundaries (exact quantile + hard clamp)
+          - High contrast (stable gradient) → differentiable boundaries (soft_percentile + softplus)
+        """
+        with torch.no_grad():  # Compute exact quantiles for contrast detection (no gradient)
+            low_val_exact  = torch.quantile(channel.float(), self.noise_floor_q)
+            high_val_exact = torch.quantile(channel.float(), self.saturation_q)
+            contrast = ((high_val_exact - low_val_exact) / 255.0).clamp(0, 1).item()
+
+        if contrast < self.low_contrast_threshold:  # Low-contrast path: no gradient for boundaries
+            low_val  = low_val_exact
+            high_val = high_val_exact
+            clipped  = torch.clamp(channel, low_val, high_val)
+        else:  # High-contrast path: differentiable boundaries → rich gradient for gamma
+            low_val  = self.soft_percentile(channel, self.noise_floor, self.temperature)
+            high_val = self.soft_percentile(channel, self.saturation_limit, self.temperature)
+            clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
+            clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
+
+        return clipped, low_val, high_val
 
     def stretch_channel(self, channel, gamma):
-        """Apply stretching to single channel with gamma correction."""
-        temperature = self.calculate_temperature(channel)
+        """
+        Apply stretching to single channel with gamma correction.
+        """
+        clipped, low_val, high_val = self.intensity_mapping(channel)
 
-        low_val = self.soft_percentile(channel, self.noise_floor, temperature)
-        high_val = self.soft_percentile(channel, self.saturation_limit, temperature)
-
-        scale = 50.0
-        clipped = low_val + F.softplus((channel - low_val) * scale) / scale
-        clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
-
-        range_val = (high_val - low_val).clamp(min=1.0)
+        range_val  = (high_val - low_val).clamp(min=1.0)
         normalized = (clipped - low_val) / range_val
 
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
-
         return torch.clamp(gamma_corrected * 255.0, 0, 255)
 
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        """Apply stretching to image with gamma correction."""
+        """
+        Apply stretching to image with gamma correction.
+        """
         C = image.shape[0]  # batch size will be 1 cause this is online learning
         stretched = torch.zeros_like(image, device=image.device)
 
