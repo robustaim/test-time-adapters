@@ -32,7 +32,8 @@ class CityScapesDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
         CityScapesDiscreteCorruptionType.RAIN,
         CityScapesDiscreteCorruptionType.SNOW,
         CityScapesDiscreteCorruptionType.FROST,
-        CityScapesDiscreteCorruptionType.BASE,
+        CityScapesDiscreteCorruptionType.BRIGHTNESS,
+        CityScapesDiscreteCorruptionType.BASE
     ]
     description = "CityScapes-Discrete Scenario For ContinualTTA"
     dataset_class = CityScapesDiscreteDatasetForObjectDetection

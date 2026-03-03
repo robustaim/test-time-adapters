@@ -379,13 +379,15 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
         RAIN = "rain"
         SNOW = "snow"
         FROST = "frost"
+        BRIGHTNESS = "brightness"
 
     IMAGE_PACKAGE_PREFIX_MAPPING = {
         CorruptionType.BASE: "leftImg8bit",
         CorruptionType.FOGGY: "leftImg8bit_foggyDBF",
         CorruptionType.RAIN: "leftImg8bit_rain",
         CorruptionType.SNOW: "leftImg8bit_snow",
-        CorruptionType.FROST: "leftImg8bit_frost"
+        CorruptionType.FROST: "leftImg8bit_frost",
+        CorruptionType.BRIGHTNESS: "leftImg8bit_brightness"
     }
 
     def __init__(
@@ -412,13 +414,16 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
             print(len(self.images), len(self.targets))
 
     def _gather_collections(self, images, targets):
-        if self.corruption_type in [self.CorruptionType.FOGGY, self.CorruptionType.SNOW, self.CorruptionType.FROST]:
+        if self.corruption_type in [
+            self.CorruptionType.FOGGY, self.CorruptionType.SNOW,
+            self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS
+        ]:
             return self.filter_keep_skip(images), self.filter_keep_skip(targets)  # reduce dataset size
         else:
             return images, targets
 
     def _prepare_domains(self) -> dict[str, tuple[list, list]]:
-        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST]
+        manual_corruptions = [self.CorruptionType.SNOW, self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS]
         domains, domains_images_dir = {}, {}
         for tp in self.CorruptionType:
             if tp == self.CorruptionType.BASE:  # base domain is not corrupted
