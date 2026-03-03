@@ -73,7 +73,7 @@ class BaseScenario(dict):
 
         for res in result:
             res_list = list(res.values())
-            all_keys = set().union(*[d.keys() for d in res_list])
+            all_keys = dict.fromkeys(k for d in res_list for k in d.keys())
             count = {key: sum(1 for d in res_list if key in d) for key in all_keys}
             res_mean = {
                 key: sum(d.get(key, 0) for d in res_list) / count[key]

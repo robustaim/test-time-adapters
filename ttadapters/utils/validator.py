@@ -178,8 +178,8 @@ class DetectionEvaluator:
             "mAP@0.50:0.95": m_ap.map50_95.item(),
             "mAP@0.50": m_ap.map50.item(),
             "mAP@0.75": m_ap.map75.item(),
-            **performances,
-            **per_class_map
+            **per_class_map,
+            **performances
         }
         return result
 
