@@ -89,6 +89,7 @@ class GammaTransform(nn.Module):
 
     def stretch_channel(self, channel: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         """Apply histogram stretching with gamma correction to a single channel."""
+        channel = channel.float()  # quantile() requires float or double dtype
         with torch.no_grad():
             low_val = torch.quantile(channel, self.noise_floor)
             high_val = torch.quantile(channel, self.saturation_limit)
