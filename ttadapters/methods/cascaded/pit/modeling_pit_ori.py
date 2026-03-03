@@ -153,23 +153,24 @@ class GammaTransform(nn.Module):
         if self.use_differentiable_stretch:
             low_val  = self.soft_percentile(channel, self.noise_floor)
             high_val = self.soft_percentile(channel, self.saturation_limit)
-            clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
-            clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
         else:
             with torch.no_grad():
                 low_val  = torch.quantile(channel.float(), self.noise_floor_q)
                 high_val = torch.quantile(channel.float(), self.saturation_q)
-                clipped  = torch.clamp(channel, low_val, high_val)
-
-        return clipped, low_val, high_val
+        return low_val, high_val
 
     def stretch_channel(self, channel, gamma):
         """
         Apply stretching to single channel with gamma correction.
         """
-        clipped, low_val, high_val = self.intensity_mapping(channel)
+        low_val, high_val = self.intensity_mapping(channel)
+        if self.use_differentiable_stretch:
+            clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
+            clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
+        else:
+            clipped  = torch.clamp(channel, low_val, high_val)
 
-        range_val  = (high_val - low_val).clamp(min=1.0)
+        range_val  = (high_val - low_val).clamp(min=1e-6)
         normalized = (clipped - low_val) / range_val
 
         gamma_corrected = torch.pow(normalized + 1e-6, gamma)
