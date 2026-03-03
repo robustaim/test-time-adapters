@@ -159,7 +159,6 @@ class GammaTransform(nn.Module):
                 high_val = torch.quantile(channel.float(), self.saturation_q)
         return low_val, high_val
 
-    def stretch_channel(self, channel, gamma):
     def stretch_channel(self, channel, gamma, scale: float = 50.0):
         """
         Apply stretching to single channel with gamma correction.
