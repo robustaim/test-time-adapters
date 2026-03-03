@@ -416,7 +416,7 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
 
     def _gather_collections(self, images, targets):
         if self.corruption_type in [
-            self.CorruptionType.FOGGY, self.CorruptionType.SNOW,
+            self.CorruptionType.FOGGY, self.CorruptionType.SNOW, self.CorruptionType.RAIN,
             self.CorruptionType.FROST, self.CorruptionType.BRIGHTNESS
         ]:
             prefix = self.IMAGE_PACKAGE_PREFIX_MAPPING[self.corruption_type]
@@ -434,9 +434,6 @@ class CityScapesDiscreteDatasetForObjectDetection(CityScapesDatasetForObjectDete
                 ):
                     img_groups[suffix].append(img)
                     tgt_groups[suffix].append(tgt)
-
-                if prefix == "leftImg8bit_rain":
-                    print(prefix+suffix)
 
             print(img_groups.keys())
 
