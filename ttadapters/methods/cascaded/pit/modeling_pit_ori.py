@@ -142,7 +142,7 @@ class GammaTransform(nn.Module):
         sorted_x, _ = torch.sort(x_flat)
         return (weights * sorted_x).sum()
 
-    def intensity_mapping(self, channel, scale: float = 50.0):
+    def intensity_mapping(self, channel):
         """
         Calcluate intensity from percentile
 
@@ -160,6 +160,7 @@ class GammaTransform(nn.Module):
         return low_val, high_val
 
     def stretch_channel(self, channel, gamma):
+    def stretch_channel(self, channel, gamma, scale: float = 50.0):
         """
         Apply stretching to single channel with gamma correction.
         """
