@@ -328,7 +328,7 @@ class CascadeAnchor(nn.Module):
     def __init__(self, config: PITConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
-        self.norm = original_norm
+        self.norm = original_norm.clone()
         self.loss_fn = loss_fn
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
@@ -585,7 +585,7 @@ class PITEngine(AdaptationEngine):
             return  # do nothing if feature alignment is not used
 
         from torch.utils.data import DataLoader
-        from ....utils.validator import DetectionEvaluator
+        from ttadapters.utils.validator import DetectionEvaluator
 
         print(f"[{self.model_name}] Starting Calibration ({max_samples} samples)...")
 
