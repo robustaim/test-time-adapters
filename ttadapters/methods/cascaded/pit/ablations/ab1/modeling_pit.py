@@ -236,7 +236,7 @@ class InputTransformation(nn.Module):
         self.applied_params: dict = {}
         self.itm_type = config.itm_type
         self.do_blend = not config.disable_blending
-        self.mixing_ratio = config.mixing_ratio
+        self.mixing_ratio = 0.5
 
         if config.itm_type == "clahe":
             self.transform = CLAHETransform(config)
