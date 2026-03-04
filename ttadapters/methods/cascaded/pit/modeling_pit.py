@@ -455,7 +455,6 @@ class PITEngine(AdaptationEngine):
 
     def _post_init(self):
         self.dist_norm.to(self.device)
-        self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
 
         # Extract norm layers from base model
         if self.config.verbose:
@@ -471,11 +470,12 @@ class PITEngine(AdaptationEngine):
             print(self.dist_norm)
             print("=" * 60)
 
-        # Stats
-        self._reset_stats()
-
         # Device
         self.to(self.device, dtype=self.dtype)
+
+        # Stats
+        self._reset_stats()
+        self.dist_norm_state = {key: value.cpu() for key, value in self.dist_norm.state_dict().items()}
 
     @staticmethod
     def _is_norm_layer(module: nn.Module) -> bool:
