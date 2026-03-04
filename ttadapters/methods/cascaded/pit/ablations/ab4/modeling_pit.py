@@ -328,7 +328,7 @@ class CascadeAnchor(nn.Module):
     def __init__(self, config: PITConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
-        self.norm = original_norm.clone()
+        self.norm = original_norm
         self.loss_fn = loss_fn
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
@@ -372,7 +372,7 @@ class CascadeAnchor(nn.Module):
 
     def forward(self, x):
         out = self.norm(x)
-        target_data = out
+        target_data = out.clone()
         reduce_dim = self.reduce_dim
 
         self.forward_stats['mean'] = target_data.mean(dim=reduce_dim)
