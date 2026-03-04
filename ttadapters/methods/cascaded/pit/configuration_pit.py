@@ -43,6 +43,7 @@ class PITConfig(AdaptationConfig):
     cascade_target: list[str] = None
     exclude_target: list[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
     disable_blending: bool = False
+    blend_ratio: float = 0.6
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 

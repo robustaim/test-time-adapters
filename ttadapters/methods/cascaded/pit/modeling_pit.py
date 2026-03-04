@@ -236,6 +236,7 @@ class InputTransformation(nn.Module):
         self.applied_params: dict = {}
         self.itm_type = config.itm_type
         self.do_blend = not config.disable_blending
+        self.blend_ratio = config.blend_ratio
 
         if config.itm_type == "clahe":
             self.transform = CLAHETransform(config)
@@ -253,7 +254,7 @@ class InputTransformation(nn.Module):
         transformed, transform_params = self.transform(original)
         self.applied_params = transform_params
         if self.do_blend:
-            return transformed * 0.5 + original * 0.5  # Blend transformed and original for stability
+            return transformed * self.blend_ratio + original * (1-self.blend_ratio)  # Blend transformed and original for stability
         return transformed
 
     def get_regularization_loss(self) -> torch.Tensor | None:
