@@ -42,18 +42,32 @@ class FLOPsCounter(DetectionEvaluator):
 
     def count(
         self,
-        loader: DataLoader,
+        *args, **kwargs
     ) -> dict:
         """
         Measure forward FLOPs for one batch.
         Batch handling mirrors DetectionEvaluator.evaluate_with_reset exactly.
 
-        Args:
-            loader: DataLoader — same loader used with DetectionEvaluator
+        Supports being passed as a callback to Scenario.play(), natively
+        extracting the DataLoader from args or kwargs.
 
         Returns:
             dict with total_gflops, total_flops, input_shape, zero_flop_modules
         """
+        # Scenario.play passes: (desc, loader, loader_length, **kwargs)
+        # Handle flexible args just like evaluate()
+        loader = kwargs.get("loader")
+        if loader is None:
+            # Look for the first argument that is a DataLoader
+            for arg in args:
+                if isinstance(arg, DataLoader):
+                    loader = arg
+                    break
+        if loader is None and len(args) > 1:
+            loader = args[1] # fallback to 2nd pos arg
+
+        if loader is None:
+            raise ValueError("Could not find DataLoader in arguments")
         from torch.utils.flop_counter import FlopCounterMode
 
         model = self.model
