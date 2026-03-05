@@ -139,13 +139,12 @@ class FLOPsCounter:
             with torch.autocast(device_type=device.type, dtype=dtype):
                 match provider:
                     case ModelProvider.Detectron2:
-                        # batch: List[Dict] with "image" key
-                        for item in batch:
-                            if isinstance(item.get("image"), torch.Tensor):
-                                item["image"] = item["image"].to(device)
                         wrapped = _Detectron2Wrapper(base_model)
                         fvcore_inputs = (batch,)
-                        input_shape = [item["image"].shape for item in batch]
+                        input_shape = [
+                            next((v.shape for v in item.values() if isinstance(v, torch.Tensor) and v.dim() == 3), "unknown")
+                            for item in batch
+                        ]
 
                     case ModelProvider.Ultralytics:
                         img = batch["img"].to(device)
