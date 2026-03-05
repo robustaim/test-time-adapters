@@ -127,12 +127,32 @@ class FLOPsCounter(DetectionEvaluator):
 
         # ── Find modules with params but 0 FLOPs (likely excluded ops) ─────────
         flop_counts = flop_counter.get_flop_counts()
-        zero_flop_modules = [
-            (name, module.__class__.__name__)
-            for name, module in model.named_modules()
-            if list(module.parameters(recurse=False))
-            and sum(flop_counts.get(name, {}).values()) == 0
-        ]
+        
+        # FlopCounterMode.get_flop_counts() keys might have 'Global.' prefix or 
+        # differ slightly from named_modules(). We flatten the counted keys for safer matching.
+        counted_keys = set()
+        for k in flop_counts.keys():
+            # Usually format is "Global.model_name.layer_name" or "layer_name"
+            # We strip "Global." if it exists to match named_modules()
+            clean_k = k.replace("Global.", "", 1) if k.startswith("Global.") else k
+            counted_keys.add(clean_k)
+
+        zero_flop_modules = []
+        for name, module in model.named_modules():
+            # Only check leaf-like modules that own params (e.g. Linear, Conv2d)
+            if list(module.parameters(recurse=False)):
+                # If the exact name is not in the flattened counted_keys, and 
+                # none of its children contributed either, it's highly likely excluded.
+                # However, exact matching is tricky with FlopCounterMode.
+                # A safer check: does its name exist anywhere in the flop count keys?
+                
+                module_flops = sum(
+                    sum(v.values()) for k, v in flop_counts.items() 
+                    if k == name or k.endswith(f".{name}") or k.startswith(f"Global.{name}")
+                )
+                
+                if module_flops == 0:
+                    zero_flop_modules.append((name, module.__class__.__name__))
 
         result = {
             "total_gflops": total / 1e9,
