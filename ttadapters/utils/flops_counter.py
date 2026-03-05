@@ -139,12 +139,16 @@ class FLOPsCounter:
             with torch.autocast(device_type=device.type, dtype=dtype):
                 match provider:
                     case ModelProvider.Detectron2:
-                        wrapped = _Detectron2Wrapper(base_model)
-                        fvcore_inputs = (batch,)
-                        input_shape = [
-                            next((v.shape for v in item.values() if isinstance(v, torch.Tensor) and v.dim() == 3), "unknown")
-                            for item in batch
-                        ]
+                        # fvcore uses torch.jit.trace which cannot handle Detectron2's
+                        # List[Dict] input format. Instead, preprocess manually and
+                        # trace backbone only. FPN/RPN/ROI are excluded from count.
+                        det2_model = base_model.model if hasattr(base_model, "model") else base_model
+                        images = det2_model.preprocess_image(batch)  # -> ImageList
+                        img_tensor = images.tensor.to(device)         # (N, C, H, W) padded
+                        wrapped = det2_model.backbone                 # backbone + FPN
+                        fvcore_inputs = (img_tensor,)
+                        input_shape = list(img_tensor.shape)
+                        print("UserWarning: Detectron2: measuring backbone+FPN only (RPN/ROIHead excluded)")
 
                     case ModelProvider.Ultralytics:
                         img = batch["img"].to(device)
