@@ -1,19 +1,18 @@
 """
 FLOPs Counter for Object Detection Models.
 
-Built on top of DetectionEvaluator's batch-handling logic.
-Processes exactly one batch and measures forward FLOPs.
+Inherits DetectionEvaluator and reuses its __init__ and batch-handling logic.
 
-Usage (mirrors DetectionEvaluator):
-    from ttadapters.utils.flops_counter import FLOPsCounter
-
+Usage (identical interface to DetectionEvaluator):
     data_preparation = model.DataPreparation(dataset.test, evaluation_mode=True)
     evaluator_loader_params = dict(
         batch_size=1, shuffle=False, collate_fn=data_preparation.collate_fn
     )
     loader = DataLoader(dataset.test, **evaluator_loader_params)
 
-    result = FLOPsCounter.count(model, loader=loader, device=device, dtype=DATA_TYPE)
+    counter = FLOPsCounter(model, classes=CLASSES, data_preparation=data_preparation,
+                           dtype=DATA_TYPE, device=device, no_grad=True)
+    result = counter.count(loader)
 """
 
 from contextlib import nullcontext
@@ -21,56 +20,51 @@ from contextlib import nullcontext
 import torch
 from torch.utils.data import DataLoader
 
-from ..models.base import BaseModel, ModelProvider
-from ..datasets import DataPreparation
+from ..models.base import ModelProvider
 from .validator import DetectionEvaluator
 
 
 class FLOPsCounter(DetectionEvaluator):
     """
-    FLOPs Counter. Inherits DetectionEvaluator and reuses its batch-handling.
+    FLOPs Counter. Fully inherits DetectionEvaluator (same __init__).
 
-    Processes exactly ONE batch from the loader and measures forward FLOPs
-    via torch.utils.flop_counter.FlopCounterMode (hook-based, no JIT trace).
+    Adds a single `count(loader)` method that:
+    - Takes the same DataLoader used with DetectionEvaluator
+    - Processes exactly ONE batch
+    - Measures forward FLOPs via FlopCounterMode (hook-based, no JIT trace)
 
     Usage:
-        loader = DataLoader(dataset.test, **evaluator_loader_params)
-        result = FLOPsCounter.count(model, loader=loader, device=device, dtype=dtype)
+        counter = FLOPsCounter(model, classes=CLASSES,
+                               data_preparation=data_prep,
+                               dtype=dtype, device=device)
+        result = counter.count(loader)
     """
 
-    @staticmethod
     def count(
-        model: BaseModel,
+        self,
         loader: DataLoader,
-        device: torch.device = torch.device("cuda"),
-        dtype: torch.dtype = torch.float32,
-        stream: torch.cuda.Stream | None = None,
     ) -> dict:
         """
-        Count forward FLOPs for one batch using the same logic as
-        DetectionEvaluator.evaluate_with_reset.
+        Measure forward FLOPs for one batch.
+        Batch handling mirrors DetectionEvaluator.evaluate_with_reset exactly.
 
         Args:
-            model:   BaseModel instance (eval mode will be set internally)
-            loader:  DataLoader — same object passed to evaluate_with_reset
-            device:  torch.device
-            dtype:   torch.dtype
-            stream:  Optional CUDA stream (same as DetectionEvaluator)
+            loader: DataLoader — same loader used with DetectionEvaluator
 
         Returns:
-            dict:
-                total_gflops     – forward GFLOPs
-                total_flops      – raw FLOPs integer
-                input_shape      – shape info of the input
-                model_provider   – provider name string
-                zero_flop_modules – list of (name, class) with params but 0 FLOPs
+            dict with total_gflops, total_flops, input_shape, zero_flop_modules
         """
         from torch.utils.flop_counter import FlopCounterMode
 
-        model = model.to(device).to(dtype)
+        model = self.model
+        device = self.device
+        dtype = self.dtype
+        stream = self.stream
+
+        model.to(device).to(dtype)
         model.eval()
 
-        # ── Get exactly one batch (mirrors validator.py loop start) ────────────
+        # ── Get exactly one batch ───────────────────────────────────────────────
         batch = next(iter(loader))
 
         # ── Device handling — exact copy from DetectionEvaluator ───────────────
@@ -97,7 +91,7 @@ class FLOPsCounter(DetectionEvaluator):
                 for item in batch
             ]
 
-        # ── Measure FLOPs — same model call as DetectionEvaluator ─────────────
+        # ── Measure FLOPs — same model call pattern as DetectionEvaluator ──────
         flop_counter = FlopCounterMode(model, display=False)
         stream_context = torch.cuda.stream(stream) if stream is not None else nullcontext()
 
@@ -105,7 +99,6 @@ class FLOPsCounter(DetectionEvaluator):
             with stream_context:
                 with torch.autocast(device_type=device.type, dtype=dtype):
                     with flop_counter:
-                        # Mirrors validator.py model call exactly
                         match model.model_provider:
                             case ModelProvider.Detectron2:
                                 _ = model(batch)
@@ -118,7 +111,7 @@ class FLOPsCounter(DetectionEvaluator):
 
         total = flop_counter.get_total_flops()
 
-        # ── Find modules with params but 0 FLOPs (likely excluded) ────────────
+        # ── Find modules with params but 0 FLOPs (likely excluded ops) ─────────
         flop_counts = flop_counter.get_flop_counts()
         zero_flop_modules = [
             (name, module.__class__.__name__)
@@ -143,7 +136,7 @@ class FLOPsCounter(DetectionEvaluator):
         print("-" * 60)
         print(f"  Forward FLOPs  : {total / 1e9:.2f} GFLOPs")
         if zero_flop_modules:
-            print(f"  ⚠ Modules with params but 0 FLOPs (likely excluded):")
+            print("  ⚠ Modules with params but 0 FLOPs (likely excluded):")
             for name, cls in zero_flop_modules[:10]:
                 print(f"      [{cls}] {name}")
             if len(zero_flop_modules) > 10:
