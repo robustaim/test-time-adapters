@@ -329,8 +329,12 @@ class GITAEngine(AdaptationEngine):
         self.online(self.adapting)
         self.to(self.device)
         self.to(self.dtype)
+        tf = self.dist_norm.itm.transform
+        if hasattr(tf, 'saturation_limit'):
+            tf.saturation_limit = tf.saturation_limit.to(self.device)
+            tf.noise_floor = tf.noise_floor.to(self.device)
         try:
-            self.optimizer.zero_grad()
+            self._optimizer = None
         except:
             pass
         if reset_stats:
