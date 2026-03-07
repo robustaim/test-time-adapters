@@ -169,6 +169,9 @@ class CascadeAnchor(nn.Module):
         return loss
 
 
+modeling_gita.CascadeAnchor = CascadeAnchor
+
+
 class GITAEngine(AdaptationEngine):
     """
     GITA Engine
