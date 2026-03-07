@@ -31,9 +31,9 @@ class TargetKeyPreset(Enum):
 
 
 @dataclass
-class PITConfig(AdaptationConfig):
-    """Configuration for PITConfig."""
-    adaptation_name = "PITEngine"
+class GITAConfig(AdaptationConfig):
+    """Configuration for GITAConfig."""
+    adaptation_name = "GITAEngine"
 
     adapt_lr: float = 1e-3
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"

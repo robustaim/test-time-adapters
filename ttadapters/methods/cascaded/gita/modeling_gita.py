@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from ...base import AdaptationEngine
 from ....models.base import BaseModel, ModelProvider, DataPreparation
 
-from .configuration_pit import PITConfig
+from .configuration_gita import GITAConfig
 
 
 class GaussianKLDivLoss(nn.Module):
@@ -78,7 +78,7 @@ class GaussianKLDivLoss(nn.Module):
 class CLAHETransform(nn.Module):
     """CLAHE Transform Module. (Not differentiable)"""
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
         self.clip_limit = config.clahe_clip_limit
@@ -115,7 +115,7 @@ class CLAHETransform(nn.Module):
 class GammaTransform(nn.Module):
     """Differentiable Gamma Transformation Module by histogram stretching."""
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
         self.temperature = config.gamma_temperature
@@ -197,7 +197,7 @@ class GammaTransform(nn.Module):
 
 
 class CLAHEGammaTransform(nn.ModuleList):
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__([CLAHETransform(config), GammaTransform(config)])
         self.gate_raw = nn.Parameter(torch.tensor(0.0))
 
@@ -230,7 +230,7 @@ class InputTransformation(nn.Module):
     Input Transformation Module which creates different view of input image.
     """
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
         self.applied_params: dict = {}
@@ -300,10 +300,10 @@ class DistNorm(nn.Module):
     Dist Normalization
 
     Args:
-        config: PITConfig with learning parameters
+        config: GITAConfig with learning parameters
     """
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
 
@@ -326,7 +326,7 @@ class DistNorm(nn.Module):
 
 
 class CascadeAnchor(nn.Module):
-    def __init__(self, config: PITConfig, original_norm: nn.Module, loss_fn: nn.Module):
+    def __init__(self, config: GITAConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
         self.norm = original_norm
@@ -412,9 +412,9 @@ class CascadeAnchor(nn.Module):
         return loss
 
 
-class PITEngine(AdaptationEngine):
+class GITAEngine(AdaptationEngine):
     """
-    PIT Engine
+    GITA Engine
     Injects DistNorm module into the base model.
 
     Supports:
@@ -425,22 +425,22 @@ class PITEngine(AdaptationEngine):
     overrides foward to adapt source flow.
 
     Args:
-        config: PITConfig with learning parameters
+        config: GITAConfig with learning parameters
         base_model: Pre-trained model
 
     Example:
-        >>> config = PITConfig(
+        >>> config = GITAConfig(
         ...     itm_type="gamma",
         ...     cascade_target=["layer4"]
         ... )
-        >>> adaptive_model = PITEngine(config, base_model)
+        >>> adaptive_model = GITAEngine(config, base_model)
         >>> output = adaptive_model(batch)
     """
-    model_name = "PITEngine"
-    config_class = PITConfig
+    model_name = "GITAEngine"
+    config_class = GITAConfig
     loss_class = nn.MSELoss
 
-    def __init__(self, config: PITConfig, base_model: BaseModel):
+    def __init__(self, config: GITAConfig, base_model: BaseModel):
         self.dist_norm: DistNorm  # will be initialized in _pre_init()
         self.dist_norm_state: dict
         self.config = config

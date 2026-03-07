@@ -12,217 +12,8 @@ import torch.nn.functional as F
 from ttadapters.methods.base import AdaptationEngine
 from ttadapters.models.base import BaseModel, ModelProvider, DataPreparation
 
-from ttadapters.methods.cascaded import PITConfig
-
-
-class GaussianKLDivLoss(nn.Module):
-    """KL Divergence Loss between two Gaussian distributions.
-
-    Computes KL(P||Q) where P and Q are Gaussian distributions.
-    KL(P||Q) = log(σ_q/σ_p) + (σ_p² + (μ_p - μ_q)²)/(2σ_q²) - 1/2
-    """
-
-    def __init__(self, reduction: Literal["none", "mean", "sum"] = "mean"):
-        """
-        Args:
-            reduction: "none" | "mean" | "sum"
-        """
-        super().__init__()
-        self.reduction = reduction
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Compute KL divergence between input and target distributions.
-
-        Args:
-            input: Input tensor (mean, var) of Q distribution
-                   Shape: (batch_size, 2) or (2,) where [..., 0] is mean, [..., 1] is var
-            target: Target tensor (mean, var) of P distribution
-                    Shape: (batch_size, 2) or (2,) where [..., 0] is mean, [..., 1] is var
-
-        Returns:
-            KL divergence loss
-        """
-        # Extract means and variances
-        if input.dim() == 1:
-            q_mean, q_var = input[0], input[1]
-            p_mean, p_var = target[0], target[1]
-        else:
-            q_mean, q_var = input[:, 0], input[:, 1]
-            p_mean, p_var = target[:, 0], target[:, 1]
-
-        # Add epsilon for numerical stability
-        q_var = q_var + 1e-6
-        p_var = p_var + 1e-6
-
-        sigma_p = torch.sqrt(p_var)
-        sigma_q = torch.sqrt(q_var)
-
-        # Compute KL divergence: KL(P||Q)
-        term1 = torch.log(sigma_q / sigma_p)
-        term2 = (p_var + (p_mean - q_mean)**2) / (2 * q_var)
-
-        kl_div = term1 + term2 - 0.5
-
-        # Apply reduction
-        if self.reduction == "none":
-            return kl_div
-        elif self.reduction == "mean":
-            return kl_div.mean()
-        elif self.reduction == "sum":
-            return kl_div.sum()
-        else:
-            raise ValueError(f"Invalid reduction mode: {self.reduction}")
-
-
-class CLAHETransform(nn.Module):
-    """CLAHE Transform Module. (Not differentiable)"""
-
-    def __init__(self, config: PITConfig):
-        super().__init__()
-        self.config = config
-        self.clip_limit = config.clahe_clip_limit
-        self.tile_size = config.clahe_tile_size
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        _, H, W = image.shape  # image shape: (C=3, H, W)
-
-        # Adaptive Grid Size Calculation
-        # maintain standard tile size based on the longest edge to keep tile aspect ratio ~1:1
-        if W >= H:
-            grid_x = self.tile_size
-            grid_y = max(1, int(self.tile_size * (H / W)))
-        else:
-            grid_y = self.tile_size
-            grid_x = max(1, int(self.tile_size * (W / H)))
-
-        # Create dynamic CLAHE object
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=(grid_x, grid_y))
-
-        image_np = image.permute(1, 2, 0).cpu().numpy()  # (H, W, C), RGB
-        image_np = image_np.astype(np.uint8)
-
-        image_ycrcb = cv2.cvtColor(image_np, cv2.COLOR_RGB2YCrCb)
-        image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
-
-        image_rgb = cv2.cvtColor(image_ycrcb, cv2.COLOR_YCrCb2RGB)
-        image_rgb = image_rgb.astype(np.float32)
-        image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1)  # (C, H, W)
-
-        return image_tensor.to(image.device, dtype=image.dtype), {'clip_limit': self.clip_limit, 'tile_size': self.tile_size}
-
-
-class GammaTransform(nn.Module):
-    """Differentiable Gamma Transformation Module by histogram stretching."""
-
-    def __init__(self, config: PITConfig):
-        super().__init__()
-        self.config = config
-        self.temperature = config.gamma_temperature
-        self.use_differentiable_stretch = config.use_differentiable_stretch
-
-        self.saturation_limit = torch.tensor(config.gamma_saturation_limit, requires_grad=False)
-        self.noise_floor = torch.tensor(config.gamma_noise_floor, requires_grad=False)
-        self.saturation_q  = config.gamma_saturation_limit / 100.0
-        self.noise_floor_q = config.gamma_noise_floor / 100.0
-
-        self.gamma = nn.Parameter(torch.tensor(0.0))  # init for identity transform
-        self.gamma_range = tuple(config.gamma_range)
-
-    def soft_percentile(self, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        """Differentiable percentile approximation."""
-        x_flat = x.flatten()
-        n = x_flat.shape[0]
-        p = p.to(x.device)
-
-        idx = (p / 100.0) * (n - 1)
-        indices = torch.arange(n, device=x.device, dtype=x.dtype)
-        weights = F.softmax(-(indices - idx).abs() / (self.temperature * n), dim=0)
-
-        sorted_x, _ = torch.sort(x_flat)
-        return (weights * sorted_x).sum()
-
-    def intensity_mapping(self, channel):
-        """
-        Calcluate intensity from percentile
-
-        Supports two implementations of histogram stretching:
-            - differentiable (soft_percentile)
-            - non-differentiable (torch.quantile)
-        """
-        if self.use_differentiable_stretch:
-            low_val  = self.soft_percentile(channel, self.noise_floor)
-            high_val = self.soft_percentile(channel, self.saturation_limit)
-        else:
-            with torch.no_grad():
-                low_val  = torch.quantile(channel.float(), self.noise_floor_q)
-                high_val = torch.quantile(channel.float(), self.saturation_q)
-        return low_val, high_val
-
-    def stretch_channel(self, channel, gamma, scale: float = 50.0, eps: float = 1e-6):
-        """
-        Apply stretching to single channel with gamma correction.
-        """
-        channel = channel.float()
-        low_val, high_val = self.intensity_mapping(channel)
-
-        if self.use_differentiable_stretch:
-            clipped = low_val + F.softplus((channel - low_val)  * scale) / scale
-            clipped = high_val - F.softplus((high_val - clipped) * scale) / scale
-        else:
-            clipped  = torch.clamp(channel, low_val, high_val)
-
-        range_val  = (high_val - low_val).clamp(min=eps)
-        normalized = (clipped - low_val) / range_val
-
-        gamma_corrected = torch.pow(normalized + eps, gamma)
-        return torch.clamp(gamma_corrected * 255.0, 0, 255)
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        """
-        Apply stretching to image with gamma correction.
-        """
-        # self.gamma init 0.0 -> gamma = 1.0 (Identity)
-        gamma = (self.gamma + 1.0).clamp(*self.gamma_range)
-
-        # histogram stretching
-        stretched = torch.stack([self.stretch_channel(image[c], gamma) for c in range(image.shape[0])])
-
-        return stretched, {'noise_floor': self.noise_floor.item(), 'saturation_limit': self.saturation_limit.item(), 'gamma': gamma.item()}
-
-    def get_regularization_loss(self):
-        """Compute regularization loss relative to initialization anchors."""
-        # Pull towards Identity (gamma=1.0 -> self.gamma=0.0)
-        return self.gamma.pow(2)
-
-
-class CLAHEGammaTransform(nn.ModuleList):
-    def __init__(self, config: PITConfig):
-        super().__init__([CLAHETransform(config), GammaTransform(config)])
-        self.gate_raw = nn.Parameter(torch.tensor(0.0))
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        clahe_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-
-        transformed, clahe_params = self[0](image)
-        transformed = clahe_gate * transformed + (1 - clahe_gate) * image
-        transformed, gamma_params = self[1](transformed)
-
-        return transformed, {**clahe_params, **gamma_params}
-
-    def get_regularization_loss(self):
-        return self[1].get_regularization_loss()
-
-
-class CLAHEGammaResidualTransform(CLAHEGammaTransform):
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        residual_gate = 0.5 * (torch.tanh(self.gate_raw) + 1.0)
-
-        transformed, clahe_params = self[0](image)
-        residual_base, residual_params = self[1](transformed)
-        transformed = transformed + residual_gate * (residual_base - transformed)
-
-        return transformed, {**clahe_params, **residual_params}
+from ttadapters.methods.cascaded import GITAConfig
+from ttadapters.methods.cascaded.gita.modeling_gita import *
 
 
 class InputTransformation(nn.Module):
@@ -230,12 +21,13 @@ class InputTransformation(nn.Module):
     Input Transformation Module which creates different view of input image.
     """
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
         self.applied_params: dict = {}
         self.itm_type = config.itm_type
         self.do_blend = not config.disable_blending
+        self.mixing_ratio = 0.5
 
         if config.itm_type == "clahe":
             self.transform = CLAHETransform(config)
@@ -253,45 +45,11 @@ class InputTransformation(nn.Module):
         transformed, transform_params = self.transform(original)
         self.applied_params = transform_params
         if self.do_blend:
-            return transformed * 0.5 + original * 0.5  # Blend transformed and original for stability
+            return transformed * self.mixing_ratio + original * (1-self.mixing_ratio)  # Blend transformed and original for stability
         return transformed
 
     def get_regularization_loss(self) -> torch.Tensor | None:
         return self.transform.get_regularization_loss()
-
-
-class SupportedNormType(Enum):
-    BN = "BN"
-    LN = "LN"
-
-
-class AnchorList(nn.ModuleList):
-    """Wrapper for nn.ModuleList to customize __repr__."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.bn_count = 0
-        self.ln_count = 0
-
-    def append(self, item: "CascadeAnchor"):
-        if not isinstance(item, CascadeAnchor):
-            raise TypeError("item must be CascadeAnchor")
-
-        super().append(item)
-        if item.anchor_type == SupportedNormType.BN:
-            self.bn_count += 1
-        elif item.anchor_type == SupportedNormType.LN:
-            self.ln_count += 1
-
-    def __repr__(self) -> str:
-        params = []
-        if self.bn_count > 0:
-            params.append(f"BN={self.bn_count}")
-        if self.ln_count > 0:
-            params.append(f"LN={self.ln_count}")
-        param_str = ", ".join(params)
-        module_name = self.__class__.__name__
-        return super().__repr__().replace(module_name, f"{module_name}({param_str})")
 
 
 class DistNorm(nn.Module):
@@ -299,10 +57,10 @@ class DistNorm(nn.Module):
     Dist Normalization
 
     Args:
-        config: PITConfig with learning parameters
+        config: GITAConfig with learning parameters
     """
 
-    def __init__(self, config: PITConfig):
+    def __init__(self, config: GITAConfig):
         super().__init__()
         self.config = config
 
@@ -325,7 +83,7 @@ class DistNorm(nn.Module):
 
 
 class CascadeAnchor(nn.Module):
-    def __init__(self, config: PITConfig, original_norm: nn.Module, loss_fn: nn.Module):
+    def __init__(self, config: GITAConfig, original_norm: nn.Module, loss_fn: nn.Module):
         super().__init__()
         self.config = config
         self.norm = original_norm
@@ -371,8 +129,7 @@ class CascadeAnchor(nn.Module):
             self.source_stats['num_samples'] = 0
 
     def forward(self, x):
-        out = self.norm(x)
-        target_data = out.clone()
+        target_data = x
         reduce_dim = self.reduce_dim
 
         self.forward_stats['mean'] = target_data.mean(dim=reduce_dim)
@@ -386,7 +143,7 @@ class CascadeAnchor(nn.Module):
                     self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
                     self.source_stats['num_samples'] += x.shape[0]
 
-        return out
+        return self.norm(x)
 
     def diff(self) -> torch.Tensor:
         """Compute Flow Adaptation loss."""
@@ -412,9 +169,9 @@ class CascadeAnchor(nn.Module):
         return loss
 
 
-class PITEngine(AdaptationEngine):
+class GITAEngine(AdaptationEngine):
     """
-    PIT Engine
+    GITA Engine
     Injects DistNorm module into the base model.
 
     Supports:
@@ -425,22 +182,22 @@ class PITEngine(AdaptationEngine):
     overrides foward to adapt source flow.
 
     Args:
-        config: PITConfig with learning parameters
+        config: GITAConfig with learning parameters
         base_model: Pre-trained model
 
     Example:
-        >>> config = PITConfig(
+        >>> config = GITAConfig(
         ...     itm_type="gamma",
         ...     cascade_target=["layer4"]
         ... )
-        >>> adaptive_model = PITEngine(config, base_model)
+        >>> adaptive_model = GITAEngine(config, base_model)
         >>> output = adaptive_model(batch)
     """
-    model_name = "PITEngine"
-    config_class = PITConfig
+    model_name = "GITAEngine"
+    config_class = GITAConfig
     loss_class = nn.MSELoss
 
-    def __init__(self, config: PITConfig, base_model: BaseModel):
+    def __init__(self, config: GITAConfig, base_model: BaseModel):
         self.dist_norm: DistNorm  # will be initialized in _pre_init()
         self.dist_norm_state: dict
         self.config = config
