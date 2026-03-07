@@ -115,7 +115,7 @@ class CascadeAnchor(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if not mode and self.anchor_type == SupportedNormType.LN:  # only for LN
+        if not mode:
             if self.source_stats['num_samples'] > 0:  # finalize source stats
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
@@ -137,11 +137,14 @@ class CascadeAnchor(nn.Module):
 
         if self.training:
             if self.anchor_type == SupportedNormType.LN:
-                with torch.no_grad():
-                    dim = tuple(range(1, x.ndim))  # exclude batch dim
-                    self.source_stats['running_means'].extend(target_data.mean(dim=dim))
-                    self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
-                    self.source_stats['num_samples'] += x.shape[0]
+                dim = tuple(range(1, x.ndim))  # exclude batch dim
+            else:
+                dim = (2, 3)  # exclude batch dim
+
+            with torch.no_grad():
+                self.source_stats['running_means'].extend(target_data.mean(dim=dim))
+                self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
+                self.source_stats['num_samples'] += x.shape[0]
 
         return out
 
