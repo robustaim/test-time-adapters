@@ -569,7 +569,7 @@ class GITAEngine(AdaptationEngine):
         self.to(self.device)
         self.to(self.dtype)
         try:
-            self.optimizer.zero_grad()
+            del self._optimizer
         except:
             pass
         if reset_stats:
