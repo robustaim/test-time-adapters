@@ -13,6 +13,7 @@ from ttadapters.methods.base import AdaptationEngine
 from ttadapters.models.base import BaseModel, ModelProvider, DataPreparation
 
 from ttadapters.methods.cascaded import GITAConfig
+from ttadapters.methods.cascaded.gita import modeling_gita
 from ttadapters.methods.cascaded.gita.modeling_gita import *
 
 
@@ -170,6 +171,9 @@ class CascadeAnchor(nn.Module):
         except ValueError as e:
             raise RuntimeError(f"Forward statistics not yet collected for {self.wrapped}.") from e
         return loss
+
+
+modeling_gita.CascadeAnchor = CascadeAnchor
 
 
 class GITAEngine(AdaptationEngine):
