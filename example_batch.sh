@@ -6,7 +6,7 @@ DATASET="${2:-shift}"
 MODEL="${3:-rcnn}"
 DEVICE="${4:-0}"
 
-METHODS=("dua_engine" "act_mad_engine" "mean_teacher_engine" "whw_engine" "pit_engine")
+METHODS=("dua_engine" "act_mad_engine" "mean_teacher_engine" "whw_engine" "gita_engine")
 
 ERRORS=()
 
