@@ -550,6 +550,10 @@ class GITAEngine(AdaptationEngine):
             parent = getattr(parent, part)
         setattr(parent, name_parts[-1], new_module)
 
+    @property
+    def optimizer(self):
+        return super().optimizer
+
     def online_parameters(self):
         """Get learnable parameters for optimization."""
         return self.dist_norm.online_parameters()
