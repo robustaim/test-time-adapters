@@ -56,6 +56,21 @@ class WHWConfig(AdaptationConfig):
         """Create configuration from preset."""
         from .....models import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection
         if isinstance(base_model, FasterRCNNForObjectDetection):
+            return cls(backbone="rcnn", adapt_lr=4e-5, **kwargs)
+        elif isinstance(base_model, SwinRCNNForObjectDetection):
+            return cls(backbone="swinrcnn", adapt_lr=9e-6, **kwargs)
+        else:
+            raise ValueError(f"Unsupported base model type: {type(base_model)}")
+
+
+class WHWSkipConfig(WHWConfig):
+    adaptation_name = "WHWSkipEngine"
+
+    @classmethod
+    def from_preset(cls, base_model, **kwargs):
+        """Create configuration from preset."""
+        from .....models import FasterRCNNForObjectDetection, SwinRCNNForObjectDetection
+        if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(backbone="rcnn", skip_redundant="stat-period-ema", adapt_lr=5e-4, **kwargs)
         elif isinstance(base_model, SwinRCNNForObjectDetection):
             return cls(backbone="swinrcnn", skip_redundant="stat-period-ema", adapt_lr=9e-6, **kwargs)
