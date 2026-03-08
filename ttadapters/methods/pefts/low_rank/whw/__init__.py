@@ -1,7 +1,7 @@
 from transformers import AutoConfig
 from ....base import AutoAdaptationEngine, AutoAdaptationEngineForObjectDetection
 
-from .configuration_whw import WHWConfig, WHWSkipConfig
+from .configuration_whw import WHWConfig, WHWSkipConfig, BaseModel
 from .modeling_whw import WHWEngine
 
 
