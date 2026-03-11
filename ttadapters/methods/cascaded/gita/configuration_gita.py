@@ -24,6 +24,9 @@ class TargetKeyPreset(Enum):
     YOLO11_STEM = [  # YOLO11: stem only (model.0)
         r"(^|\.)model\.0\.bn$",  # stem BN (closest to input)
     ]
+    YOLO11_FIRST_STRIDE = [  # YOLO11: first stride block only (model.1)
+        r"(^|\.)model\.1\.bn$",  # first stride BN
+    ]
     YOLO11 = [  # YOLO11: all C3k2 blocks (backbone + neck + head-side), concat-prior pathway BNs
         r"(^|\.)model\.\d+\.cv2\.bn$",  # C3k2 shortcut path final BN
         r"(^|\.)model\.\d+\.m\.\d+\.cv3\.bn$",  # C3k bottleneck path final BN
