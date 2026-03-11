@@ -722,12 +722,15 @@ class GITAEngine(AdaptationEngine):
             return result
 
         # Backward
+        applied_params = self.dist_norm.itm.applied_params
         loss = self.dist_norm.diff()
         loss.backward()
+        if hasattr(self.dist_norm.itm.transform, 'gamma'):
+            applied_params['gamma_gradient'] = self.dist_norm.itm.transform.gamma.grad.item()
         self.optimizer.step()
         self._stats['losses'].append(loss.item())
 
         # Logging
-        self._stats['transform_params'].append(self.dist_norm.itm.applied_params)
+        self._stats['transform_params'].append(applied_params)
 
         return result
