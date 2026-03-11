@@ -124,7 +124,7 @@ class GITAConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.YOLO11_STEM.value, force_use_feature_stat=True,
+                cascade_target=TargetKeyPreset.YOLO11_STEM.value,
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:
