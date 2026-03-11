@@ -107,6 +107,7 @@ class GITAConfig(AdaptationConfig):
 
     # Anchor configuration
     use_kl_divergence: bool = True  # if false, use MSE loss
+    force_use_feature_stat: bool = False
 
     @classmethod
     def from_preset(cls, base_model, **kwargs):
@@ -123,7 +124,7 @@ class GITAConfig(AdaptationConfig):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
         elif isinstance(base_model, YOLO11ForObjectDetection):
             return cls(
-                cascade_target=TargetKeyPreset.YOLO11_STEM.value,
+                cascade_target=TargetKeyPreset.YOLO11_STEM.value, force_use_feature_stat=True,
                 masked_processing=True, mask_value=114, **kwargs
             )
         else:

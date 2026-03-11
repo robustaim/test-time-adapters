@@ -331,6 +331,7 @@ class CascadeAnchor(nn.Module):
         self.config = config
         self.norm = original_norm
         self.loss_fn = loss_fn
+        self.use_feature_stat = config.force_use_feature_stat
 
         self.forward_stats = dict(mean=[], var=[])  # Will be updated per one forward pass
         if isinstance(original_norm, nn.BatchNorm2d) or "BatchNorm2d" in original_norm.__class__.__name__:
@@ -341,6 +342,7 @@ class CascadeAnchor(nn.Module):
         elif isinstance(original_norm, nn.LayerNorm) or "LayerNorm" in original_norm.__class__.__name__:
             self.anchor_type = SupportedNormType.LN  # LN requires source stats to be computed
             self.reduce_dim = None  # Total
+            self.use_feature_stat = True
             self.register_buffer("source_means", torch.tensor(0.0, device=self.device))  # temporal init
             self.register_buffer("source_vars", torch.tensor(1.0, device=self.device))  # temporal init
         else:
@@ -359,7 +361,7 @@ class CascadeAnchor(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if not mode and self.anchor_type == SupportedNormType.LN:  # only for LN
+        if not mode and self.use_feature_stat:
             if self.source_stats['num_samples'] > 0:  # finalize source stats
                 with torch.no_grad():
                     mean = torch.stack(self.source_stats['running_means']).mean(dim=0)
@@ -378,13 +380,16 @@ class CascadeAnchor(nn.Module):
         self.forward_stats['mean'] = target_data.mean(dim=reduce_dim)
         self.forward_stats['var'] = target_data.var(dim=reduce_dim, unbiased=False)
 
-        if self.training:
+        if self.training and self.use_feature_stat:
             if self.anchor_type == SupportedNormType.LN:
-                with torch.no_grad():
-                    dim = tuple(range(1, x.ndim))  # exclude batch dim
-                    self.source_stats['running_means'].extend(target_data.mean(dim=dim))
-                    self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
-                    self.source_stats['num_samples'] += x.shape[0]
+                dim = tuple(range(1, x.ndim))  # exclude batch dim
+            else:
+                dim = tuple(d for d in self.reduce_dim if d != 0)  # exclude batch dim
+
+            with torch.no_grad():
+                self.source_stats['running_means'].extend(target_data.mean(dim=dim))
+                self.source_stats['running_vars'].extend(target_data.var(dim=dim, unbiased=False))
+                self.source_stats['num_samples'] += x.shape[0]
 
         return self.norm(x)
 
@@ -585,7 +590,7 @@ class GITAEngine(AdaptationEngine):
 
     def fit(self, source_dataset: DataPreparation, batch_size=1, max_samples=2000, dtype=torch.float32, **kwargs):
         has_ln = any(m.anchor_type == SupportedNormType.LN for m in self.dist_norm.anchors)
-        if not has_ln:
+        if not has_ln and not self.config.force_use_feature_stat:
             return  # do nothing if feature alignment is not used
 
         from torch.utils.data import DataLoader
