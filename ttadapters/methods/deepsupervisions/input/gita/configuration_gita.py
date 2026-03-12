@@ -47,6 +47,9 @@ class GITAConfig(AdaptationConfig):
     exclude_target: list[str] = field(default_factory=lambda: ["stem", "patch_embed", "embedder"])
     disable_blending: bool = False
     blend_ratio: float = 0.6
+    loss_weight: float = 1.0
+
+    # Letterbox configuration
     mask_value: int = 114  # YOLO11 default padding value
     masked_processing: bool = False
 
