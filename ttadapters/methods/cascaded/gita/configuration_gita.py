@@ -33,53 +33,6 @@ class TargetKeyPreset(Enum):
     ]
 
 
-    YOLO11_SPPF = [  # YOLO11: SPPF only (model.9)
-        r"(^|\.)model\.9\.cv1\.bn$",   # SPPF input conv BN (512 -> 256)
-        r"(^|\.)model\.9\.cv2\.bn$",   # SPPF output conv BN (1024 -> 512)
-    ]
-    YOLO11_C2PSA = [  # YOLO11: C2PSA only (model.10)
-        r"(^|\.)model\.10\.cv1\.bn$",              # C2PSA input gate BN
-        r"(^|\.)model\.10\.cv2\.bn$",              # C2PSA output gate BN
-        r"(^|\.)model\.10\.m\.0\.attn\.qkv\.bn$", # attention QKV projection BN
-        r"(^|\.)model\.10\.m\.0\.attn\.proj\.bn$", # attention output projection BN
-        r"(^|\.)model\.10\.m\.0\.attn\.pe\.bn$",  # positional encoding conv BN
-        r"(^|\.)model\.10\.m\.0\.ffn\.0\.bn$",    # FFN expand BN
-        r"(^|\.)model\.10\.m\.0\.ffn\.1\.bn$",    # FFN reduce BN
-    ]
-    YOLO11_SPPF_C2PSA = [  # YOLO11: SPPF + C2PSA
-        # SPPF (model.9)
-        r"(^|\.)model\.9\.cv1\.bn$",
-        r"(^|\.)model\.9\.cv2\.bn$",
-        # C2PSA (model.10) - main gate
-        r"(^|\.)model\.10\.cv1\.bn$",
-        r"(^|\.)model\.10\.cv2\.bn$",
-        # C2PSA - attention
-        r"(^|\.)model\.10\.m\.0\.attn\.qkv\.bn$",
-        r"(^|\.)model\.10\.m\.0\.attn\.proj\.bn$",
-        r"(^|\.)model\.10\.m\.0\.attn\.pe\.bn$",
-        # C2PSA - FFN
-        r"(^|\.)model\.10\.m\.0\.ffn\.0\.bn$",
-        r"(^|\.)model\.10\.m\.0\.ffn\.1\.bn$",
-    ]
-    YOLO11_STEM_SPPF_C2PSA = [  # YOLO11: Stem + SPPF + C2PSA
-        # Stem (model.0)
-        r"(^|\.)model\.0\.bn$",
-        # SPPF (model.9)
-        r"(^|\.)model\.9\.cv1\.bn$",
-        r"(^|\.)model\.9\.cv2\.bn$",
-        # C2PSA (model.10) - main gate
-        r"(^|\.)model\.10\.cv1\.bn$",
-        r"(^|\.)model\.10\.cv2\.bn$",
-        # C2PSA - attention
-        r"(^|\.)model\.10\.m\.0\.attn\.qkv\.bn$",
-        r"(^|\.)model\.10\.m\.0\.attn\.proj\.bn$",
-        r"(^|\.)model\.10\.m\.0\.attn\.pe\.bn$",
-        # C2PSA - FFN
-        r"(^|\.)model\.10\.m\.0\.ffn\.0\.bn$",
-        r"(^|\.)model\.10\.m\.0\.ffn\.1\.bn$",
-    ]
-
-
 @dataclass
 class GITAConfig(AdaptationConfig):
     """Configuration for GITAConfig."""
