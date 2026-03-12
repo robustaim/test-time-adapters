@@ -197,6 +197,9 @@ def visualize_detectron2_sample(
     combined: bool = True,
     gt_suffix: str = "_gt",
     pred_suffix: str = "_pred",
+    font_scale: float = 2.0,
+    box_thickness: int = 4,
+    save_scale: float = 0.5,
 ):
     """
     Render GT and predicted bounding boxes on a single Detectron2 sample and save the result.
@@ -225,6 +228,14 @@ def visualize_detectron2_sample(
             when ``combined=False``. Defaults to ``"_gt"``.
         pred_suffix (str): Suffix appended to the stem for the prediction file and its panel
             label when ``combined=False``. Defaults to ``"_pred"``.
+        font_scale (float): Font scale for the panel label drawn at the bottom of the image.
+            Increase for publication-quality figures. Defaults to ``2.0``.
+        box_thickness (int): Line thickness (in pixels) for the panel label text.
+            Also passed to Detectron2's ``Visualizer`` as the bounding-box line width.
+            Defaults to ``4``.
+        save_scale (float): Scaling factor applied to the final image before writing to disk.
+            ``0.5`` saves at half resolution. ``1.0`` keeps the original size.
+            Defaults to ``0.5``.
 
     Returns:
         None
@@ -247,7 +258,7 @@ def visualize_detectron2_sample(
     MetadataCatalog.get(_META_NAME).thing_classes = classes
     metadata = MetadataCatalog.get(_META_NAME)
 
-    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, font_scale, box_thickness
 
     # --- Render GT panel ---
     # Visualizer.draw_instance_predictions() reads pred_boxes / pred_classes / scores,
@@ -260,7 +271,7 @@ def visualize_detectron2_sample(
     # Rescale boxes from the model's internal resolution to the original (height × width).
     gt_instances = detector_postprocess(gt_instances, input_data['height'], input_data['width'])
 
-    vis_gt = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE)
+    vis_gt = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE, scale=box_thickness / 2)
     gt_bgr = cv2.cvtColor(
         vis_gt.draw_instance_predictions(gt_instances.to("cpu")).get_image(),
         cv2.COLOR_RGB2BGR,
@@ -268,11 +279,18 @@ def visualize_detectron2_sample(
 
     # --- Render prediction panel ---
     pred_instances = output['instances'].to("cpu")
-    vis_pred = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE)
+    vis_pred = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE, scale=box_thickness / 2)
     pred_bgr = cv2.cvtColor(
         vis_pred.draw_instance_predictions(pred_instances).get_image(),
         cv2.COLOR_RGB2BGR,
     )
+
+    # --- Resize helper: scale down before saving ---
+    def _save(path: str, img):
+        if save_scale != 1.0:
+            h, w = img.shape[:2]
+            img = cv2.resize(img, (int(w * save_scale), int(h * save_scale)), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(path, img)
 
     # --- Save to disk ---
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
@@ -283,11 +301,12 @@ def visualize_detectron2_sample(
         h, half_w = canvas.shape[0], canvas.shape[1] // 2
         cv2.putText(canvas, "GT",   (10, h - 10),           font, scale, (0, 255, 0),   thickness)
         cv2.putText(canvas, "Pred", (half_w + 10, h - 10),  font, scale, (0,   0, 255), thickness)
-        cv2.imwrite(save_path, canvas)
+        _save(save_path, canvas)
     else:
         # Derive sibling file paths using the caller-supplied suffixes.
         stem, ext = os.path.splitext(save_path)
         cv2.putText(gt_bgr,   gt_suffix,   (10, gt_bgr.shape[0]   - 10), font, scale, (0, 255, 0),   thickness)
         cv2.putText(pred_bgr, pred_suffix, (10, pred_bgr.shape[0] - 10), font, scale, (0,   0, 255), thickness)
-        cv2.imwrite(f"{stem}{gt_suffix}{ext}",   gt_bgr)
-        cv2.imwrite(f"{stem}{pred_suffix}{ext}", pred_bgr)
+        _save(f"{stem}{gt_suffix}{ext}",   gt_bgr)
+        _save(f"{stem}{pred_suffix}{ext}", pred_bgr)
+
