@@ -305,8 +305,5 @@ def visualize_detectron2_sample(
     else:
         # Derive sibling file paths using the caller-supplied suffixes.
         stem, ext = os.path.splitext(save_path)
-        cv2.putText(gt_bgr,   gt_suffix,   (10, gt_bgr.shape[0]   - 10), font, scale, (0, 255, 0),   thickness)
-        cv2.putText(pred_bgr, pred_suffix, (10, pred_bgr.shape[0] - 10), font, scale, (0,   0, 255), thickness)
         _save(f"{stem}{gt_suffix}{ext}",   gt_bgr)
         _save(f"{stem}{pred_suffix}{ext}", pred_bgr)
-
