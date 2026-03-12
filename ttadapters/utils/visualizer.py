@@ -1,4 +1,5 @@
 from random import randint, random
+import os
 import time
 
 import pandas as pd
@@ -186,3 +187,107 @@ def visualize_metrics(operations, cols=("mAP@0.50:0.95", "fps", "fwd", "bwd"), e
                 display(pd.DataFrame(visuals, ids))
         except StopIteration:
             return results
+
+
+def visualize_detectron2_sample(
+    input_data: dict,
+    output: dict,
+    classes: list[str],
+    save_path: str,
+    combined: bool = True,
+    gt_suffix: str = "_gt",
+    pred_suffix: str = "_pred",
+):
+    """
+    Render GT and predicted bounding boxes on a single Detectron2 sample and save the result.
+
+    Both GT and prediction panels are always rendered and saved. The ``combined`` flag controls
+    whether they are written to a single file or to separate files.
+
+    Args:
+        input_data (dict): A single sample from a Detectron2-formatted batch. Expected keys:
+            - ``"image"``     : (C, H, W) uint8 Tensor — the raw input image.
+            - ``"instances"`` : Detectron2 ``Instances`` containing ``gt_boxes`` and ``gt_classes``.
+            - ``"height"``    : original image height before any resizing.
+            - ``"width"``     : original image width before any resizing.
+        output (dict): Raw model output for the same sample (before ``post_process``). Expected key:
+            - ``"instances"`` : Detectron2 ``Instances`` containing ``pred_boxes``, ``pred_classes``,
+                                and ``scores``.
+        classes (list[str]): List of class names indexed by class ID.
+        save_path (str): Destination file path (e.g. ``"vis/sample_0.jpg"``).
+            - If ``combined=True``  → saved as-is (single file).
+            - If ``combined=False`` → saved as ``<stem><gt_suffix><ext>`` and ``<stem><pred_suffix><ext>``.
+            Parent directories are created automatically if they do not exist.
+        combined (bool): If ``True``, GT (left) and prediction (right) are concatenated
+            horizontally into one image. If ``False``, each panel is saved as a separate file.
+            Defaults to ``True``.
+        gt_suffix (str): Suffix appended to the stem for the GT file and its panel label
+            when ``combined=False``. Defaults to ``"_gt"``.
+        pred_suffix (str): Suffix appended to the stem for the prediction file and its panel
+            label when ``combined=False``. Defaults to ``"_pred"``.
+
+    Returns:
+        None
+    """
+    import cv2
+    import torch
+    from detectron2.data import MetadataCatalog
+    from detectron2.modeling.postprocessing import detector_postprocess
+    from detectron2.structures import Instances
+    from detectron2.utils.visualizer import ColorMode, Visualizer
+
+    # --- Prepare the image as an RGB numpy array (H, W, C) ---
+    # Detectron2 stores images as (C, H, W) uint8 tensors; Visualizer expects (H, W, C) RGB.
+    image_chw: torch.Tensor = input_data['image']              # (C, H, W) uint8
+    image_hwc_bgr = image_chw.permute(1, 2, 0).cpu().numpy()  # (H, W, C) BGR
+    image_rgb = image_hwc_bgr[:, :, ::-1].copy()               # BGR → RGB
+
+    # --- Register class names to a temporary MetadataCatalog entry ---
+    _META_NAME = "__visualizer_temp__"
+    MetadataCatalog.get(_META_NAME).thing_classes = classes
+    metadata = MetadataCatalog.get(_META_NAME)
+
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2
+
+    # --- Render GT panel ---
+    # Visualizer.draw_instance_predictions() reads pred_boxes / pred_classes / scores,
+    # so we copy GT fields into those slots before calling it.
+    gt_instances = Instances(image_size=input_data['instances'].image_size)
+    gt_instances.pred_boxes   = input_data['instances'].gt_boxes
+    gt_instances.pred_classes = input_data['instances'].gt_classes
+    gt_instances.scores = torch.ones(len(gt_instances), dtype=torch.float32)  # dummy confidence
+
+    # Rescale boxes from the model's internal resolution to the original (height × width).
+    gt_instances = detector_postprocess(gt_instances, input_data['height'], input_data['width'])
+
+    vis_gt = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE)
+    gt_bgr = cv2.cvtColor(
+        vis_gt.draw_instance_predictions(gt_instances.to("cpu")).get_image(),
+        cv2.COLOR_RGB2BGR,
+    )
+
+    # --- Render prediction panel ---
+    pred_instances = output['instances'].to("cpu")
+    vis_pred = Visualizer(image_rgb, metadata=metadata, instance_mode=ColorMode.IMAGE)
+    pred_bgr = cv2.cvtColor(
+        vis_pred.draw_instance_predictions(pred_instances).get_image(),
+        cv2.COLOR_RGB2BGR,
+    )
+
+    # --- Save to disk ---
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+
+    if combined:
+        # Concatenate GT (left) and prediction (right) into a single image.
+        canvas = cv2.hconcat([gt_bgr, pred_bgr])
+        h, half_w = canvas.shape[0], canvas.shape[1] // 2
+        cv2.putText(canvas, "GT",   (10, h - 10),           font, scale, (0, 255, 0),   thickness)
+        cv2.putText(canvas, "Pred", (half_w + 10, h - 10),  font, scale, (0,   0, 255), thickness)
+        cv2.imwrite(save_path, canvas)
+    else:
+        # Derive sibling file paths using the caller-supplied suffixes.
+        stem, ext = os.path.splitext(save_path)
+        cv2.putText(gt_bgr,   gt_suffix,   (10, gt_bgr.shape[0]   - 10), font, scale, (0, 255, 0),   thickness)
+        cv2.putText(pred_bgr, pred_suffix, (10, pred_bgr.shape[0] - 10), font, scale, (0,   0, 255), thickness)
+        cv2.imwrite(f"{stem}{gt_suffix}{ext}",   gt_bgr)
+        cv2.imwrite(f"{stem}{pred_suffix}{ext}", pred_bgr)
