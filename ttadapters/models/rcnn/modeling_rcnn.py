@@ -30,7 +30,7 @@ import numpy as np
 
 from .hooks import TqdmProgressHook
 from .transforms import PermuteChannels, ConvertRGBtoBGR
-from ..base import BaseModel, ModelProvider, WeightsInfo
+from ..base import BaseModel, ModelProvider, WeightsInfo, ObjectDetectionMixin
 from ...datasets import BaseDataset, DataPreparation
 from ...utils.validator import DetectionEvaluator
 
@@ -333,7 +333,7 @@ class DetectronDataPreparation(DataPreparation):
         return [metadata for _, metadata in batch]
 
 
-class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
+class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel, ObjectDetectionMixin):
     model_name = "Faster_R-CNN-R50"
     model_config = "COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"
     model_provider = ModelProvider.Detectron2
@@ -341,7 +341,7 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
     Trainer = DetectronTrainer
     TrainingArguments = DetectronTrainerArgs
 
-    class Weights:
+    class ModelRegistry:
         IMAGENET_OFFICIAL = WeightsInfo("detectron2://ImageNetPretrained/MSRA/R-50.pkl")
         COCO_OFFICIAL = WeightsInfo(model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml").replace(DETECTRON_URL_PREFIX, "detectron2://"))
         SHIFT_CLEAR_NATUREYOO = WeightsInfo("https://github.com/robustaim/ContinualTTA_ObjectDetection/releases/download/backbone/Faster_R-CNN_Resnet_50_SHIFT.pth", weight_key="model")
@@ -372,7 +372,12 @@ class FasterRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
         self.num_classes = num_classes
 
 
-class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
+FasterRCNNForObjectDetection.ModelRegistry.COCO = FasterRCNNForObjectDetection.ModelRegistry.COCO_OFFICIAL
+FasterRCNNForObjectDetection.ModelRegistry.SHIFT = FasterRCNNForObjectDetection.ModelRegistry.SHIFT_CLEAR_NATUREYOO
+FasterRCNNForObjectDetection.ModelRegistry.CityScapes = FasterRCNNForObjectDetection.ModelRegistry.CITYSCAPES
+
+
+class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel, ObjectDetectionMixin):
     model_name = "SwinT_R-CNN-Tiny"
     model_provider = ModelProvider.Detectron2
     DataPreparation = DetectronDataPreparation
@@ -398,7 +403,7 @@ class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
         out_indices=(0, 1, 2, 3)
     )
 
-    class Weights:
+    class ModelRegistry:
         COCO_XIAOHU2015 = WeightsInfo("https://github.com/xiaohu2015/SwinT_detectron2/releases/download/v1.1/faster_rcnn_swint_T.pth", weight_key="model", exclude_keys = [
             "roi_heads.box_predictor.cls_score.weight",
             "roi_heads.box_predictor.cls_score.bias",
@@ -467,3 +472,8 @@ class SwinRCNNForObjectDetection(GeneralizedRCNN, BaseModel):
 
         self.dataset_name = dataset.dataset_name
         self.num_classes = num_classes
+
+
+SwinRCNNForObjectDetection.ModelRegistry.COCO = SwinRCNNForObjectDetection.ModelRegistry.COCO_XIAOHU2015
+SwinRCNNForObjectDetection.ModelRegistry.SHIFT = SwinRCNNForObjectDetection.ModelRegistry.SHIFT_CLEAR_NATUREYOO
+SwinRCNNForObjectDetection.ModelRegistry.CityScapes = SwinRCNNForObjectDetection.ModelRegistry.CITYSCAPES

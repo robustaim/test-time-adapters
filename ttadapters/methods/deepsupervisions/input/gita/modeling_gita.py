@@ -8,9 +8,15 @@ import cv2
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
-from ...base import AdaptationEngine
-from ....models.base import BaseModel, ModelProvider, DataPreparation
+from ....base import AdaptationEngine
+from .....utils.validator import DetectionEvaluator
+from .....models.base import (
+    BaseModel, ModelProvider, DataPreparation,
+    ImageClassificationMixin, ObjectDetectionMixin,
+    SemanticSegmentationMixin, InstanceSegmentationMixin, PanopticSegmentationMixin
+)
 
 from .configuration_gita import GITAConfig
 
@@ -593,9 +599,6 @@ class GITAEngine(AdaptationEngine):
         if not has_ln and not self.config.force_use_feature_stat:
             return  # do nothing if feature alignment is not used
 
-        from torch.utils.data import DataLoader
-        from ....utils.validator import DetectionEvaluator
-
         print(f"[{self.model_name}] Starting Calibration ({max_samples} samples)...")
 
         self.offline()  # turn off online mode so that the anchors don't update their parameters
@@ -613,12 +616,15 @@ class GITAEngine(AdaptationEngine):
                 if count >= max_samples:
                     break
 
-        DetectionEvaluator.evaluate_with_reset(
-            self.base_model, desc="Feature Calibration", classes=source_dataset.classes,
-            loader=limit_samples(), loader_length=max_samples//batch_size,
-            data_preparation=source_dataset, reset=False,
-            dtype=dtype, device=self.device
-        )
+        if isinstance(self.base_model, ObjectDetectionMixin):
+            DetectionEvaluator.evaluate_with_reset(
+                self.base_model, desc="Feature Calibration", classes=source_dataset.classes,
+                loader=limit_samples(), loader_length=max_samples//batch_size,
+                data_preparation=source_dataset, reset=False,
+                dtype=dtype, device=self.device
+            )
+        else:
+            raise NotImplementedError(f"{self.base_model.__class__.__name__} is not yet supported for engine.fit()")
         self.eval()  # finalize the stats
 
         # save the state dict of the anchors

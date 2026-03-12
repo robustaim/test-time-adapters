@@ -526,7 +526,6 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
         BASE_TO_SNOW = "base_to_snow"
         FOG_TO_RAIN = "fog_to_rain"
         RAIN_TO_SNOW = "rain_to_snow"
-        # SNOW_TO_FROST removed
 
     # Suffixes (weak → strong)
     FOG_BETAS  = ["_beta_0.005", "_beta_0.01", "_beta_0.02"]
@@ -767,7 +766,7 @@ class CityScapesContinuousDatasetForObjectDetection(CityScapesDiscreteDatasetFor
                 )
 
             n = len(all_scenes)
-            split = 3 * n // 5   # mid count
+            split = 3 * n // 5  # mid count
             if n == 0 or split == 0:
                 continue
 

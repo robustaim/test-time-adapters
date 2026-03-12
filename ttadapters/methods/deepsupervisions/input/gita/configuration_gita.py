@@ -2,7 +2,7 @@ from typing import Literal
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ...base import AdaptationConfig
+from ....base import AdaptationConfig
 
 
 class TargetKeyPreset(Enum):

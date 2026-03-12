@@ -7,8 +7,7 @@ from .auto import AutoConfig
 
 from .auxtasks import *
 from .batchnorms import *
-from .cascaded import *
+from .deepsupervisions import *
 from .entropies import *
 from .pefts import *
 from .regularizers import *
-from .samplers import *

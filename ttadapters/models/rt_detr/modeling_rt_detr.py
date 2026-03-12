@@ -17,7 +17,7 @@ import torch
 from supervision.detection.core import Detections
 from supervision.metrics.mean_average_precision import MeanAveragePrecision
 
-from ..base import BaseModel, ModelProvider, WeightsInfo
+from ..base import BaseModel, ModelProvider, WeightsInfo, ObjectDetectionMixin
 from ...datasets import BaseDataset, DataPreparation
 
 
@@ -350,7 +350,7 @@ class RTDetrDataPreparation(DataPreparation):
         return self.pre_process((images, targets))
 
 
-class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection):
+class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection, ObjectDetectionMixin):
     model_id = "PekingU/rtdetr_r50vd"
     model_name = "RT-DETR-R50"
     model_provider = ModelProvider.HuggingFace
@@ -358,7 +358,7 @@ class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection):
     Trainer = RTDetrTrainer
     TrainingArguments = RTDetrTrainingArguments
 
-    class Weights:
+    class ModelRegistry:
         COCO_OFFICIAL = WeightsInfo("PekingU/rtdetr_r50vd")
         SHIFT_CLEAR = WeightsInfo("b-re-w/rtdetr_r50vd_shift_clear")
         CITYSCAPES = WeightsInfo("b-re-w/rtdetr_r50vd_cityscapes")
@@ -401,3 +401,8 @@ class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection):
             return_dict=return_dict,
             **kwargs,
         )
+
+
+RTDetrForObjectDetection.ModelRegistry.COCO = RTDetrForObjectDetection.ModelRegistry.COCO_OFFICIAL
+RTDetrForObjectDetection.ModelRegistry.SHIFT = RTDetrForObjectDetection.ModelRegistry.SHIFT_CLEAR
+RTDetrForObjectDetection.ModelRegistry.CityScapes = RTDetrForObjectDetection.ModelRegistry.CITYSCAPES

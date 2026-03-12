@@ -35,7 +35,7 @@ class BaseModel(nn.Module, PushToHubMixin):
     class Trainer:
         pass
 
-    class Weights:
+    class ModelRegistry:
         pass
 
     def __init__(self, dataset: Union[BaseDataset, str] = ""):
@@ -135,3 +135,39 @@ class BaseModel(nn.Module, PushToHubMixin):
                 self.post_init()
 
         return result
+
+    @classmethod
+    def from_dataset(cls, dataset: BaseDataset, strict: bool | None = None, **kwargs):
+        if strict is None:
+            strict = False
+        instance = cls(dataset=dataset)
+        registry = cls.ModelRegistry
+
+        weight = getattr(registry, dataset.dataset_name)
+
+        kwargs_dict = dict(**vars(weight))
+        kwargs_dict['strict'] = strict
+        kwargs_dict.update(kwargs)
+        result = instance.load_from(**kwargs_dict)
+
+        return instance, result
+
+
+class ImageClassificationMixin:
+    pass
+
+
+class ObjectDetectionMixin:
+    pass
+
+
+class SemanticSegmentationMixin:
+    pass
+
+
+class InstanceSegmentationMixin:
+    pass
+
+
+class PanopticSegmentationMixin:
+    pass

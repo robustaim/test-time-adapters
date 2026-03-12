@@ -9,7 +9,7 @@ from torchvision.transforms.v2.functional import convert_bounding_box_format
 
 import numpy as np
 
-from ..base import BaseModel, ModelProvider, WeightsInfo
+from ..base import BaseModel, ModelProvider, WeightsInfo, ObjectDetectionMixin
 from ...datasets import BaseDataset, DataPreparation
 
 from .wrappers import (
@@ -406,7 +406,7 @@ class YOLODataPreparation(DataPreparation):
         return results, processed_batch
 
 
-class YOLO11ForObjectDetection(DetectionModel, BaseModel):
+class YOLO11ForObjectDetection(DetectionModel, BaseModel, ObjectDetectionMixin):
     model_name = "YOLO11m"
     model_config = "yolo11m.yaml"
     model_provider = ModelProvider.Ultralytics
@@ -415,7 +415,7 @@ class YOLO11ForObjectDetection(DetectionModel, BaseModel):
     TrainingArguments = YOLOTrainerArguments
     channel = 3
 
-    class Weights:
+    class ModelRegistry:
         COCO_OFFICIAL = WeightsInfo("https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt", weight_key="model")
         SHIFT_CLEAR = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/YOLO11_C3k2_m_SHIFT.pt", weight_key="model")
         CITYSCAPES = WeightsInfo("https://github.com/robustaim/test-time-adapters/releases/download/pretrained/YOLO11_C3k2_m_CityScapes.pt", weight_key="model")
@@ -427,3 +427,8 @@ class YOLO11ForObjectDetection(DetectionModel, BaseModel):
         self.dataset_name = dataset.dataset_name
         self.num_classes = nc
         self.names = {i: name for i, name in enumerate(dataset.classes)}
+
+
+YOLO11ForObjectDetection.ModelRegistry.COCO = YOLO11ForObjectDetection.ModelRegistry.COCO_OFFICIAL
+YOLO11ForObjectDetection.ModelRegistry.SHIFT = YOLO11ForObjectDetection.ModelRegistry.SHIFT_CLEAR
+YOLO11ForObjectDetection.ModelRegistry.CityScapes = YOLO11ForObjectDetection.ModelRegistry.CITYSCAPES
