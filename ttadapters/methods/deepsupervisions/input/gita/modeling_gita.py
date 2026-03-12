@@ -455,7 +455,6 @@ class GITAEngine(AdaptationEngine):
         self.dist_norm: DistNorm  # will be initialized in _pre_init()
         self.dist_norm_state: dict
         self.config = config
-        self.loss_weight = config.loss_weight
 
         if self.config.use_kl_divergence:
             self.loss_class = GaussianKLDivLoss
@@ -730,7 +729,7 @@ class GITAEngine(AdaptationEngine):
 
         # Backward
         applied_params = self.dist_norm.itm.applied_params
-        loss = self.dist_norm.diff() * self.loss_weight
+        loss = self.dist_norm.diff()
         loss.backward()
         if hasattr(self.dist_norm.itm.transform, 'gamma'):
             applied_params['gamma_gradient'] = self.dist_norm.itm.transform.gamma.grad.item()
