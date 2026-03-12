@@ -68,7 +68,7 @@ class GITAConfig(AdaptationConfig):
     @classmethod
     def from_preset(cls, base_model, **kwargs):
         """Create configuration from preset."""
-        from ....models import (
+        from .....models import (
             FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
             RTDetrForObjectDetection, YOLO11ForObjectDetection
         )
