@@ -12,9 +12,9 @@ import torch.nn.functional as F
 from ttadapters.methods.base import AdaptationEngine
 from ttadapters.models.base import BaseModel, ModelProvider, DataPreparation
 
-from ttadapters.methods.cascaded import GITAConfig
-from ttadapters.methods.cascaded.gita import modeling_gita
-from ttadapters.methods.cascaded.gita.modeling_gita import *
+from ttadapters.methods.deepsupervisions.input.gita import GITAConfig
+from ttadapters.methods.deepsupervisions.input.gita import modeling_gita
+from ttadapters.methods.deepsupervisions.input.gita.modeling_gita import *
 
 
 class InputTransformation(nn.Module):
