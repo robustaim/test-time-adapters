@@ -1,4 +1,6 @@
 from .got10k import GOT10kDatasetForObjectTracking, PairedGOT10kDataset
+
+from .coco import COCODataset, COCODatasetForObjectDetection, COCOCorruptedDatasetForObjectDetection
 from .shift import (
     SHIFTDataset, patch_fast_download_for_object_detection,
     SHIFTDiscreteDatasetForObjectDetection, SHIFTDiscreteSubsetForObjectDetection,
