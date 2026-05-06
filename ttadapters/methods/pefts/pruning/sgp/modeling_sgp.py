@@ -107,7 +107,7 @@ class SGPEngine(AdaptationEngine):
             )
 
     @staticmethod
-    def _frozen_bn_to_bn(frozen: FrozenBatchNorm2d) -> nn.BatchNorm2d:
+    def _frozen_bn_to_bn(frozen: "FrozenBatchNorm2d") -> nn.BatchNorm2d:
         """Convert a single FrozenBatchNorm2d to a trainable nn.BatchNorm2d."""
         num_features = frozen.weight.shape[0]
         bn = nn.BatchNorm2d(num_features, eps=frozen.eps)
