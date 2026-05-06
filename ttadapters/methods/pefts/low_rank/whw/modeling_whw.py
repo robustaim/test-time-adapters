@@ -273,7 +273,7 @@ class WHWEngine(AdaptationEngine):
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
 
             return x
-        
+
         for layer in self.base_model.backbone.bottom_up.layers:
             for block in layer.blocks:
                 dim = block.mlp.fc1.in_features

@@ -228,7 +228,7 @@ class SGPEngine(AdaptationEngine):
         self,
         source_dataset: DataPreparation,
         batch_size: int = 1,
-        max_samples: int = 2000,
+        max_samples: int = 50000,
         dtype=torch.float32,
         **kwargs,
     ):
@@ -253,7 +253,7 @@ class SGPEngine(AdaptationEngine):
         )
 
         sample_count = 0
-        total_batches = min(len(loader), max_samples // batch_size + 1)
+        total_batches = min(len(loader), (max_samples + batch_size - 1) // batch_size)
 
         from tqdm.auto import tqdm
         with torch.no_grad():
