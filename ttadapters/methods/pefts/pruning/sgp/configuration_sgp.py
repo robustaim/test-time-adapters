@@ -35,20 +35,20 @@ class SGPConfig(AdaptationConfig):
 
     # --- Optimizer ---
     optim: Literal["SGD", "Adam", "AdamW"] = "Adam"
-    adapt_lr: float = 1e-3
+    adapt_lr: float = 5e-3
     momentum: float = 0.9
 
     # --- Pruning Parameters ---
-    pruning_rate: float = 0.20          # target pruning ratio (p)
-    pruning_threshold: float = 0.04     # |γ| < threshold → prune
+    pruning_rate: float = 0.10          # target pruning ratio (p)
+    pruning_threshold: float = 0.05     # |γ| < threshold → prune
 
     # --- Loss Weights ---
     lambda_align: float = 1.0           # L_adp alignment loss weight
     lambda_mu_std: float = 1.0          # std alignment weight within L_adp
-    lambda_sparse: float = 0.1          # λ for L_wreg (weighted sparsity)
+    lambda_sparse: float = 0.05         # λ for L_wreg (weighted sparsity)
 
     # --- Stochastic Channel Reactivation ---
-    reactivation_prob: float = 0.1      # Bernoulli probability for pruned channel reactivation
+    reactivation_prob: float = 0.01     # Bernoulli probability for pruned channel reactivation
 
     # --- Instance-Level Sensitivity ---
     use_instance_sensitivity: bool = True   # enable instance-level (RoI) sensitivity
