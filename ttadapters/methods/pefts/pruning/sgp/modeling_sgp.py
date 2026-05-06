@@ -366,9 +366,10 @@ class SGPEngine(AdaptationEngine):
                     src_b = self._base_bn_state[f"{name}.bias"]
                     pruned_positions = torch.where(pruned_idx)[0]
                     restore_positions = pruned_positions[reactivate]
-
-                    module.weight.data[restore_positions] = src_w[restore_positions].to(self.device)
-                    module.bias.data[restore_positions] = src_b[restore_positions].to(self.device)
+                    # src_w/src_b are on CPU; index with CPU positions, then move to device
+                    pos_cpu = restore_positions.cpu()
+                    module.weight.data[restore_positions] = src_w[pos_cpu].to(module.weight.device)
+                    module.bias.data[restore_positions] = src_b[pos_cpu].to(module.bias.device)
                     mask[restore_positions] = 1
 
     def get_pruning_rate(self) -> float:
