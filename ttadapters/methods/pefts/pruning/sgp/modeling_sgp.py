@@ -74,6 +74,7 @@ class SGPEngine(AdaptationEngine):
     def _post_init(self):
         """Initialise components after base model registration."""
         self._validate_provider()
+        self._convert_frozen_bn()     # FrozenBatchNorm2d → nn.BatchNorm2d
         self._compile_layer_filter()
         self._setup_bn_hooks()
         if self.config.use_instance_sensitivity:
@@ -104,6 +105,44 @@ class SGPEngine(AdaptationEngine):
                 f"SGPEngine only supports Detectron2 models. "
                 f"Got provider: {self.model_provider}"
             )
+
+    @staticmethod
+    def _frozen_bn_to_bn(frozen: FrozenBatchNorm2d) -> nn.BatchNorm2d:
+        """Convert a single FrozenBatchNorm2d to a trainable nn.BatchNorm2d."""
+        num_features = frozen.weight.shape[0]
+        bn = nn.BatchNorm2d(num_features, eps=frozen.eps)
+        bn.weight.data.copy_(frozen.weight)
+        bn.bias.data.copy_(frozen.bias)
+        bn.running_mean.copy_(frozen.running_mean)
+        bn.running_var.copy_(frozen.running_var)
+        bn.num_batches_tracked.zero_()
+        return bn
+
+    def _convert_frozen_bn(self):
+        """Replace all FrozenBatchNorm2d layers in the backbone with nn.BatchNorm2d.
+
+        SGP requires learnable scaling factors (γ, β) in BatchNorm layers for
+        channel pruning.  Detectron2's default ResNet uses FrozenBatchNorm2d
+        whose weight/bias are plain buffers, not Parameters.
+        """
+        from detectron2.layers import FrozenBatchNorm2d
+
+        count = 0
+        for name, module in list(self.base_model.named_modules()):
+            if not isinstance(module, FrozenBatchNorm2d):
+                continue
+
+            # Navigate to the parent module and replace the child
+            parts = name.split(".")
+            parent = self.base_model
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            new_bn = self._frozen_bn_to_bn(module)
+            setattr(parent, parts[-1], new_bn)
+            count += 1
+
+        if self.config.verbose:
+            print(f"[{self.model_name}] Converted {count} FrozenBatchNorm2d → nn.BatchNorm2d")
 
     def _compile_layer_filter(self):
         """Compile exclude-layer regex patterns."""
