@@ -253,8 +253,11 @@ class SGPEngine(AdaptationEngine):
         )
 
         sample_count = 0
+        total_batches = min(len(loader), max_samples // batch_size + 1)
+
+        from tqdm.auto import tqdm
         with torch.no_grad():
-            for batch in loader:
+            for batch in tqdm(loader, desc="Collecting source stats", total=total_batches):
                 if sample_count >= max_samples:
                     break
 
