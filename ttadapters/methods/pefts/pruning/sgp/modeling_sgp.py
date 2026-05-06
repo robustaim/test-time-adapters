@@ -69,6 +69,7 @@ class SGPEngine(AdaptationEngine):
         # Instance-level: stage-output features captured by hooks
         self._stage_features: dict[str, torch.Tensor] = {}
         self._stage_hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._stage_strides: dict[str, int] = {}  # stage_name → output stride
 
     def _post_init(self):
         """Initialise components after base model registration."""
@@ -142,17 +143,18 @@ class SGPEngine(AdaptationEngine):
         backbone = self.base_model.backbone
         bottom_up = getattr(backbone, "bottom_up", backbone)
 
-        stage_modules = []
-        if hasattr(bottom_up, "stages"):          # ResNet
-            for idx, stage in enumerate(bottom_up.stages):
-                stage_modules.append((f"stage_{idx}", stage))
-        else:
+        # ResNet-FPN strides: res2=4, res3=8, res4=16, res5=32
+        resnet_strides = [4, 8, 16, 32]
+
+        if not hasattr(bottom_up, "stages"):
             raise NotImplementedError(
                 "SGP instance-level sensitivity requires a ResNet backbone with .stages attribute."
             )
 
-        for stage_name, stage_module in stage_modules:
-            handle = stage_module.register_forward_hook(self._make_stage_hook(stage_name))
+        for idx, stage in enumerate(bottom_up.stages):
+            stage_name = f"stage_{idx}"
+            self._stage_strides[stage_name] = resnet_strides[idx]
+            handle = stage.register_forward_hook(self._make_stage_hook(stage_name))
             self._stage_hooks.append(handle)
 
     def _make_stage_hook(self, stage_name: str):
@@ -258,7 +260,10 @@ class SGPEngine(AdaptationEngine):
         proposal_boxes = [p.proposal_boxes.tensor for p in proposals]
 
         for stage_name, stage_feat in self._stage_features.items():
-            roi_feats = self._extract_roi_features(stage_feat, proposal_boxes)
+            stride = self._stage_strides.get(stage_name)
+            if stride is None:
+                continue
+            roi_feats = self._extract_roi_features(stage_feat, proposal_boxes, stride)
             if roi_feats is not None and roi_feats.shape[0] > 0:
                 pooled = roi_feats.mean(dim=(2, 3))  # (M, C)
                 if stage_name not in roi_runners:
@@ -426,7 +431,7 @@ class SGPEngine(AdaptationEngine):
             if stage_name not in self.source_stats.get("roi", {}):
                 continue
 
-            roi_feats = self._extract_roi_features_from_stored(stage_feat)
+            roi_feats = self._extract_roi_features_from_stored(stage_feat, stage_name)
             if roi_feats is None or roi_feats.shape[0] == 0:
                 continue
 
@@ -438,23 +443,30 @@ class SGPEngine(AdaptationEngine):
 
         return instance_sens
 
-    def _extract_roi_features_from_stored(self, stage_feat: torch.Tensor) -> torch.Tensor | None:
+    def _extract_roi_features_from_stored(
+        self, stage_feat: torch.Tensor, stage_name: str
+    ) -> torch.Tensor | None:
         """Extract RoI features from a stage feature map using stored proposals."""
         if not hasattr(self, "_current_proposals") or self._current_proposals is None:
             return None
         proposal_boxes = [p.proposal_boxes.tensor for p in self._current_proposals]
-        return self._extract_roi_features(stage_feat, proposal_boxes)
+        stride = self._stage_strides.get(stage_name)
+        if stride is None:
+            return None
+        return self._extract_roi_features(stage_feat, proposal_boxes, stride)
 
     def _extract_roi_features(
         self,
         feature_map: torch.Tensor,
         proposal_boxes: list[torch.Tensor],
+        stride: int,
     ) -> torch.Tensor | None:
         """Apply RoI-Align on a feature map using proposal boxes.
 
         Args:
             feature_map: (B, C, H, W) feature tensor
-            proposal_boxes: list of (N_i, 4) box tensors per image
+            proposal_boxes: list of (N_i, 4) box tensors per image (in input-image coords)
+            stride: backbone stride for this feature level (e.g. 4, 8, 16, 32)
 
         Returns:
             (M, C, roi_size, roi_size) pooled features or None
@@ -462,7 +474,9 @@ class SGPEngine(AdaptationEngine):
         if feature_map.dim() != 4:
             return None
 
-        spatial_scale = 1.0 / (feature_map.shape[-1] / max(feature_map.shape[-2:]))
+        # spatial_scale = 1 / stride maps input-image coordinates to feature-map coordinates
+        spatial_scale = 1.0 / stride
+
         # Build ROI list: [(batch_idx, x1, y1, x2, y2), ...]
         rois_list = []
         for batch_idx, boxes in enumerate(proposal_boxes):
@@ -476,11 +490,6 @@ class SGPEngine(AdaptationEngine):
             return None
 
         rois = torch.cat(rois_list, dim=0)
-        # Estimate spatial scale from input image size vs feature map size
-        # Use a reasonable default; exact scale depends on stride
-        _, _, fh, fw = feature_map.shape
-        spatial_scale = fh / 800.0  # approximate for typical 800px input
-
         pooled = roi_align(
             feature_map, rois,
             output_size=self.config.roi_output_size,
