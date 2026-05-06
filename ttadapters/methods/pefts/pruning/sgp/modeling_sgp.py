@@ -257,24 +257,26 @@ class SGPEngine(AdaptationEngine):
 
         from tqdm.auto import tqdm
         with torch.no_grad():
-            for batch in tqdm(loader, desc="Collecting source stats", total=total_batches):
-                if sample_count >= max_samples:
-                    break
+            with tqdm(total=total_batches, desc="Collecting source stats") as pbar:
+                for batch in loader:
+                    if sample_count >= max_samples:
+                        break
 
-                # Forward: triggers BN hooks
-                _ = self.base_model(batch)
+                    # Forward: triggers BN hooks
+                    _ = self.base_model(batch)
 
-                # BN features
-                for name, feats in self.current_bn_feats.items():
-                    if name not in bn_runners:
-                        bn_runners[name] = RunningStats()
-                    bn_runners[name].update(feats)
+                    # BN features
+                    for name, feats in self.current_bn_feats.items():
+                        if name not in bn_runners:
+                            bn_runners[name] = RunningStats()
+                        bn_runners[name].update(feats)
 
-                # Instance-level: collect RoI features per stage
-                if self.config.use_instance_sensitivity and self._stage_features:
-                    self._collect_roi_stats_for_fit(batch, roi_runners)
+                    # Instance-level: collect RoI features per stage
+                    if self.config.use_instance_sensitivity and self._stage_features:
+                        self._collect_roi_stats_for_fit(batch, roi_runners)
 
-                sample_count += feats.shape[0] if self.current_bn_feats else batch_size
+                    sample_count += feats.shape[0] if self.current_bn_feats else batch_size
+                    pbar.update(1)
 
         # Build stats dict
         stats: dict = {"bn": {}, "roi": {}}
