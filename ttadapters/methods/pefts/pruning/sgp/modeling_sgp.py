@@ -324,9 +324,8 @@ class SGPEngine(AdaptationEngine):
     def _collect_roi_stats_from_current_features(
         self, batch, category_roi_runners: dict, stage_roi_runners: dict
     ):
-        """Extract RoI features from ALREADY COMPUTED stage features.
-        """
-        # Get GT boxes and labels for category-wise grouping
+        """Extract RoI features from ALREADY COMPUTED stage features."""
+
         gt_instances = [x["instances"].to(self.device) for x in batch]
 
         # Process each image
@@ -335,7 +334,6 @@ class SGPEngine(AdaptationEngine):
                 continue
 
             gt_boxes = gt_per_img.gt_boxes.tensor
-            gt_classes = gt_per_img.gt_classes
 
             # Iterate over ALL stages for stage-wise stats
             for stage_idx, stage_name in enumerate([f"stage_{i}" for i in range(len(self._stage_strides))]):
@@ -364,20 +362,15 @@ class SGPEngine(AdaptationEngine):
                     stage_roi_runners[stage_name] = RunningStats()
                 stage_roi_runners[stage_name].update(pooled)
 
-                # --- 2. Category-wise aggregation (for alignment, only from last stage) ---
-                # Use the last stage for category-wise stats (highest semantic level)
+                # --- 2. Category-wise aggregation (for alignment) ---
+                # inferring that category-wise stats are aggregated from the last stage,
+                # we aggregate all foreground objects into a single category.
                 if stage_idx == len(self._stage_strides) - 1:
-                    for category_id in gt_classes.unique():
-                        category_mask = gt_classes == category_id
-                        category_feats = pooled[category_mask]
-
-                        if category_feats.shape[0] == 0:
-                            continue
-
-                        cat_id = category_id.item()
-                        if cat_id not in category_roi_runners:
-                            category_roi_runners[cat_id] = RunningStats()
-                        category_roi_runners[cat_id].update(category_feats)
+                    # Use pseudo category_id = 0 for all foreground objects
+                    pseudo_category_id = 0
+                    if pseudo_category_id not in category_roi_runners:
+                        category_roi_runners[pseudo_category_id] = RunningStats()
+                    category_roi_runners[pseudo_category_id].update(pooled)
 
     def _init_pruning_masks(self):
         self.pruning_masks = {}
@@ -726,15 +719,13 @@ class SGPEngine(AdaptationEngine):
         }
 
     def _extract_category_feats_from_roi_outputs(self, roi_outputs, proposals):
-        """Extract category-wise RoI features using PREDICTED CLASSES from ROI head.
+        """Extract instance-level RoI features using objectness scores (Eq. 7-8).
 
-        Implements Eq. 10 from the paper by grouping RoI features by predicted class,
-        matching the category-wise grouping used in source domain (with GT labels).
+        Paper: "we focus on RoIs with a background confidence less than 0.5,
+                indicating potential foreground objects"
 
-        Args:
-            roi_outputs: Output from roi_heads, tuple of (predictions, losses)
-                        predictions is a list of Instances, one per image
-            proposals: List of proposal Instances from RPN
+        Note: Instance-level does NOT use class-specific grouping.
+            It only separates foreground from background using objectness scores.
         """
         self._current_category_feats = {}
 
@@ -746,11 +737,10 @@ class SGPEngine(AdaptationEngine):
         stage_feat = self._stage_features[stage_name]
         stride = self._stage_strides[stage_name]
 
-        # Extract predictions (list of Instances, one per image)
-        predictions = roi_outputs[0] if isinstance(roi_outputs, tuple) else roi_outputs
+        all_fg_feats = []  # Collect all foreground features across batch
 
         # Process each image in the batch
-        for img_idx, (proposals_per_img, pred_per_img) in enumerate(zip(proposals, predictions)):
+        for img_idx, proposals_per_img in enumerate(proposals):
             num_proposals = len(proposals_per_img)
 
             if num_proposals == 0:
@@ -768,57 +758,33 @@ class SGPEngine(AdaptationEngine):
             if roi_feats is None or roi_feats.shape[0] == 0:
                 continue
 
-            pooled = roi_feats.mean(dim=(2, 3))  # (M, C)
+            pooled = roi_feats.mean(dim=(2, 3))  # (M, C) where M = num_proposals
 
-            # Get predicted classes and scores from roi_heads output
-            # pred_per_img is an Instances object with pred_classes and scores
-            if not hasattr(pred_per_img, "pred_classes") or not hasattr(pred_per_img, "scores"):
-                # Fallback: use objectness scores from proposals
-                if hasattr(proposals_per_img, "objectness_logits"):
-                    scores = proposals_per_img.objectness_logits.sigmoid()
-                    confident_mask = scores > self.config.fg_confidence_threshold
-
-                    if confident_mask.sum() > 0:
-                        confident_feats = pooled[confident_mask]
-                        pseudo_category_id = 0
-                        if pseudo_category_id not in self._current_category_feats:
-                            self._current_category_feats[pseudo_category_id] = []
-                        self._current_category_feats[pseudo_category_id].append(confident_feats)
+            # foreground/background selection via objectness score
+            if not hasattr(proposals_per_img, "objectness_logits"):
+                # Fallback: if no objectness, use all proposals
+                all_fg_feats.append(pooled)
                 continue
 
-            # Use predicted classes to group RoI features by category
-            pred_classes = pred_per_img.pred_classes  # (N,)
-            pred_scores = pred_per_img.scores  # (N,)
+            objectness = proposals_per_img.objectness_logits.sigmoid()  # (M,) - [0, 1]
 
-            # Filter by confidence threshold
-            confident_mask = pred_scores > self.config.fg_confidence_threshold
+            # Background confidence < 0.5  ===  Foreground confidence > 0.5
+            fg_mask = objectness > self.config.fg_confidence_threshold  # (M,)
 
-            if confident_mask.sum() == 0:
+            if fg_mask.sum() == 0:
                 continue
 
-            # Get confident predictions
-            confident_classes = pred_classes[confident_mask]
-            confident_feats = pooled[confident_mask]
+            fg_feats = pooled[fg_mask]  # (N_fg, C) where N_fg <= M
+            all_fg_feats.append(fg_feats)
 
-            # Group by predicted class (this matches source domain's category-wise grouping)
-            for cls_id in confident_classes.unique():
-                cls_mask = confident_classes == cls_id
-                cls_feats = confident_feats[cls_mask]
+        # Concatenate all foreground features across the batch
+        if all_fg_feats:
+            # use all fg features as one pseudo-category (class-agnostic)
+            all_fg_feats = torch.cat(all_fg_feats, dim=0)
 
-                if cls_feats.shape[0] == 0:
-                    continue
-
-                category_id = cls_id.item()
-                if category_id not in self._current_category_feats:
-                    self._current_category_feats[category_id] = []
-                self._current_category_feats[category_id].append(cls_feats)
-
-        # Concatenate features for each category across all images in batch
-        for cat_id in list(self._current_category_feats.keys()):
-            if self._current_category_feats[cat_id]:
-                self._current_category_feats[cat_id] = torch.cat(
-                    self._current_category_feats[cat_id], dim=0
-                )
+            # Use category_id = 0 for all foreground objects
+            pseudo_category_id = 0
+            self._current_category_feats[pseudo_category_id] = all_fg_feats
 
     def forward(self, batched_inputs):
         # Only supports Detectron2
