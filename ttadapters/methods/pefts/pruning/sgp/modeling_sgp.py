@@ -250,6 +250,7 @@ class SGPEngine(AdaptationEngine):
 
         bn_runners: dict[str, RunningStats] = {}
         category_roi_runners: dict[int, RunningStats] = {}  # category_id → RunningStats
+        stage_roi_runners: dict[str, RunningStats] = {}  # stage_name → RunningStats (for sensitivity)
 
         loader = DataLoader(
             source_dataset, batch_size=batch_size,
@@ -275,15 +276,15 @@ class SGPEngine(AdaptationEngine):
                             bn_runners[name] = RunningStats()
                         bn_runners[name].update(feats)
 
-                    # Instance-level: collect category-wise RoI features
+                    # Instance-level: collect both category-wise AND stage-wise RoI features
                     if self.config.use_instance_sensitivity and self._stage_features:
-                        self._collect_category_roi_stats_for_fit(batch, category_roi_runners)
+                        self._collect_roi_stats_for_fit(batch, category_roi_runners, stage_roi_runners)
 
                     sample_count += feats.shape[0] if self.current_bn_feats else batch_size
                     pbar.update(1)
 
         # Build stats dict
-        stats: dict = {"bn": {}, "category_roi": {}}
+        stats: dict = {"bn": {}, "category_roi": {}, "stage_roi": {}}
 
         # BN statistics (with both mean and std)
         for name, runner in bn_runners.items():
@@ -292,9 +293,16 @@ class SGPEngine(AdaptationEngine):
                 "std": runner.std().to(self.device)
             }
 
-        # Category-wise RoI statistics
+        # Category-wise RoI statistics (for alignment loss)
         for category_id, runner in category_roi_runners.items():
             stats["category_roi"][category_id] = {
+                "mean": runner.mean().to(self.device),
+                "std": runner.std().to(self.device)
+            }
+
+        # Stage-wise RoI statistics (for sensitivity calculation)
+        for stage_name, runner in stage_roi_runners.items():
+            stats["stage_roi"][stage_name] = {
                 "mean": runner.mean().to(self.device),
                 "std": runner.std().to(self.device)
             }
@@ -307,10 +315,14 @@ class SGPEngine(AdaptationEngine):
             torch.save(stats, self.config.source_stats_path)
 
         print(f"[{self.model_name}] Source stats collected: "
-              f"{len(stats['bn'])} BN layers, {len(stats['category_roi'])} categories.")
+              f"{len(stats['bn'])} BN layers, "
+              f"{len(stats['category_roi'])} categories, "
+              f"{len(stats['stage_roi'])} stages.")
 
-    def _collect_category_roi_stats_for_fit(self, batch, category_roi_runners: dict):
-        """Extract category-wise RoI features from stage outputs during fit() and accumulate.
+    def _collect_roi_stats_for_fit(self, batch, category_roi_runners: dict, stage_roi_runners: dict):
+        """Extract RoI features from stage outputs during fit() and accumulate both:
+        1. Category-wise statistics (for instance-level alignment loss)
+        2. Stage-wise statistics (for instance-level sensitivity calculation)
 
         This implements the instance-level statistics collection for Eq. 10 in the paper.
         """
@@ -322,6 +334,7 @@ class SGPEngine(AdaptationEngine):
         # Get GT boxes and labels for category-wise grouping
         gt_instances = [x["instances"].to(self.device) for x in batch]
 
+        # Process each image
         for img_idx, (proposals_per_img, gt_per_img) in enumerate(zip(proposals, gt_instances)):
             if len(gt_per_img) == 0:
                 continue
@@ -329,40 +342,47 @@ class SGPEngine(AdaptationEngine):
             gt_boxes = gt_per_img.gt_boxes.tensor
             gt_classes = gt_per_img.gt_classes
 
-            # Use the last stage for instance-level features (highest semantic level)
-            stage_name = f"stage_{len(self._stage_strides) - 1}"
-            if stage_name not in self._stage_features:
-                continue
-
-            stage_feat = self._stage_features[stage_name]
-            stride = self._stage_strides[stage_name]
-
-            # Extract RoI features for GT boxes
-            batch_boxes = [gt_boxes]
-            roi_feats = self._extract_roi_features(
-                stage_feat[img_idx:img_idx+1],
-                batch_boxes,
-                stride
-            )
-
-            if roi_feats is None or roi_feats.shape[0] == 0:
-                continue
-
-            # Pool to (M, C)
-            pooled = roi_feats.mean(dim=(2, 3))
-
-            # Group by category
-            for category_id in gt_classes.unique():
-                category_mask = gt_classes == category_id
-                category_feats = pooled[category_mask]
-
-                if category_feats.shape[0] == 0:
+            # Iterate over ALL stages for stage-wise stats
+            for stage_idx, stage_name in enumerate([f"stage_{i}" for i in range(len(self._stage_strides))]):
+                if stage_name not in self._stage_features:
                     continue
 
-                cat_id = category_id.item()
-                if cat_id not in category_roi_runners:
-                    category_roi_runners[cat_id] = RunningStats()
-                category_roi_runners[cat_id].update(category_feats)
+                stage_feat = self._stage_features[stage_name]
+                stride = self._stage_strides[stage_name]
+
+                # Extract RoI features for GT boxes
+                batch_boxes = [gt_boxes]
+                roi_feats = self._extract_roi_features(
+                    stage_feat[img_idx:img_idx+1],
+                    batch_boxes,
+                    stride
+                )
+
+                if roi_feats is None or roi_feats.shape[0] == 0:
+                    continue
+
+                # Pool to (M, C)
+                pooled = roi_feats.mean(dim=(2, 3))
+
+                # --- 1. Stage-wise aggregation (for sensitivity) ---
+                if stage_name not in stage_roi_runners:
+                    stage_roi_runners[stage_name] = RunningStats()
+                stage_roi_runners[stage_name].update(pooled)
+
+                # --- 2. Category-wise aggregation (for alignment, only from last stage) ---
+                # Use the last stage for category-wise stats (highest semantic level)
+                if stage_idx == len(self._stage_strides) - 1:
+                    for category_id in gt_classes.unique():
+                        category_mask = gt_classes == category_id
+                        category_feats = pooled[category_mask]
+
+                        if category_feats.shape[0] == 0:
+                            continue
+
+                        cat_id = category_id.item()
+                        if cat_id not in category_roi_runners:
+                            category_roi_runners[cat_id] = RunningStats()
+                        category_roi_runners[cat_id].update(category_feats)
 
     def _init_pruning_masks(self):
         self.pruning_masks = {}
@@ -601,7 +621,10 @@ class SGPEngine(AdaptationEngine):
         return sensitivity
 
     def _compute_instance_sensitivity(self) -> dict[str, torch.Tensor]:
-        """Compute instance-level (RoI) sensitivity per backbone stage."""
+        """Compute instance-level (RoI) sensitivity per backbone stage.
+
+        Note: We use stage-specific source statistics to ensure channel dimension matching.
+        """
         if not self._stage_features:
             return {}
 
@@ -615,13 +638,18 @@ class SGPEngine(AdaptationEngine):
             pooled = roi_feats.mean(dim=(2, 3))  # (M, C)
             curr_mean = pooled.mean(dim=0)        # (C,)
 
-            # For sensitivity, we use aggregated stats across all categories
-            # (unlike alignment loss which is category-specific)
-            if "category_roi" in self.source_stats and self.source_stats["category_roi"]:
-                # Average source mean across all categories
-                src_means = [stats["mean"] for stats in self.source_stats["category_roi"].values()]
-                if src_means:
-                    src_mean = torch.stack(src_means).mean(dim=0).detach()
+            # Use stage-specific source statistics
+            # Check if we have stage-level ROI stats (not category-level)
+            stage_roi_key = f"stage_roi_{stage_name}"
+            if "stage_roi" in self.source_stats and stage_name in self.source_stats["stage_roi"]:
+                src_stats = self.source_stats["stage_roi"][stage_name]
+                if isinstance(src_stats, dict):
+                    src_mean = src_stats["mean"].detach()
+                else:
+                    src_mean = src_stats.detach()
+
+                # Ensure channel dimensions match
+                if src_mean.shape == curr_mean.shape:
                     instance_sens[stage_name] = torch.abs(curr_mean - src_mean)
 
         return instance_sens
