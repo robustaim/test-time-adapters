@@ -86,11 +86,11 @@ class SGPEngine(AdaptationEngine):
     config_class = SGPConfig
 
     def __init__(self, config: SGPConfig, base_model: BaseModel):
-        super().__init__(config, base_model)
         self.config: SGPConfig
         self.num_classes = self.base_model.num_classes
         if self.num_classes == 0:
             raise ValueError("num_classes must be set in base_model")
+        super().__init__(config, base_model)
 
     def _pre_init(self):
         # BN forward features (spatial preserved)
