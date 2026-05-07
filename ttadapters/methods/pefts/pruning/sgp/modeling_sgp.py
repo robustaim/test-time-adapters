@@ -73,7 +73,7 @@ class SGPEngine(AdaptationEngine):
         self._stage_strides: dict[str, int] = {}  # stage_name → output stride
 
         # Category-wise RoI statistics (for instance-level alignment)
-        self._current_category_feats: dict[int, torch.Tensor] = {}
+        self._category_roi_stats: dict[int, dict] = {}  # category_id → {mean, std}
 
     def _post_init(self):
         """Initialise components after base model registration."""
@@ -205,7 +205,7 @@ class SGPEngine(AdaptationEngine):
             feat = output
             if isinstance(feat, (tuple, list)):
                 feat = feat[0]
-            if feat.dim() == 3:
+            if feat.dim() == 3:                    # (B, L, C) → skip
                 return
             self._stage_features[stage_name] = feat
         return hook
@@ -249,8 +249,8 @@ class SGPEngine(AdaptationEngine):
         self.base_model.eval()
 
         bn_runners: dict[str, RunningStats] = {}
-        category_roi_runners: dict[int, RunningStats] = {}
-        stage_roi_runners: dict[str, RunningStats] = {}
+        category_roi_runners: dict[int, RunningStats] = {}  # category_id → RunningStats
+        stage_roi_runners: dict[str, RunningStats] = {}  # stage_name → RunningStats (for sensitivity)
 
         loader = DataLoader(
             source_dataset, batch_size=batch_size,
@@ -267,7 +267,7 @@ class SGPEngine(AdaptationEngine):
                     if sample_count >= max_samples:
                         break
 
-                    # Forward: triggers BN hooks and stage hooks
+                    # Forward: triggers BN hooks
                     _ = self.base_model(batch)
 
                     # BN features (image-level)
@@ -278,9 +278,7 @@ class SGPEngine(AdaptationEngine):
 
                     # Instance-level: collect both category-wise AND stage-wise RoI features
                     if self.config.use_instance_sensitivity and self._stage_features:
-                        self._collect_roi_stats_from_current_features(
-                            batch, category_roi_runners, stage_roi_runners
-                        )
+                        self._collect_roi_stats_for_fit(batch, category_roi_runners, stage_roi_runners)
 
                     sample_count += feats.shape[0] if self.current_bn_feats else batch_size
                     pbar.update(1)
@@ -321,16 +319,23 @@ class SGPEngine(AdaptationEngine):
               f"{len(stats['category_roi'])} categories, "
               f"{len(stats['stage_roi'])} stages.")
 
-    def _collect_roi_stats_from_current_features(
-        self, batch, category_roi_runners: dict, stage_roi_runners: dict
-    ):
-        """Extract RoI features from ALREADY COMPUTED stage features.
+    def _collect_roi_stats_for_fit(self, batch, category_roi_runners: dict, stage_roi_runners: dict):
+        """Extract RoI features from stage outputs during fit() and accumulate both:
+        1. Category-wise statistics (for instance-level alignment loss)
+        2. Stage-wise statistics (for instance-level sensitivity calculation)
+
+        This implements the instance-level statistics collection for Eq. 10 in the paper.
         """
+        images = self.base_model.preprocess_image(batch)
+        features = self.base_model.backbone(images.tensor)
+
+        proposals, _ = self.base_model.proposal_generator(images, features, None)
+
         # Get GT boxes and labels for category-wise grouping
         gt_instances = [x["instances"].to(self.device) for x in batch]
 
         # Process each image
-        for img_idx, gt_per_img in enumerate(gt_instances):
+        for img_idx, (proposals_per_img, gt_per_img) in enumerate(zip(proposals, gt_instances)):
             if len(gt_per_img) == 0:
                 continue
 
@@ -510,7 +515,7 @@ class SGPEngine(AdaptationEngine):
         if not self.config.use_instance_sensitivity:
             return torch.tensor(0.0, device=self.device)
 
-        if not self._current_category_feats:
+        if not hasattr(self, "_current_category_feats") or not self._current_category_feats:
             return torch.tensor(0.0, device=self.device)
 
         if "category_roi" not in self.source_stats or not self.source_stats["category_roi"]:
@@ -634,6 +639,8 @@ class SGPEngine(AdaptationEngine):
             curr_mean = pooled.mean(dim=0)        # (C,)
 
             # Use stage-specific source statistics
+            # Check if we have stage-level ROI stats (not category-level)
+            stage_roi_key = f"stage_roi_{stage_name}"
             if "stage_roi" in self.source_stats and stage_name in self.source_stats["stage_roi"]:
                 src_stats = self.source_stats["stage_roi"][stage_name]
                 if isinstance(src_stats, dict):
@@ -725,18 +732,15 @@ class SGPEngine(AdaptationEngine):
             "config": vars(self.config),
         }
 
-    def _extract_category_feats_from_roi_outputs(self, roi_outputs, proposals):
-        """Extract category-wise RoI features using PREDICTED CLASSES from ROI head.
+    def _extract_category_feats_from_proposals(self, proposals, features):
+        """Extract category-wise RoI features from current proposals for instance-level alignment.
 
-        Implements Eq. 10 from the paper by grouping RoI features by predicted class,
-        matching the category-wise grouping used in source domain (with GT labels).
-
-        Args:
-            roi_outputs: Output from roi_heads, tuple of (predictions, losses)
-                        predictions is a list of Instances, one per image
-            proposals: List of proposal Instances from RPN
+        This is used during test-time adaptation to compute L_ins.
         """
         self._current_category_feats = {}
+
+        if not proposals:
+            return
 
         # Use the last stage for highest semantic level
         stage_name = f"stage_{len(self._stage_strides) - 1}"
@@ -746,19 +750,22 @@ class SGPEngine(AdaptationEngine):
         stage_feat = self._stage_features[stage_name]
         stride = self._stage_strides[stage_name]
 
-        # Extract predictions (list of Instances, one per image)
-        predictions = roi_outputs[0] if isinstance(roi_outputs, tuple) else roi_outputs
-
-        # Process each image in the batch
-        for img_idx, (proposals_per_img, pred_per_img) in enumerate(zip(proposals, predictions)):
-            num_proposals = len(proposals_per_img)
-
-            if num_proposals == 0:
+        # Get proposals with high confidence
+        for img_idx, proposals_per_img in enumerate(proposals):
+            if not hasattr(proposals_per_img, 'objectness_logits'):
                 continue
 
-            # Extract RoI features for all proposals in this image
-            proposal_boxes = proposals_per_img.proposal_boxes.tensor
-            batch_boxes = [proposal_boxes]
+            # Filter foreground proposals
+            scores = proposals_per_img.objectness_logits.sigmoid()
+            fg_mask = scores > self.config.fg_confidence_threshold
+
+            if fg_mask.sum() == 0:
+                continue
+
+            fg_boxes = proposals_per_img.proposal_boxes.tensor[fg_mask]
+
+            # Extract RoI features
+            batch_boxes = [fg_boxes]
             roi_feats = self._extract_roi_features(
                 stage_feat[img_idx:img_idx+1],
                 batch_boxes,
@@ -770,51 +777,20 @@ class SGPEngine(AdaptationEngine):
 
             pooled = roi_feats.mean(dim=(2, 3))  # (M, C)
 
-            # Get predicted classes and scores from roi_heads output
-            # pred_per_img is an Instances object with pred_classes and scores
-            if not hasattr(pred_per_img, "pred_classes") or not hasattr(pred_per_img, "scores"):
-                # Fallback: use objectness scores from proposals
-                if hasattr(proposals_per_img, "objectness_logits"):
-                    scores = proposals_per_img.objectness_logits.sigmoid()
-                    confident_mask = scores > self.config.fg_confidence_threshold
+            # During test-time, we don't have GT labels
+            # We use pseudo-labels from the model's predictions
+            # For simplicity, we can aggregate all foreground proposals
+            # or use predicted class scores to group them
 
-                    if confident_mask.sum() > 0:
-                        confident_feats = pooled[confident_mask]
-                        pseudo_category_id = 0
-                        if pseudo_category_id not in self._current_category_feats:
-                            self._current_category_feats[pseudo_category_id] = []
-                        self._current_category_feats[pseudo_category_id].append(confident_feats)
-                continue
+            # Simple approach: treat all foreground as one "category"
+            # (More sophisticated: use argmax of classification head)
+            pseudo_category = 0  # Aggregate category
+            if pseudo_category not in self._current_category_feats:
+                self._current_category_feats[pseudo_category] = []
+            self._current_category_feats[pseudo_category].append(pooled)
 
-            # Use predicted classes to group RoI features by category
-            pred_classes = pred_per_img.pred_classes  # (N,)
-            pred_scores = pred_per_img.scores  # (N,)
-
-            # Filter by confidence threshold
-            confident_mask = pred_scores > self.config.fg_confidence_threshold
-
-            if confident_mask.sum() == 0:
-                continue
-
-            # Get confident predictions
-            confident_classes = pred_classes[confident_mask]
-            confident_feats = pooled[confident_mask]
-
-            # Group by predicted class (this matches source domain's category-wise grouping)
-            for cls_id in confident_classes.unique():
-                cls_mask = confident_classes == cls_id
-                cls_feats = confident_feats[cls_mask]
-
-                if cls_feats.shape[0] == 0:
-                    continue
-
-                category_id = cls_id.item()
-                if category_id not in self._current_category_feats:
-                    self._current_category_feats[category_id] = []
-                self._current_category_feats[category_id].append(cls_feats)
-
-        # Concatenate features for each category across all images in batch
-        for cat_id in list(self._current_category_feats.keys()):
+        # Concatenate features for each category
+        for cat_id in self._current_category_feats:
             if self._current_category_feats[cat_id]:
                 self._current_category_feats[cat_id] = torch.cat(
                     self._current_category_feats[cat_id], dim=0
@@ -833,24 +809,25 @@ class SGPEngine(AdaptationEngine):
         # 2. Decomposed forward (Detectron2 GeneralizedRCNN)
         images = self.base_model.preprocess_image(batched_inputs)
         features = self.base_model.backbone(images.tensor)
+        if isinstance(features, tuple):
+            features = features[0]
 
         proposals, _ = self.base_model.proposal_generator(images, features, None)
         self._current_proposals = proposals  # store for instance-level sensitivity
 
-        # 3. ROI heads inference - do this FIRST to get predictions
+        # Extract category-wise features for instance-level alignment
+        if self.config.use_instance_sensitivity:
+            self._extract_category_feats_from_proposals(proposals, features)
+
+        # ROI heads inference
         self.base_model.roi_heads.training = False
         self.base_model.proposal_generator.training = False
-        roi_outputs = self.base_model.roi_heads(images, features, proposals, None)
-        results = roi_outputs[0]  # (predictions, losses)
+        results, _ = self.base_model.roi_heads(images, features, proposals, None)
 
-        # 4. Extract category-wise features AFTER roi_heads
-        if self.config.use_instance_sensitivity:
-            self._extract_category_feats_from_roi_outputs(roi_outputs, proposals)
-
-        # 5. Compute alignment loss (L_adp = L_img + L_ins)
+        # 3. Compute alignment loss (L_adp = L_img + L_ins)
         loss_align = self._compute_alignment_loss()
 
-        # 6. Compute pruning loss (conditional on pruning rate)
+        # 4. Compute pruning loss (conditional on pruning rate)
         current_rate = self.get_pruning_rate()
         if current_rate < self.config.pruning_rate:
             sensitivity = self._compute_sensitivity_weights()
@@ -860,28 +837,29 @@ class SGPEngine(AdaptationEngine):
         else:
             loss_total = self.config.lambda_align * loss_align
 
-        # 7. Backward + masked gradient update
+        # 5. Backward + masked gradient update
         self.optimizer.zero_grad()
         loss_total.backward()
         self._mask_gradients()
         self.optimizer.step()
 
-        # 8. Prune or reactivate
+        # 6. Prune or reactivate
         if current_rate < self.config.pruning_rate:
             self._prune_parameters()
         else:
             self._stochastic_reactivation()
 
-        # 9. Track stats
+        # 7. Track stats
         self._stats["losses"].append(loss_total.item())
         self._stats["pruning_rates"].append(self.get_pruning_rate())
 
         # Cleanup
         self._current_proposals = None
         self._stage_features.clear()
-        self._current_category_feats.clear()
+        if hasattr(self, "_current_category_feats"):
+            self._current_category_feats.clear()
 
-        # 10. Postprocess
+        # 8. Postprocess
         results = GeneralizedRCNN._postprocess(results, batched_inputs, images.image_sizes)
         return results
 
