@@ -15,9 +15,7 @@ from .configuration_sgp import SGPConfig
 
 
 class WelfordStats:
-    """Welford-style online accumulator for channel-wise mean and variance.
-    Stores spatial-preserved features for accurate Eq. 5 / Eq. 7 computation.
-    """
+    """GPU-resident online accumulator. Stays on device until .mean()/.std() called."""
 
     def __init__(self):
         self.n = 0
@@ -25,14 +23,18 @@ class WelfordStats:
         self.sum_sq = None
 
     def update(self, x: torch.Tensor):
-        """x: (N, C) tensor where N is batch (or pooled-spatial) count."""
-        x = x.detach().cpu().float()
+        """x: (N, C) tensor. Stays on its current device."""
+        x = x.detach()
+        if x.dtype != torch.float32:
+            x = x.float()
+        s = x.sum(dim=0)
+        sq = (x * x).sum(dim=0)
         if self.sum is None:
-            self.sum = x.sum(dim=0)
-            self.sum_sq = (x ** 2).sum(dim=0)
+            self.sum = s.clone()
+            self.sum_sq = sq.clone()
         else:
-            self.sum += x.sum(dim=0)
-            self.sum_sq += (x ** 2).sum(dim=0)
+            self.sum += s
+            self.sum_sq += sq
         self.n += x.shape[0]
 
     def mean(self) -> torch.Tensor:
@@ -53,19 +55,22 @@ class SpatialFeatureAccumulator:
     """
 
     def __init__(self):
-        self.n_total = 0    # total spatial+batch positions
-        self.sum = None     # (C,) sum over (N, H, W)
+        self.n_total = 0
+        self.sum = None  # (C,)
 
     def update(self, x: torch.Tensor):
-        """x: (B, C, H, W) feature map."""
-        x = x.detach().cpu().float()
-        B, C, H, W = x.shape
-        flat = x.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+        """x: (B, C, H, W). Stays on its current device."""
+        x = x.detach()
+        if x.dtype != torch.float32:
+            x = x.float()
+        # Sum over batch + spatial directly — no reshape needed
+        s = x.sum(dim=(0, 2, 3))  # (C,)
         if self.sum is None:
-            self.sum = flat.sum(dim=0)
+            self.sum = s.clone()
         else:
-            self.sum += flat.sum(dim=0)
-        self.n_total += flat.shape[0]
+            self.sum += s
+        B, C, H, W = x.shape
+        self.n_total += B * H * W
 
     def mean(self) -> torch.Tensor:
         return self.sum / max(self.n_total, 1)
