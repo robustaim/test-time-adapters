@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision.ops import roi_align
+from torchvision.ops import roi_align, box_iou
 
 from ....base import AdaptationEngine, BaseModel
 from .....models.base import ModelProvider, DataPreparation, ObjectDetectionMixin
@@ -14,42 +14,72 @@ from .....utils.validator import DetectionEvaluator
 from .configuration_sgp import SGPConfig
 
 
-class RunningStats:
-    """Welford-style online accumulator for channel-wise mean and variance."""
+class WelfordStats:
+    """Welford-style online accumulator for channel-wise mean and variance.
+    Stores spatial-preserved features for accurate Eq. 5 / Eq. 7 computation.
+    """
 
     def __init__(self):
         self.n = 0
-        self.sum = 0
-        self.sum_sq = 0
+        self.sum = None
+        self.sum_sq = None
 
     def update(self, x: torch.Tensor):
-        x = x.detach().cpu()
+        """x: (N, C) tensor where N is batch (or pooled-spatial) count."""
+        x = x.detach().cpu().float()
+        if self.sum is None:
+            self.sum = x.sum(dim=0)
+            self.sum_sq = (x ** 2).sum(dim=0)
+        else:
+            self.sum += x.sum(dim=0)
+            self.sum_sq += (x ** 2).sum(dim=0)
         self.n += x.shape[0]
-        self.sum += x.sum(dim=0)
-        self.sum_sq += (x ** 2).sum(dim=0)
 
-    def mean(self):
-        return self.sum / self.n
+    def mean(self) -> torch.Tensor:
+        return self.sum / max(self.n, 1)
 
-    def var(self):
-        return (self.sum_sq / self.n) - (self.mean() ** 2)
+    def var(self) -> torch.Tensor:
+        return (self.sum_sq / max(self.n, 1)) - (self.mean() ** 2)
 
-    def std(self):
+    def std(self) -> torch.Tensor:
         return torch.sqrt(self.var().clamp(min=1e-8))
 
 
+class SpatialFeatureAccumulator:
+    """Accumulates per-channel spatially-flattened features for Eq. 5 (image-level).
+
+    Stores running |F_t - F_s|_1 reference statistic.
+    F_s is the per-channel mean over (N, H, W) of source feature maps.
+    """
+
+    def __init__(self):
+        self.n_total = 0    # total spatial+batch positions
+        self.sum = None     # (C,) sum over (N, H, W)
+
+    def update(self, x: torch.Tensor):
+        """x: (B, C, H, W) feature map."""
+        x = x.detach().cpu().float()
+        B, C, H, W = x.shape
+        flat = x.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+        if self.sum is None:
+            self.sum = flat.sum(dim=0)
+        else:
+            self.sum += flat.sum(dim=0)
+        self.n_total += flat.shape[0]
+
+    def mean(self) -> torch.Tensor:
+        return self.sum / max(self.n_total, 1)
+
+
 class SGPEngine(AdaptationEngine):
-    """Sensitivity-Guided Pruning Engine for Test-Time Adaptation.
+    """Sensitivity-Guided Pruning Engine for Test-Time Adaptation (CVPR 2025).
 
-    Implements the SGP algorithm (CVPR 2025) which prunes domain-sensitive BN
-    channels via weighted sparsity regularisation while adapting the remaining
-    domain-invariant channels through feature-distribution alignment.
-
-    Currently supports **Detectron2** model only (FasterRCNN).
-
-    Reference:
-        Wang et al., "Efficient Test-time Adaptive Object Detection via
-        Sensitivity-Guided Pruning", CVPR 2025.
+    Faithful re-implementation of Wang et al. 2025:
+      • Eq. 5/6 image-level sensitivity with spatial preservation + per-layer normalization.
+      • Eq. 7/8 instance-level sensitivity using foreground-filtered RoIs.
+      • Eq. 9 image-level KL alignment with EMA target tracking.
+      • Eq. 10 intra-class instance-level KL alignment with rare-class weighting.
+      • Eq. 13 conditional sparsity loss + Eq. 14 stochastic channel reactivation.
     """
 
     model_name = "SGPEngine"
@@ -57,28 +87,42 @@ class SGPEngine(AdaptationEngine):
 
     def __init__(self, config: SGPConfig, base_model: BaseModel):
         self.config: SGPConfig
+        self.num_classes = self.base_model.num_classes
+        if self.num_classes == 0:
+            raise ValueError("num_classes must be set in base_model")
         super().__init__(config, base_model)
 
     def _pre_init(self):
-        """Initialise state variables before base model registration."""
+        # BN forward features (spatial preserved)
         self.current_bn_feats: dict[str, torch.Tensor] = {}
         self.pruning_masks: dict[str, torch.Tensor] = {}
         self.source_stats: dict | None = None
-        self._hooks: list[torch.utils.hooks.RemovableHook] = []
+        self._hooks: list = []
         self._bn_params: list[nn.Parameter] = []
 
-        # Instance-level: stage-output features captured by hooks
+        # Backbone stage features
         self._stage_features: dict[str, torch.Tensor] = {}
-        self._stage_hooks: list[torch.utils.hooks.RemovableHook] = []
-        self._stage_strides: dict[str, int] = {}  # stage_name → output stride
+        self._stage_hooks: list = []
+        self._stage_strides: dict[str, int] = {}
 
-        # Category-wise RoI statistics (for instance-level alignment)
-        self._current_category_feats: dict[int, torch.Tensor] = {}
+        # Per-class fg RoI features for current batch (Eq. 10)
+        self._current_class_feats: dict[int, torch.Tensor] = {}
+        self._current_fg_roi_feats: torch.Tensor | None = None
+
+        # EMA-tracked target statistics (Sec 3.4)
+        self._target_bn_ema: dict[str, dict[str, torch.Tensor]] = {}
+        self._target_class_ema: dict[int, dict[str, torch.Tensor]] = {}
+        self._target_class_freq: torch.Tensor | None = None
+
+        # Instance-level: stage used for RoI feature extraction (last ResNet stage)
+        self._instance_stage_name: str | None = None
+
+        # Source-side proposals captured during fit() for predicted-RoI statistics
+        self._current_proposals_source: list | None = None
 
     def _post_init(self):
-        """Initialise components after base model registration."""
         self._validate_provider()
-        self._convert_frozen_bn()     # FrozenBatchNorm2d → nn.BatchNorm2d
+        self._convert_frozen_bn()
         self._compile_layer_filter()
         self._setup_bn_hooks()
         if self.config.use_instance_sensitivity:
@@ -88,31 +132,29 @@ class SGPEngine(AdaptationEngine):
         self._init_pruning_masks()
 
         self.to(self.device, dtype=self.dtype)
-
         self._reset_stats()
         self._base_bn_state = self._snapshot_bn_state()
 
         if self.config.verbose:
-            n_target = len(self.pruning_masks)
             print("=" * 60)
             print(f"[{self.model_name}] Initialisation Summary")
             print("-" * 60)
-            print(f"  Target BN layers   : {n_target}")
-            print(f"  Pruning rate target : {self.config.pruning_rate:.0%}")
-            print(f"  Instance sensitivity: {self.config.use_instance_sensitivity}")
-            print(f"  Reactivation prob   : {self.config.reactivation_prob}")
+            print(f"  Target BN layers     : {len(self.pruning_masks)}")
+            print(f"  Pruning rate target  : {self.config.pruning_rate:.0%}")
+            print(f"  Instance sensitivity : {self.config.use_instance_sensitivity}")
+            print(f"  Num classes          : {self.num_classes}")
+            print(f"  EMA momentum (γ)     : {self.config.ema_momentum}")
+            print(f"  Reactivation prob    : {self.config.reactivation_prob}")
             print("=" * 60)
 
     def _validate_provider(self):
         if self.model_provider != ModelProvider.Detectron2:
             raise NotImplementedError(
-                f"SGPEngine only supports Detectron2 models. "
-                f"Got provider: {self.model_provider}"
+                f"SGPEngine only supports Detectron2 models. Got: {self.model_provider}"
             )
 
     @staticmethod
-    def _frozen_bn_to_bn(frozen: "FrozenBatchNorm2d") -> nn.BatchNorm2d:
-        """Convert a single FrozenBatchNorm2d to a trainable nn.BatchNorm2d."""
+    def _frozen_bn_to_bn(frozen) -> nn.BatchNorm2d:
         num_features = frozen.weight.shape[0]
         bn = nn.BatchNorm2d(num_features, eps=frozen.eps)
         bn.weight.data.copy_(frozen.weight)
@@ -123,33 +165,21 @@ class SGPEngine(AdaptationEngine):
         return bn
 
     def _convert_frozen_bn(self):
-        """Replace all FrozenBatchNorm2d layers in the backbone with nn.BatchNorm2d.
-
-        SGP requires learnable scaling factors (γ, β) in BatchNorm layers for
-        channel pruning.  Detectron2's default ResNet uses FrozenBatchNorm2d
-        whose weight/bias are plain buffers, not Parameters.
-        """
         from detectron2.layers import FrozenBatchNorm2d
-
         count = 0
         for name, module in list(self.base_model.named_modules()):
             if not isinstance(module, FrozenBatchNorm2d):
                 continue
-
-            # Navigate to the parent module and replace the child
             parts = name.split(".")
             parent = self.base_model
             for p in parts[:-1]:
                 parent = getattr(parent, p)
-            new_bn = self._frozen_bn_to_bn(module)
-            setattr(parent, parts[-1], new_bn)
+            setattr(parent, parts[-1], self._frozen_bn_to_bn(module))
             count += 1
-
         if self.config.verbose:
             print(f"[{self.model_name}] Converted {count} FrozenBatchNorm2d → nn.BatchNorm2d")
 
     def _compile_layer_filter(self):
-        """Compile exclude-layer regex patterns."""
         if self.config.exclude_layers:
             self._exclude_re = re.compile(
                 "|".join(f"({p})" for p in self.config.exclude_layers),
@@ -166,7 +196,7 @@ class SGPEngine(AdaptationEngine):
         return True
 
     def _setup_bn_hooks(self):
-        """Register forward hooks on target BN layers to capture input features."""
+        """Capture BN inputs with spatial dimensions preserved (for Eq. 5)."""
         for name, module in self.base_model.named_modules():
             if self._is_target_bn(name, module):
                 handle = module.register_forward_hook(self._make_bn_hook(name))
@@ -175,23 +205,21 @@ class SGPEngine(AdaptationEngine):
     def _make_bn_hook(self, name: str):
         def hook(module, input, output):
             x = input[0]
-            if x.dim() == 4:
-                self.current_bn_feats[name] = x.mean(dim=(2, 3))  # (B, C)
-            else:
+            if x.dim() != 4:
                 raise ValueError(f"Unexpected BN input dim={x.dim()} at {name}")
+            # Store spatial-preserved feature for Eq. 5 / Eq. 9 computations
+            self.current_bn_feats[name] = x
         return hook
 
     def _setup_stage_hooks(self):
-        """Register hooks on ResNet backbone stage outputs for instance-level features."""
+        """Hooks on ResNet backbone stages for instance-level RoI features."""
         backbone = self.base_model.backbone
         bottom_up = getattr(backbone, "bottom_up", backbone)
-
-        # ResNet-FPN strides: res2=4, res3=8, res4=16, res5=32
         resnet_strides = [4, 8, 16, 32]
 
         if not hasattr(bottom_up, "stages"):
             raise NotImplementedError(
-                "SGP instance-level sensitivity requires a ResNet backbone with .stages attribute."
+                "SGP instance-level requires a ResNet backbone with .stages attribute."
             )
 
         for idx, stage in enumerate(bottom_up.stages):
@@ -200,14 +228,18 @@ class SGPEngine(AdaptationEngine):
             handle = stage.register_forward_hook(self._make_stage_hook(stage_name))
             self._stage_hooks.append(handle)
 
+        # Use the deepest available (non-excluded) stage for instance features
+        # If res5 is excluded from pruning, we still use it for RoI features
+        # because instance-level alignment lives in semantic-rich layers.
+        self._instance_stage_name = f"stage_{len(self._stage_strides) - 1}"
+
     def _make_stage_hook(self, stage_name: str):
         def hook(module, input, output):
             feat = output
             if isinstance(feat, (tuple, list)):
                 feat = feat[0]
-            if feat.dim() == 3:
-                return
-            self._stage_features[stage_name] = feat
+            if feat.dim() == 4:
+                self._stage_features[stage_name] = feat
         return hook
 
     def _collect_bn_params(self):
@@ -236,7 +268,15 @@ class SGPEngine(AdaptationEngine):
         dtype=torch.float32,
         **kwargs,
     ):
-        """Collect source-domain BN feature statistics and category-wise RoI statistics."""
+        """Collect source-domain statistics:
+            - BN-layer per-channel mean (μ_s) and std (Σ_s) over spatial+batch positions
+            - Per-class RoI feature mean (μ_s^k) and std (Σ_s^k) — Eq. 10
+            - Foreground RoI mean for instance-level sensitivity — Eq. 7-8
+
+        Following Sec 3.3 of the paper, RoI features are extracted from
+        *predicted* RoIs filtered by foreground confidence; class labels for
+        per-class statistics are assigned by IoU-matching to GT boxes.
+        """
         if self.source_stats is not None:
             if self.config.verbose:
                 print(f"[{self.model_name}] Source stats already loaded. Skipping fit().")
@@ -248,9 +288,14 @@ class SGPEngine(AdaptationEngine):
         print(f"[{self.model_name}] Collecting source statistics ({max_samples} samples)...")
         self.base_model.eval()
 
-        bn_runners: dict[str, RunningStats] = {}
-        category_roi_runners: dict[int, RunningStats] = {}
-        stage_roi_runners: dict[str, RunningStats] = {}
+        # BN spatial accumulators (one per BN layer)
+        bn_spatial: dict[str, SpatialFeatureAccumulator] = {}
+        bn_running: dict[str, WelfordStats] = {}
+
+        # Per-class RoI accumulators (Eq. 10)
+        class_runners: dict[int, WelfordStats] = {}
+        # Instance-level fg RoI accumulator (Eq. 7-8)
+        fg_roi_runner = WelfordStats()
 
         loader = DataLoader(
             source_dataset, batch_size=batch_size,
@@ -267,110 +312,149 @@ class SGPEngine(AdaptationEngine):
                     if sample_count >= max_samples:
                         break
 
-                    # Forward: triggers BN hooks and stage hooks
-                    _ = self.base_model(batch)
+                    # --- Decomposed Detectron2 forward to capture proposals ---
+                    images = self.base_model.preprocess_image(batch)
+                    features = self.base_model.backbone(images.tensor)
+                    proposals, _ = self.base_model.proposal_generator(images, features, None)
+                    self._current_proposals_source = proposals
 
-                    # BN features (image-level)
-                    for name, feats in self.current_bn_feats.items():
-                        if name not in bn_runners:
-                            bn_runners[name] = RunningStats()
-                        bn_runners[name].update(feats)
+                    # --- BN statistics (spatial preserved) ---
+                    for name, feat in self.current_bn_feats.items():
+                        if name not in bn_spatial:
+                            bn_spatial[name] = SpatialFeatureAccumulator()
+                            bn_running[name] = WelfordStats()
+                        bn_spatial[name].update(feat)
+                        bn_running[name].update(feat.mean(dim=(2, 3)))
 
-                    # Instance-level: collect both category-wise AND stage-wise RoI features
-                    if self.config.use_instance_sensitivity and self._stage_features:
-                        self._collect_roi_stats_from_current_features(
-                            batch, category_roi_runners, stage_roi_runners
+                    # --- Instance-level RoI statistics (predicted RoIs + GT-matched labels) ---
+                    if (
+                        self.config.use_instance_sensitivity
+                        and self._instance_stage_name in self._stage_features
+                    ):
+                        self._accumulate_source_roi_stats(
+                            batch, class_runners, fg_roi_runner
                         )
 
-                    sample_count += feats.shape[0] if self.current_bn_feats else batch_size
+                    sample_count += batch_size
                     pbar.update(1)
 
-        # Build stats dict
-        stats: dict = {"bn": {}, "category_roi": {}, "stage_roi": {}}
+                    # Cleanup per-batch state
+                    self._current_proposals_source = None
+                    self.current_bn_feats.clear()
+                    self._stage_features.clear()
 
-        # BN statistics (with both mean and std)
-        for name, runner in bn_runners.items():
+        # --- Build stats dict ---
+        stats: dict = {"bn": {}, "class_roi": {}, "fg_roi": {}}
+
+        for name in bn_spatial:
             stats["bn"][name] = {
-                "mean": runner.mean().to(self.device),
-                "std": runner.std().to(self.device)
+                "channel_mean": bn_spatial[name].mean().to(self.device),  # (C,) for Eq. 5
+                "img_mean": bn_running[name].mean().to(self.device),       # (C,) for Eq. 9 mean
+                "img_std": bn_running[name].std().to(self.device),         # (C,) for Eq. 9 cov-weighting
             }
 
-        # Category-wise RoI statistics (for alignment loss)
-        for category_id, runner in category_roi_runners.items():
-            stats["category_roi"][category_id] = {
-                "mean": runner.mean().to(self.device),
-                "std": runner.std().to(self.device)
-            }
+        for k, runner in class_runners.items():
+            if runner.n > 0:
+                stats["class_roi"][k] = {
+                    "mean": runner.mean().to(self.device),
+                    "std": runner.std().to(self.device),
+                    "count": runner.n,
+                }
 
-        # Stage-wise RoI statistics (for sensitivity calculation)
-        for stage_name, runner in stage_roi_runners.items():
-            stats["stage_roi"][stage_name] = {
-                "mean": runner.mean().to(self.device),
-                "std": runner.std().to(self.device)
+        if fg_roi_runner.n > 0:
+            stats["fg_roi"] = {
+                "mean": fg_roi_runner.mean().to(self.device),  # (C,) for Eq. 7 reference
             }
 
         self.source_stats = stats
 
-        # Optionally persist
         if self.config.source_stats_path:
             os.makedirs(os.path.dirname(self.config.source_stats_path) or ".", exist_ok=True)
             torch.save(stats, self.config.source_stats_path)
 
-        print(f"[{self.model_name}] Source stats collected: "
+        print(f"[{self.model_name}] Source stats: "
               f"{len(stats['bn'])} BN layers, "
-              f"{len(stats['category_roi'])} categories, "
-              f"{len(stats['stage_roi'])} stages.")
+              f"{len(stats['class_roi'])} classes, "
+              f"fg_roi={'yes' if stats['fg_roi'] else 'no'}.")
 
-    def _collect_roi_stats_from_current_features(
-        self, batch, category_roi_runners: dict, stage_roi_runners: dict
+    def _accumulate_source_roi_stats(
+        self, batch, class_runners: dict, fg_roi_runner: WelfordStats
     ):
-        """Extract RoI features from ALREADY COMPUTED stage features."""
+        """Source RoI extraction following paper Sec 3.3:
+            "based on predicted RoIs and their confidence scores"
+
+        Strategy:
+            1. Use *predicted* RoIs from RPN (matches target-time distribution).
+            2. Filter by foreground confidence (objectness > threshold).
+            3. Assign class labels by IoU-matching predicted RoIs to GT boxes
+               (clean labels for per-class statistics in Eq. 10).
+            4. Accumulate fg-pooled features for instance-level sensitivity (Eq. 7).
+        """
+        if self._instance_stage_name not in self._stage_features:
+            return
+        if self._current_proposals_source is None:
+            return
+
+        stage_feat = self._stage_features[self._instance_stage_name]
+        stride = self._stage_strides[self._instance_stage_name]
 
         gt_instances = [x["instances"].to(self.device) for x in batch]
+        proposals = self._current_proposals_source
 
-        # Process each image
-        for img_idx, gt_per_img in enumerate(gt_instances):
-            if len(gt_per_img) == 0:
+        for img_idx, (prop, gt) in enumerate(zip(proposals, gt_instances)):
+            if len(prop) == 0:
                 continue
 
-            gt_boxes = gt_per_img.gt_boxes.tensor
+            prop_boxes = prop.proposal_boxes.tensor
 
-            # Iterate over ALL stages for stage-wise stats
-            for stage_idx, stage_name in enumerate([f"stage_{i}" for i in range(len(self._stage_strides))]):
-                if stage_name not in self._stage_features:
-                    continue
-
-                stage_feat = self._stage_features[stage_name]
-                stride = self._stage_strides[stage_name]
-
-                # Extract RoI features for GT boxes
-                batch_boxes = [gt_boxes]
-                roi_feats = self._extract_roi_features(
-                    stage_feat[img_idx:img_idx+1],
-                    batch_boxes,
-                    stride
+            # 1. Foreground filter via objectness (paper: bg conf < 0.5)
+            if hasattr(prop, "objectness_logits"):
+                objectness = prop.objectness_logits.sigmoid()
+                fg_mask = objectness > self.config.fg_confidence_threshold
+            else:
+                fg_mask = torch.ones(
+                    len(prop), dtype=torch.bool, device=prop_boxes.device
                 )
 
-                if roi_feats is None or roi_feats.shape[0] == 0:
+            if fg_mask.sum() == 0:
+                continue
+
+            fg_boxes = prop_boxes[fg_mask]
+
+            # 2. Pool RoI features for foreground proposals
+            roi_feats = self._extract_roi_features(
+                stage_feat[img_idx:img_idx+1], [fg_boxes], stride
+            )
+            if roi_feats is None or roi_feats.shape[0] == 0:
+                continue
+
+            pooled_1d = roi_feats.mean(dim=(2, 3))  # (M, C) — for Eq. 7 / Eq. 10
+
+            # 3. Foreground-pool accumulation (Sec 3.3 sensitivity reference, Eq. 7)
+            fg_roi_runner.update(pooled_1d)
+
+            # 4. Per-class accumulation via IoU matching to GT (Eq. 10)
+            if len(gt) == 0:
+                continue
+            gt_boxes = gt.gt_boxes.tensor
+            gt_classes = gt.gt_classes
+
+            iou = box_iou(fg_boxes, gt_boxes)        # (M, N_gt)
+            best_iou, best_gt_idx = iou.max(dim=1)
+            matched = best_iou > 0.5
+            if matched.sum() == 0:
+                continue
+
+            matched_classes = gt_classes[best_gt_idx[matched]]
+            matched_feats = pooled_1d[matched]
+
+            for cls_id in matched_classes.unique().tolist():
+                cls_mask = (matched_classes == cls_id)
+                if cls_mask.sum() == 0:
                     continue
-
-                # Pool to (M, C)
-                pooled = roi_feats.mean(dim=(2, 3))
-
-                # --- 1. Stage-wise aggregation (for sensitivity) ---
-                if stage_name not in stage_roi_runners:
-                    stage_roi_runners[stage_name] = RunningStats()
-                stage_roi_runners[stage_name].update(pooled)
-
-                # --- 2. Category-wise aggregation (for alignment) ---
-                # inferring that category-wise stats are aggregated from the last stage,
-                # we aggregate all foreground objects into a single category.
-                if stage_idx == len(self._stage_strides) - 1:
-                    # Use pseudo category_id = 0 for all foreground objects
-                    pseudo_category_id = 0
-                    if pseudo_category_id not in category_roi_runners:
-                        category_roi_runners[pseudo_category_id] = RunningStats()
-                    category_roi_runners[pseudo_category_id].update(pooled)
+                if cls_id not in class_runners:
+                    class_runners[cls_id] = WelfordStats()
+                class_runners[cls_id].update(matched_feats[cls_mask])
 
     def _init_pruning_masks(self):
         self.pruning_masks = {}
@@ -405,7 +489,7 @@ class SGPEngine(AdaptationEngine):
                         self.pruning_masks[name][dead] = 0
 
     def _stochastic_reactivation(self):
-        """Bernoulli sampling to restore pruned channels to source pre-trained values."""
+        """Eq. 14: Bernoulli sampling restores pruned channels to source γ."""
         with torch.no_grad():
             for name, module in self.base_model.named_modules():
                 if name not in self.pruning_masks:
@@ -415,13 +499,11 @@ class SGPEngine(AdaptationEngine):
                 if not pruned_idx.any():
                     continue
 
-                # Bernoulli: reactivate each pruned channel with probability p
                 reactivate = torch.bernoulli(
                     torch.full_like(mask[pruned_idx], self.config.reactivation_prob)
                 ).bool()
 
                 if reactivate.any():
-                    # Restore to source pre-trained values
                     src_w = self._base_bn_state[f"{name}.weight"]
                     src_b = self._base_bn_state[f"{name}.bias"]
                     pruned_positions = torch.where(pruned_idx)[0]
@@ -431,9 +513,24 @@ class SGPEngine(AdaptationEngine):
                     module.bias.data[restore_positions] = src_b[pos_cpu].to(module.bias.device)
                     mask[restore_positions] = 1
 
+                    # Reset Adam state for reactivated channels (so they don't re-zero immediately)
+                    if self._optimizer is not None:
+                        self._reset_optimizer_state(module.weight, restore_positions)
+                        self._reset_optimizer_state(module.bias, restore_positions)
+
+    def _reset_optimizer_state(self, param: nn.Parameter, indices: torch.Tensor):
+        """Reset Adam/SGD running state at given channel indices."""
+        if self._optimizer is None:
+            return
+        state = self._optimizer.state.get(param, None)
+        if state is None:
+            return
+        for key in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
+            if key in state and state[key] is not None:
+                state[key].data[indices] = 0
+
     def get_pruning_rate(self) -> float:
-        total = 0
-        pruned = 0
+        total = pruned = 0
         with torch.no_grad():
             for mask in self.pruning_masks.values():
                 total += mask.numel()
@@ -448,209 +545,233 @@ class SGPEngine(AdaptationEngine):
                 state[f"{name}.bias"] = module.bias.data.cpu().clone()
         return state
 
-    def _compute_alignment_loss(self) -> torch.Tensor:
-        """L_adp: Image-level and Instance-level feature alignment.
+    def _compute_image_level_sensitivity(self) -> dict[str, torch.Tensor]:
+        """Eq. 5: S_img(c) = (1/ND) Σ_n Σ_{h,w} |F^n_t(c,h,w) - F_s(c)|
 
-        Image-level (Eq. 9): BN feature alignment via KL divergence
-        Instance-level (Eq. 10): Category-wise RoI feature alignment
+        Implementation: for each channel c, compute mean over (B, H, W) of
+        absolute deviations from source per-channel mean.
+        """
+        sens: dict[str, torch.Tensor] = {}
+        if self.source_stats is None:
+            return sens
+
+        for name, feat in self.current_bn_feats.items():
+            if name not in self.source_stats["bn"]:
+                continue
+            # feat: (B, C, H, W)
+            src_chan_mean = self.source_stats["bn"][name]["channel_mean"].to(feat.device)
+            # Broadcast (1, C, 1, 1) - subtract from feature, take abs, mean over (B,H,W)
+            diff = (feat - src_chan_mean.view(1, -1, 1, 1)).abs()
+            S_img = diff.mean(dim=(0, 2, 3))  # (C,)
+            sens[name] = S_img.detach()  # detach: sensitivity is a weighting, not a learnable signal
+        return sens
+
+    def _compute_instance_level_sensitivity(self) -> dict[str, torch.Tensor]:
+        """Eq. 7: S_ins(c) = (1/(M·D_RoI)) Σ_m Σ_{h,w} |f^m_t(c,h,w) - f_s(c)|
+
+        Operates on foreground-filtered RoI features at the instance backbone stage.
+        Returns a single sensitivity vector for that stage.
+        """
+        result: dict[str, torch.Tensor] = {}
+        if not self.config.use_instance_sensitivity:
+            return result
+        if self.source_stats is None or "fg_roi" not in self.source_stats:
+            return result
+        if not self.source_stats["fg_roi"]:
+            return result
+        if self._instance_stage_name not in self._stage_features:
+            return result
+        if not hasattr(self, "_current_fg_roi_feats") or self._current_fg_roi_feats is None:
+            return result
+
+        # _current_fg_roi_feats: (M, C, H_roi, W_roi)
+        roi_feats = self._current_fg_roi_feats
+        if roi_feats.shape[0] == 0:
+            return result
+
+        src_mean = self.source_stats["fg_roi"]["mean"].to(roi_feats.device)  # (C,)
+        diff = (roi_feats - src_mean.view(1, -1, 1, 1)).abs()
+        S_ins = diff.mean(dim=(0, 2, 3))  # (C,)
+
+        result[self._instance_stage_name] = S_ins.detach()
+        return result
+
+    def _compute_sensitivity_weights(self) -> dict[str, torch.Tensor]:
+        """Eq. 4-8: ω = w_img + w_ins, with per-layer normalization (Eq. 6, 8)."""
+        # 1. Image-level (one vector per BN layer)
+        img_sens = self._compute_image_level_sensitivity()
+
+        # 2. Instance-level (one vector per stage)
+        ins_sens = self._compute_instance_level_sensitivity()
+
+        # 3. Per-layer normalization (Eq. 6): w = C * S / sum(S)
+        weights: dict[str, torch.Tensor] = {}
+        for name, S in img_sens.items():
+            C = S.numel()
+            denom = S.sum() + 1e-6
+            w_img = C * S / denom
+
+            # Add instance-level contribution if BN layer matches the instance stage
+            stage = self._match_bn_to_stage(name)
+            if stage in ins_sens:
+                S_ins = ins_sens[stage]
+                if S_ins.shape == S.shape:
+                    C_ins = S_ins.numel()
+                    denom_ins = S_ins.sum() + 1e-6
+                    w_ins = C_ins * S_ins / denom_ins
+                    weights[name] = w_img + w_ins
+                else:
+                    weights[name] = w_img
+            else:
+                weights[name] = w_img
+
+        return weights
+
+    def _match_bn_to_stage(self, bn_name: str) -> str | None:
+        """Map BN layer name to backbone stage for instance-level sensitivity."""
+        for i, stage_key in enumerate(["res2", "res3", "res4", "res5"]):
+            if stage_key in bn_name:
+                return f"stage_{i}"
+        return None
+
+    def _compute_image_alignment_loss(self) -> torch.Tensor:
+        """Eq. 9: L_img = D_KL(N(μ_s, Σ_s), N(μ_t, Σ_s))
+                       = 0.5 (μ_s - μ_t)^T Σ_s^{-1} (μ_s - μ_t)
+
+        With Σ_s diagonal (per-channel variance), this becomes a covariance-weighted
+        squared error on per-channel means. μ_t is tracked via EMA (Sec 3.4).
         """
         if self.source_stats is None:
             return torch.tensor(0.0, device=self.device)
 
-        # --- Image-level alignment (L_img) ---
-        img_losses = []
-        for name, feats in self.current_bn_feats.items():
+        losses = []
+        for name, feat in self.current_bn_feats.items():
             if name not in self.source_stats["bn"]:
                 continue
+            stats = self.source_stats["bn"][name]
+            mu_s = stats["img_mean"].to(feat.device).detach()
+            std_s = stats["img_std"].to(feat.device).detach().clamp(min=1e-4)
 
-            curr_mean = feats.mean(dim=0)
-            curr_std = torch.sqrt(feats.var(dim=0, unbiased=False) + 1e-8)
+            # Current batch per-channel mean
+            curr_mean = feat.mean(dim=(0, 2, 3))  # (C,)
 
-            # Load source statistics
-            src_stats = self.source_stats["bn"][name]
-            if isinstance(src_stats, dict):
-                src_mean = src_stats["mean"].detach()
-                src_std = src_stats.get("std", None)
-            else:
-                # Backward compatibility: if only mean is stored
-                src_mean = src_stats.detach()
-                src_std = None
+            # EMA update for μ_t
+            mu_t = self._update_bn_ema(name, curr_mean.detach(), std_s.shape)
 
-            # Mean alignment (essential part of KL divergence)
-            loss = F.mse_loss(curr_mean, src_mean)
+            # Use the EMA-tracked μ_t for the alignment loss, but allow gradient
+            # flow through curr_mean by mixing them
+            mu_t_grad = (1 - self.config.ema_momentum) * mu_t + self.config.ema_momentum * curr_mean
 
-            # Std alignment (if available and enabled)
-            if self.config.lambda_mu_std > 0 and src_std is not None:
-                src_std = src_std.detach()
-                loss = loss + self.config.lambda_mu_std * F.mse_loss(curr_std, src_std)
+            # Covariance-weighted MSE (= KL up to constant for fixed Σ_s)
+            diff = (mu_s - mu_t_grad) / std_s
+            losses.append((diff ** 2).mean())
 
-            img_losses.append(loss)
+        if not losses:
+            return torch.tensor(0.0, device=self.device)
+        return torch.stack(losses).sum()
 
-        loss_img = torch.stack(img_losses).sum() if img_losses else torch.tensor(0.0, device=self.device)
-
-        # --- Instance-level alignment (L_ins) ---
-        loss_ins = self._compute_instance_alignment_loss()
-
-        return loss_img + loss_ins
+    def _update_bn_ema(self, name: str, curr_mean: torch.Tensor, shape) -> torch.Tensor:
+        """EMA of per-channel target mean (returned as detached reference)."""
+        if name not in self._target_bn_ema:
+            self._target_bn_ema[name] = {"mean": curr_mean.clone()}
+        else:
+            ema = self._target_bn_ema[name]["mean"]
+            ema.mul_(1 - self.config.ema_momentum).add_(
+                curr_mean, alpha=self.config.ema_momentum
+            )
+        return self._target_bn_ema[name]["mean"].detach()
 
     def _compute_instance_alignment_loss(self) -> torch.Tensor:
-        """Compute instance-level (category-wise RoI) alignment loss (Eq. 10).
+        """Eq. 10: L_ins = Σ_k w_k · D_KL(N(μ_s^k, Σ_s^k), N(μ_t^k, Σ_s^k))
 
-        L_ins = Σ_k w_k · D_KL(N(μ_s^k, Σ_s^k), N(μ_t^k, Σ_s^k))
-
-        where k is the category index, w_k is the category weight.
+        Per-class alignment with rare-class up-weighting.
         """
         if not self.config.use_instance_sensitivity:
             return torch.tensor(0.0, device=self.device)
-
-        if not self._current_category_feats:
+        if not self._current_class_feats:
+            return torch.tensor(0.0, device=self.device)
+        if self.source_stats is None or not self.source_stats["class_roi"]:
             return torch.tensor(0.0, device=self.device)
 
-        if "category_roi" not in self.source_stats or not self.source_stats["category_roi"]:
-            return torch.tensor(0.0, device=self.device)
+        # 1. Update class-frequency EMA in target domain (for w_k)
+        self._update_class_freq_ema()
 
-        ins_losses = []
-        category_weights = []
+        per_class_losses = []
+        per_class_weights = []
 
-        for category_id, curr_feats in self._current_category_feats.items():
-            if category_id not in self.source_stats["category_roi"]:
+        for cls_id, curr_feats in self._current_class_feats.items():
+            if cls_id not in self.source_stats["class_roi"]:
                 continue
-
             if curr_feats.shape[0] == 0:
                 continue
 
-            # Current statistics
-            curr_mean = curr_feats.mean(dim=0)
-            curr_std = torch.sqrt(curr_feats.var(dim=0, unbiased=False) + 1e-8)
+            src = self.source_stats["class_roi"][cls_id]
+            mu_s = src["mean"].to(curr_feats.device).detach()
+            std_s = src["std"].to(curr_feats.device).detach().clamp(min=1e-4)
 
-            # Source statistics
-            src_stats = self.source_stats["category_roi"][category_id]
-            src_mean = src_stats["mean"].detach()
-            src_std = src_stats.get("std", None)
+            # Current per-class mean
+            curr_mean = curr_feats.mean(dim=0)  # (C,)
 
-            # KL divergence approximation (mean alignment + optional std)
-            loss = F.mse_loss(curr_mean, src_mean)
-            if self.config.lambda_mu_std > 0 and src_std is not None:
-                src_std = src_std.detach()
-                loss = loss + self.config.lambda_mu_std * F.mse_loss(curr_std, src_std)
+            # EMA for μ_t^k
+            mu_t = self._update_class_ema(cls_id, curr_mean.detach())
+            mu_t_grad = (1 - self.config.ema_momentum) * mu_t + self.config.ema_momentum * curr_mean
 
-            ins_losses.append(loss)
+            # KL with shared Σ_s^k → covariance-weighted MSE
+            diff = (mu_s - mu_t_grad) / std_s
+            loss_k = (diff ** 2).mean()
 
-            # Category weight: inverse frequency (rare classes get higher weight)
-            category_count = curr_feats.shape[0]
-            category_weights.append(1.0 / (category_count + 1e-6))
+            # Rare-class weight: inverse frequency in target domain
+            freq_k = self._target_class_freq[cls_id].item() + 1e-6
+            w_k = 1.0 / freq_k
 
-        if not ins_losses:
+            per_class_losses.append(loss_k)
+            per_class_weights.append(w_k)
+
+        if not per_class_losses:
             return torch.tensor(0.0, device=self.device)
 
-        # Normalize weights
-        weights = torch.tensor(category_weights, device=self.device)
-        weights = weights / weights.sum()
-
-        # Weighted sum
-        losses = torch.stack(ins_losses)
+        weights = torch.tensor(per_class_weights, device=self.device)
+        weights = weights / weights.sum()  # normalize
+        losses = torch.stack(per_class_losses)
         return (losses * weights).sum()
 
-    def _compute_sensitivity_weights(self) -> dict[str, torch.Tensor]:
-        """Compute per-BN-layer sensitivity ω = normalize(S_img [+ S_ins]).
+    def _update_class_ema(self, cls_id: int, curr_mean: torch.Tensor) -> torch.Tensor:
+        if cls_id not in self._target_class_ema:
+            self._target_class_ema[cls_id] = {"mean": curr_mean.clone()}
+        else:
+            ema = self._target_class_ema[cls_id]["mean"]
+            ema.mul_(1 - self.config.ema_momentum).add_(
+                curr_mean, alpha=self.config.ema_momentum
+            )
+        return self._target_class_ema[cls_id]["mean"].detach()
 
-        Image-level (Eq. 5-6): |curr_channel_mean - src_channel_mean|
-        Instance-level (Eq. 7-8): RoI feature discrepancy (if enabled)
-        """
-        sensitivity: dict[str, torch.Tensor] = {}
+    def _update_class_freq_ema(self):
+        """EMA-tracked per-class frequency in target domain for w_k."""
+        K = self.num_classes
+        if self._target_class_freq is None:
+            self._target_class_freq = torch.ones(K, device=self.device) / K  # uniform prior
 
-        # --- Image-level sensitivity (S_img) ---
-        for name, feats in self.current_bn_feats.items():
-            if name not in self.source_stats["bn"]:
-                continue
+        # Current batch counts
+        batch_counts = torch.zeros(K, device=self.device)
+        for cls_id, feats in self._current_class_feats.items():
+            if 0 <= cls_id < K:
+                batch_counts[cls_id] = feats.shape[0]
 
-            curr_mean = feats.mean(dim=0)
+        total = batch_counts.sum()
+        if total > 0:
+            batch_freq = batch_counts / total
+            self._target_class_freq.mul_(1 - self.config.ema_momentum).add_(
+                batch_freq, alpha=self.config.ema_momentum
+            )
 
-            src_stats = self.source_stats["bn"][name]
-            if isinstance(src_stats, dict):
-                src_mean = src_stats["mean"].detach()
-            else:
-                src_mean = src_stats.detach()
-
-            sensitivity[name] = torch.abs(curr_mean - src_mean)
-
-        # --- Instance-level sensitivity (S_ins) ---
-        if self.config.use_instance_sensitivity:
-            instance_sens = self._compute_instance_sensitivity()
-
-            # Add instance-level to matching BN layers
-            for name in list(sensitivity.keys()):
-                matched_stage = self._match_bn_to_stage(name)
-                if matched_stage and matched_stage in instance_sens:
-                    s_ins = instance_sens[matched_stage]
-                    s_img = sensitivity[name]
-                    # Channel counts must match
-                    if s_ins.shape == s_img.shape:
-                        sensitivity[name] = s_img + s_ins
-
-        # --- Normalize across all active channels ---
-        all_active = []
-        for name, sens in sensitivity.items():
-            mask = self.pruning_masks.get(name, torch.ones_like(sens))
-            active = sens[mask == 1]
-            if active.numel() > 0:
-                all_active.append(active)
-
-        if all_active:
-            all_cat = torch.cat(all_active)
-            s_min = all_cat.min()
-            s_max = all_cat.max()
-            denom = s_max - s_min + 1e-6
-            sensitivity = {
-                name: (sens - s_min) / denom
-                for name, sens in sensitivity.items()
-            }
-
-        return sensitivity
-
-    def _compute_instance_sensitivity(self) -> dict[str, torch.Tensor]:
-        """Compute instance-level (RoI) sensitivity per backbone stage.
-
-        Note: We use stage-specific source statistics to ensure channel dimension matching.
-        """
-        if not self._stage_features:
-            return {}
-
-        instance_sens: dict[str, torch.Tensor] = {}
-
-        for stage_name, stage_feat in self._stage_features.items():
-            roi_feats = self._extract_roi_features_from_stored(stage_feat, stage_name)
-            if roi_feats is None or roi_feats.shape[0] == 0:
-                continue
-
-            pooled = roi_feats.mean(dim=(2, 3))  # (M, C)
-            curr_mean = pooled.mean(dim=0)        # (C,)
-
-            # Use stage-specific source statistics
-            if "stage_roi" in self.source_stats and stage_name in self.source_stats["stage_roi"]:
-                src_stats = self.source_stats["stage_roi"][stage_name]
-                if isinstance(src_stats, dict):
-                    src_mean = src_stats["mean"].detach()
-                else:
-                    src_mean = src_stats.detach()
-
-                # Ensure channel dimensions match
-                if src_mean.shape == curr_mean.shape:
-                    instance_sens[stage_name] = torch.abs(curr_mean - src_mean)
-
-        return instance_sens
-
-    def _extract_roi_features_from_stored(
-        self, stage_feat: torch.Tensor, stage_name: str
-    ) -> torch.Tensor | None:
-        """Extract RoI features from a stage feature map using stored proposals."""
-        if not hasattr(self, "_current_proposals") or self._current_proposals is None:
-            return None
-        proposal_boxes = [p.proposal_boxes.tensor for p in self._current_proposals]
-        stride = self._stage_strides.get(stage_name)
-        if stride is None:
-            return None
-        return self._extract_roi_features(stage_feat, proposal_boxes, stride)
+    def _compute_sparse_loss(self, weights: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Eq. 3: L_wreg = Σ_i ‖ω_i · γ_i‖_1"""
+        total = torch.tensor(0.0, device=self.device)
+        for name, module in self.base_model.named_modules():
+            if name in weights and name in self.pruning_masks:
+                w = weights[name].to(module.weight.device)
+                total = total + (w * torch.abs(module.weight)).sum()
+        return total
 
     def _extract_roi_features(
         self,
@@ -658,136 +779,124 @@ class SGPEngine(AdaptationEngine):
         proposal_boxes: list[torch.Tensor],
         stride: int,
     ) -> torch.Tensor | None:
-        """Apply RoI-Align on a feature map using proposal boxes.
-
-        Args:
-            feature_map: (B, C, H, W) feature tensor
-            proposal_boxes: list of (N_i, 4) box tensors per image (in input-image coords)
-            stride: backbone stride for this feature level (e.g. 4, 8, 16, 32)
-
-        Returns:
-            (M, C, roi_size, roi_size) pooled features or None
-        """
+        """RoI-Align on a single-level feature map."""
         if feature_map.dim() != 4:
             return None
-
         spatial_scale = 1.0 / stride
-
-        # Build ROI list: [(batch_idx, x1, y1, x2, y2), ...]
         rois_list = []
         for batch_idx, boxes in enumerate(proposal_boxes):
             if boxes.numel() == 0:
                 continue
-            batch_col = torch.full((boxes.shape[0], 1), batch_idx,
-                                   device=boxes.device, dtype=boxes.dtype)
+            batch_col = torch.full(
+                (boxes.shape[0], 1), batch_idx,
+                device=boxes.device, dtype=boxes.dtype,
+            )
             rois_list.append(torch.cat([batch_col, boxes], dim=1))
-
         if not rois_list:
             return None
-
         rois = torch.cat(rois_list, dim=0)
-        pooled = roi_align(
+        return roi_align(
             feature_map, rois,
             output_size=self.config.roi_output_size,
             spatial_scale=spatial_scale,
             aligned=True,
         )
-        return pooled
 
-    def _match_bn_to_stage(self, bn_name: str) -> str | None:
-        """Map a BN layer name to its ResNet backbone stage for instance-level sensitivity."""
-        for i, stage_key in enumerate(["res2", "res3", "res4", "res5"]):
-            if stage_key in bn_name:
-                return f"stage_{i}"
-        return None
+    def _build_target_roi_features(self, proposals):
+        """Extract foreground RoI features and group them by predicted class.
 
-    def _compute_sparse_loss(self, sensitivity: dict[str, torch.Tensor]) -> torch.Tensor:
-        """L_wreg = Σ ‖ω_i · γ_i‖₁  (weighted sparsity on BN scaling factors, Eq. 3)."""
-        total = torch.tensor(0.0, device=self.device)
-        for name, module in self.base_model.named_modules():
-            if name in sensitivity and name in self.pruning_masks:
-                w = sensitivity[name]
-                layer_loss = (w * torch.abs(module.weight)).sum()
-                total = total + layer_loss
-        return total
-
-    def _reset_stats(self):
-        self._stats = {
-            "losses": [],
-            "pruning_rates": [],
-            "config": vars(self.config),
-        }
-
-    def _extract_category_feats_from_roi_outputs(self, roi_outputs, proposals):
-        """Extract instance-level RoI features using objectness scores (Eq. 7-8).
-
-        Paper: "we focus on RoIs with a background confidence less than 0.5,
-                indicating potential foreground objects"
-
-        Note: Instance-level does NOT use class-specific grouping.
-            It only separates foreground from background using objectness scores.
+        Sets:
+            self._current_fg_roi_feats : (M, C, H, W) for Eq. 7 sensitivity
+            self._current_class_feats  : {cls_id: (N_k, C)} for Eq. 10 alignment
         """
-        self._current_category_feats = {}
+        self._current_fg_roi_feats = None
+        self._current_class_feats = {}
 
-        # Use the last stage for highest semantic level
-        stage_name = f"stage_{len(self._stage_strides) - 1}"
-        if stage_name not in self._stage_features:
+        if self._instance_stage_name not in self._stage_features:
             return
+        stage_feat = self._stage_features[self._instance_stage_name]
+        stride = self._stage_strides[self._instance_stage_name]
 
-        stage_feat = self._stage_features[stage_name]
-        stride = self._stage_strides[stage_name]
+        all_fg_feats = []        # for fg_roi sensitivity
+        per_class: dict[int, list] = {}
 
-        all_fg_feats = []  # Collect all foreground features across batch
-
-        # Process each image in the batch
-        for img_idx, proposals_per_img in enumerate(proposals):
-            num_proposals = len(proposals_per_img)
-
-            if num_proposals == 0:
+        for img_idx, prop in enumerate(proposals):
+            num_props = len(prop)
+            if num_props == 0:
                 continue
 
-            # Extract RoI features for all proposals in this image
-            proposal_boxes = proposals_per_img.proposal_boxes.tensor
-            batch_boxes = [proposal_boxes]
-            roi_feats = self._extract_roi_features(
-                stage_feat[img_idx:img_idx+1],
-                batch_boxes,
-                stride
-            )
+            boxes = prop.proposal_boxes.tensor
 
+            # Pool RoI features
+            roi_feats = self._extract_roi_features(
+                stage_feat[img_idx:img_idx+1], [boxes], stride
+            )
             if roi_feats is None or roi_feats.shape[0] == 0:
                 continue
 
-            pooled = roi_feats.mean(dim=(2, 3))  # (M, C) where M = num_proposals
+            pooled_2d = roi_feats                  # (N, C, H, W)
+            pooled_1d = roi_feats.mean(dim=(2, 3)) # (N, C)
 
-            # foreground/background selection via objectness score
-            if not hasattr(proposals_per_img, "objectness_logits"):
-                # Fallback: if no objectness, use all proposals
-                all_fg_feats.append(pooled)
-                continue
-
-            objectness = proposals_per_img.objectness_logits.sigmoid()  # (M,) - [0, 1]
-
-            # Background confidence < 0.5  ===  Foreground confidence > 0.5
-            fg_mask = objectness > self.config.fg_confidence_threshold  # (M,)
+            # --- Foreground filter (bg conf < 0.5) using objectness ---
+            if hasattr(prop, "objectness_logits"):
+                objectness = prop.objectness_logits.sigmoid()
+                fg_mask = objectness > self.config.fg_confidence_threshold
+            else:
+                fg_mask = torch.ones(num_props, dtype=torch.bool, device=boxes.device)
 
             if fg_mask.sum() == 0:
                 continue
 
-            fg_feats = pooled[fg_mask]  # (N_fg, C) where N_fg <= M
-            all_fg_feats.append(fg_feats)
+            # Sensitivity (Sec 3.3): all fg RoIs pooled together (with spatial dims)
+            all_fg_feats.append(pooled_2d[fg_mask])
 
-        # Concatenate all foreground features across the batch
+            # Alignment (Eq. 10): need per-class grouping. Use detector class scores
+            # if available on proposals; otherwise we fall back later via roi_heads output.
+            if hasattr(prop, "pred_classes"):
+                pred_cls = prop.pred_classes
+                for cls_id in pred_cls[fg_mask].unique().tolist():
+                    cls_mask = fg_mask & (pred_cls == cls_id)
+                    if cls_mask.sum() == 0:
+                        continue
+                    per_class.setdefault(cls_id, []).append(pooled_1d[cls_mask])
+
         if all_fg_feats:
-            # use all fg features as one pseudo-category (class-agnostic)
-            all_fg_feats = torch.cat(all_fg_feats, dim=0)
+            self._current_fg_roi_feats = torch.cat(all_fg_feats, dim=0)
 
-            # Use category_id = 0 for all foreground objects
-            pseudo_category_id = 0
-            self._current_category_feats[pseudo_category_id] = all_fg_feats
+        for cls_id, feat_list in per_class.items():
+            self._current_class_feats[cls_id] = torch.cat(feat_list, dim=0)
+
+    def _attach_class_predictions_to_proposals(self, proposals, results):
+        """Attach roi_heads predictions to proposals so that we can group RoI
+        features by predicted class for Eq. 10.
+
+        Detectron2 GeneralizedRCNN returns 'results' as a list of Instances
+        (one per image) with .pred_classes and .scores. We match them back to
+        proposals by box IoU.
+        """
+        for prop, res in zip(proposals, results):
+            if len(prop) == 0 or len(res) == 0:
+                # No predictions: assign default class -1 (will be filtered out)
+                prop.pred_classes = torch.full(
+                    (len(prop),), -1, dtype=torch.long, device=prop.proposal_boxes.tensor.device
+                )
+                continue
+
+            prop_boxes = prop.proposal_boxes.tensor
+            pred_boxes = res.pred_boxes.tensor
+            pred_classes = res.pred_classes
+
+            iou = box_iou(prop_boxes, pred_boxes)  # (N_prop, N_pred)
+            best_iou, best_idx = iou.max(dim=1)
+
+            assigned = torch.full(
+                (len(prop),), -1, dtype=torch.long, device=prop_boxes.device
+            )
+            matched = best_iou > 0.5
+            assigned[matched] = pred_classes[best_idx[matched]]
+            prop.pred_classes = assigned
 
     def forward(self, batched_inputs):
-        # Only supports Detectron2
         from detectron2.modeling.meta_arch.rcnn import GeneralizedRCNN
 
         if not self.adapting:
@@ -796,60 +905,87 @@ class SGPEngine(AdaptationEngine):
         # 1. Apply pruning mask
         self._apply_pruning_mask()
 
-        # 2. Decomposed forward (Detectron2 GeneralizedRCNN)
+        # 2. Decomposed Detectron2 forward
         images = self.base_model.preprocess_image(batched_inputs)
         features = self.base_model.backbone(images.tensor)
-
         proposals, _ = self.base_model.proposal_generator(images, features, None)
-        self._current_proposals = proposals  # store for instance-level sensitivity
 
-        # 3. ROI heads inference - do this FIRST to get predictions
+        # 3. RoI heads inference (gives us predicted classes for grouping)
+        prev_roi_train = self.base_model.roi_heads.training
+        prev_rpn_train = self.base_model.proposal_generator.training
         self.base_model.roi_heads.training = False
         self.base_model.proposal_generator.training = False
-        roi_outputs = self.base_model.roi_heads(images, features, proposals, None)
-        results = roi_outputs[0]  # (predictions, losses)
+        try:
+            roi_outputs = self.base_model.roi_heads(images, features, proposals, None)
+            results = roi_outputs[0]
+        finally:
+            self.base_model.roi_heads.training = prev_roi_train
+            self.base_model.proposal_generator.training = prev_rpn_train
 
-        # 4. Extract category-wise features AFTER roi_heads
+        # 4. Attach predicted classes to proposals via IoU matching
         if self.config.use_instance_sensitivity:
-            self._extract_category_feats_from_roi_outputs(roi_outputs, proposals)
+            self._attach_class_predictions_to_proposals(proposals, results)
 
-        # 5. Compute alignment loss (L_adp = L_img + L_ins)
-        loss_align = self._compute_alignment_loss()
+        # 5. Build target-side instance features (fg-pool + per-class)
+        if self.config.use_instance_sensitivity:
+            self._build_target_roi_features(proposals)
 
-        # 6. Compute pruning loss (conditional on pruning rate)
+        # 6. Adaptation loss (Eq. 11): L_adp = L_img + L_ins
+        loss_img = self._compute_image_alignment_loss()
+        loss_ins = self._compute_instance_alignment_loss()
+        loss_adp = loss_img + loss_ins
+
+        # 7. Conditional sparsity loss (Eq. 13)
         current_rate = self.get_pruning_rate()
         if current_rate < self.config.pruning_rate:
             sensitivity = self._compute_sensitivity_weights()
             loss_sparse = self._compute_sparse_loss(sensitivity)
-            loss_total = (self.config.lambda_align * loss_align
-                          + self.config.lambda_sparse * loss_sparse)
+            loss_total = (
+                self.config.lambda_align * loss_adp
+                + self.config.lambda_sparse * loss_sparse
+            )
         else:
-            loss_total = self.config.lambda_align * loss_align
+            loss_total = self.config.lambda_align * loss_adp
+            loss_sparse = torch.tensor(0.0, device=self.device)
 
-        # 7. Backward + masked gradient update
+        # 8. Backward + masked update
         self.optimizer.zero_grad()
         loss_total.backward()
         self._mask_gradients()
         self.optimizer.step()
 
-        # 8. Prune or reactivate
+        # 9. Prune or stochastic-reactivate
         if current_rate < self.config.pruning_rate:
             self._prune_parameters()
         else:
             self._stochastic_reactivation()
 
-        # 9. Track stats
-        self._stats["losses"].append(loss_total.item())
+        # 10. Stats
+        self._stats["losses"].append(float(loss_total.item()))
+        self._stats["loss_img"].append(float(loss_img.item()) if torch.is_tensor(loss_img) else 0.0)
+        self._stats["loss_ins"].append(float(loss_ins.item()) if torch.is_tensor(loss_ins) else 0.0)
+        self._stats["loss_sparse"].append(float(loss_sparse.item()) if torch.is_tensor(loss_sparse) else 0.0)
         self._stats["pruning_rates"].append(self.get_pruning_rate())
 
-        # Cleanup
-        self._current_proposals = None
+        # 11. Cleanup
+        self.current_bn_feats.clear()
         self._stage_features.clear()
-        self._current_category_feats.clear()
+        self._current_class_feats.clear()
+        self._current_fg_roi_feats = None
 
-        # 10. Postprocess
+        # 12. Postprocess
         results = GeneralizedRCNN._postprocess(results, batched_inputs, images.image_sizes)
         return results
+
+    def _reset_stats(self):
+        self._stats = {
+            "losses": [],
+            "loss_img": [],
+            "loss_ins": [],
+            "loss_sparse": [],
+            "pruning_rates": [],
+            "config": vars(self.config),
+        }
 
     def reset(self, reset_stats=False):
         """Reset model to initial state (source pre-trained weights)."""
@@ -859,6 +995,9 @@ class SGPEngine(AdaptationEngine):
 
         # Re-init masks
         self._init_pruning_masks()
+        self._target_bn_ema.clear()
+        self._target_class_ema.clear()
+        self._target_class_freq = None
 
         # Reset optimizer
         self._optimizer = None
