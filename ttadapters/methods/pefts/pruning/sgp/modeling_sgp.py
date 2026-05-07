@@ -173,10 +173,16 @@ class SGPEngine(AdaptationEngine):
                 self._hooks.append(handle)
 
     def _make_bn_hook(self, name: str):
+        """Capture BN input with spatial dimensions preserved.
+
+        Stored shape: (B, C, H, W). The alignment loss and sensitivity
+        computations apply spatial reductions themselves, so that we can
+        correctly implement Eq. 5: S_img = mean over (N,H,W) of |F_t - F_s|.
+        """
         def hook(module, input, output):
             x = input[0]
             if x.dim() == 4:
-                self.current_bn_feats[name] = x.mean(dim=(2, 3))  # (B, C)
+                self.current_bn_feats[name] = x  # (B, C, H, W) — spatial preserved
             else:
                 raise ValueError(f"Unexpected BN input dim={x.dim()} at {name}")
         return hook
@@ -236,7 +242,15 @@ class SGPEngine(AdaptationEngine):
         dtype=torch.float32,
         **kwargs,
     ):
-        """Collect source-domain BN feature statistics and category-wise RoI statistics."""
+        """Collect source-domain BN feature statistics and category-wise RoI statistics.
+
+        BN stats now include:
+            - 'mean'         : per-channel mean over (N, H, W) — for Eq. 5 sensitivity
+            - 'img_mean'     : per-channel mean over (B, H, W) per image, then over images
+                              — same as 'mean' numerically, kept for clarity in alignment
+            - 'std'          : per-channel std of per-image (B, H, W) means
+                              — for alignment loss std term
+        """
         if self.source_stats is not None:
             if self.config.verbose:
                 print(f"[{self.model_name}] Source stats already loaded. Skipping fit().")
@@ -248,7 +262,13 @@ class SGPEngine(AdaptationEngine):
         print(f"[{self.model_name}] Collecting source statistics ({max_samples} samples)...")
         self.base_model.eval()
 
+        # Two accumulators per BN layer:
+        #   - bn_runners: per-image (B,H,W)-mean → for std (alignment loss covariance term)
+        #   - bn_channel_sum: running sum and count for global per-channel mean over (N,H,W)
         bn_runners: dict[str, RunningStats] = {}
+        bn_channel_sum: dict[str, torch.Tensor] = {}
+        bn_channel_count: dict[str, int] = {}
+
         category_roi_runners: dict[int, RunningStats] = {}
         stage_roi_runners: dict[str, RunningStats] = {}
 
@@ -267,42 +287,57 @@ class SGPEngine(AdaptationEngine):
                     if sample_count >= max_samples:
                         break
 
-                    # Forward: triggers BN hooks and stage hooks
                     _ = self.base_model(batch)
 
-                    # BN features (image-level)
-                    for name, feats in self.current_bn_feats.items():
+                    # BN features (now 4D)
+                    for name, feat in self.current_bn_feats.items():
+                        # feat: (B, C, H, W) — kept on GPU
+                        # Per-image mean over (H, W) for std accumulation
+                        per_img_mean = feat.mean(dim=(2, 3))  # (B, C)
                         if name not in bn_runners:
                             bn_runners[name] = RunningStats()
-                        bn_runners[name].update(feats)
+                        bn_runners[name].update(per_img_mean)
 
-                    # Instance-level: collect both category-wise AND stage-wise RoI features
+                        # Per-channel sum over (B, H, W) for global channel mean
+                        chan_sum = feat.sum(dim=(0, 2, 3)).detach().cpu()  # (C,)
+                        B, C, H, W = feat.shape
+                        if name not in bn_channel_sum:
+                            bn_channel_sum[name] = chan_sum
+                            bn_channel_count[name] = B * H * W
+                        else:
+                            bn_channel_sum[name] += chan_sum
+                            bn_channel_count[name] += B * H * W
+
                     if self.config.use_instance_sensitivity and self._stage_features:
                         self._collect_roi_stats_from_current_features(
                             batch, category_roi_runners, stage_roi_runners
                         )
 
-                    sample_count += feats.shape[0] if self.current_bn_feats else batch_size
+                    sample_count += per_img_mean.shape[0] if self.current_bn_feats else batch_size
                     pbar.update(1)
 
-        # Build stats dict
+                    # Important: clear hook outputs to free GPU memory
+                    self.current_bn_feats.clear()
+                    self._stage_features.clear()
+
         stats: dict = {"bn": {}, "category_roi": {}, "stage_roi": {}}
 
-        # BN statistics (with both mean and std)
         for name, runner in bn_runners.items():
             stats["bn"][name] = {
-                "mean": runner.mean().to(self.device),
-                "std": runner.std().to(self.device)
+                "mean": runner.mean().to(self.device),       # per-channel mean (used by Eq. 5 too)
+                "std": runner.std().to(self.device),
+                # Spatial-aware channel mean over (N, H, W) — equivalent to runner.mean()
+                # because per-image mean averaged over images = global mean. Kept explicit
+                # for clarity:
+                "channel_mean": (bn_channel_sum[name] / bn_channel_count[name]).to(self.device),
             }
 
-        # Category-wise RoI statistics (for alignment loss)
         for category_id, runner in category_roi_runners.items():
             stats["category_roi"][category_id] = {
                 "mean": runner.mean().to(self.device),
                 "std": runner.std().to(self.device)
             }
 
-        # Stage-wise RoI statistics (for sensitivity calculation)
         for stage_name, runner in stage_roi_runners.items():
             stats["stage_roi"][stage_name] = {
                 "mean": runner.mean().to(self.device),
@@ -311,15 +346,16 @@ class SGPEngine(AdaptationEngine):
 
         self.source_stats = stats
 
-        # Optionally persist
         if self.config.source_stats_path:
             os.makedirs(os.path.dirname(self.config.source_stats_path) or ".", exist_ok=True)
             torch.save(stats, self.config.source_stats_path)
 
-        print(f"[{self.model_name}] Source stats collected: "
-              f"{len(stats['bn'])} BN layers, "
-              f"{len(stats['category_roi'])} categories, "
-              f"{len(stats['stage_roi'])} stages.")
+        print(
+            f"[{self.model_name}] Source stats collected: "
+            f"{len(stats['bn'])} BN layers, "
+            f"{len(stats['category_roi'])} categories, "
+            f"{len(stats['stage_roi'])} stages."
+        )
 
     def _collect_roi_stats_from_current_features(
         self, batch, category_roi_runners: dict, stage_roi_runners: dict
@@ -451,35 +487,33 @@ class SGPEngine(AdaptationEngine):
     def _compute_alignment_loss(self) -> torch.Tensor:
         """L_adp: Image-level and Instance-level feature alignment.
 
-        Image-level (Eq. 9): BN feature alignment via KL divergence
-        Instance-level (Eq. 10): Category-wise RoI feature alignment
+        Hook now stores 4D BN features, so we apply spatial mean here to get
+        per-image channel statistics for KL alignment.
         """
         if self.source_stats is None:
             return torch.tensor(0.0, device=self.device)
 
         # --- Image-level alignment (L_img) ---
         img_losses = []
-        for name, feats in self.current_bn_feats.items():
+        for name, feat in self.current_bn_feats.items():
             if name not in self.source_stats["bn"]:
                 continue
 
-            curr_mean = feats.mean(dim=0)
-            curr_std = torch.sqrt(feats.var(dim=0, unbiased=False) + 1e-8)
+            # feat: (B, C, H, W) — apply spatial mean to get per-image channel stats
+            per_img_mean = feat.mean(dim=(2, 3))  # (B, C)
+            curr_mean = per_img_mean.mean(dim=0)
+            curr_std = torch.sqrt(per_img_mean.var(dim=0, unbiased=False) + 1e-8)
 
-            # Load source statistics
             src_stats = self.source_stats["bn"][name]
             if isinstance(src_stats, dict):
                 src_mean = src_stats["mean"].detach()
                 src_std = src_stats.get("std", None)
             else:
-                # Backward compatibility: if only mean is stored
                 src_mean = src_stats.detach()
                 src_std = None
 
-            # Mean alignment (essential part of KL divergence)
             loss = F.mse_loss(curr_mean, src_mean)
 
-            # Std alignment (if available and enabled)
             if self.config.lambda_mu_std > 0 and src_std is not None:
                 src_std = src_std.detach()
                 loss = loss + self.config.lambda_mu_std * F.mse_loss(curr_std, src_std)
@@ -488,7 +522,6 @@ class SGPEngine(AdaptationEngine):
 
         loss_img = torch.stack(img_losses).sum() if img_losses else torch.tensor(0.0, device=self.device)
 
-        # --- Instance-level alignment (L_ins) ---
         loss_ins = self._compute_instance_alignment_loss()
 
         return loss_img + loss_ins
