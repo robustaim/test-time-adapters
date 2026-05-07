@@ -587,41 +587,47 @@ class SGPEngine(AdaptationEngine):
     def _compute_sensitivity_weights(self) -> dict[str, torch.Tensor]:
         """Compute per-BN-layer sensitivity ω = normalize(S_img [+ S_ins]).
 
-        Image-level (Eq. 5-6): |curr_channel_mean - src_channel_mean|
-        Instance-level (Eq. 7-8): RoI feature discrepancy (if enabled)
+        Image-level (Eq. 5): S_img(c) = mean over (N, H, W) of |F_t(c,...) - F_s(c)|
+            — that is, the per-channel mean of absolute deviations from the source
+            per-channel mean, taken across the batch and spatial positions.
+        Instance-level (Eq. 7): same formulation but on RoI features (handled
+            in _compute_instance_sensitivity).
         """
         sensitivity: dict[str, torch.Tensor] = {}
 
-        # --- Image-level sensitivity (S_img) ---
-        for name, feats in self.current_bn_feats.items():
+        # --- Image-level sensitivity (Eq. 5) ---
+        for name, feat in self.current_bn_feats.items():
             if name not in self.source_stats["bn"]:
                 continue
 
-            curr_mean = feats.mean(dim=0)
-
+            # feat is now (B, C, H, W) since hook stores spatial-preserved tensor.
             src_stats = self.source_stats["bn"][name]
             if isinstance(src_stats, dict):
-                src_mean = src_stats["mean"].detach()
+                # Prefer 'channel_mean' (spatial-aware mean over N,H,W).
+                # Fallback to 'mean' for backward compatibility with older stats files.
+                src_chan_mean = src_stats.get("channel_mean", src_stats["mean"]).detach()
             else:
-                src_mean = src_stats.detach()
+                src_chan_mean = src_stats.detach()
 
-            sensitivity[name] = torch.abs(curr_mean - src_mean)
+            # Broadcast (C,) → (1, C, 1, 1), subtract, take abs, mean over (B, H, W).
+            diff = (feat - src_chan_mean.view(1, -1, 1, 1)).abs()
+            S_img = diff.mean(dim=(0, 2, 3))  # (C,)
+            sensitivity[name] = S_img.detach()
 
         # --- Instance-level sensitivity (S_ins) ---
         if self.config.use_instance_sensitivity:
             instance_sens = self._compute_instance_sensitivity()
 
-            # Add instance-level to matching BN layers
             for name in list(sensitivity.keys()):
                 matched_stage = self._match_bn_to_stage(name)
                 if matched_stage and matched_stage in instance_sens:
                     s_ins = instance_sens[matched_stage]
                     s_img = sensitivity[name]
-                    # Channel counts must match
                     if s_ins.shape == s_img.shape:
                         sensitivity[name] = s_img + s_ins
 
-        # --- Normalize across all active channels ---
+        # --- Normalize across all active channels (still global min-max for now) ---
+        # Step 2 will replace this with per-layer sum-normalization (Eq. 6, 8).
         all_active = []
         for name, sens in sensitivity.items():
             mask = self.pruning_masks.get(name, torch.ones_like(sens))
