@@ -585,60 +585,65 @@ class SGPEngine(AdaptationEngine):
         return (losses * weights).sum()
 
     def _compute_sensitivity_weights(self) -> dict[str, torch.Tensor]:
-        """Compute per-BN-layer sensitivity weights ω = w_img + w_ins.
+        """Compute per-BN-layer sensitivity ω = normalize(S_img [+ S_ins]).
 
-        Image-level (Eq. 5-6):
-            S_img(c) = mean over (N, H, W) of |F_t(c,...) - F_s(c)|
-            w_img    = C * S_img / sum(S_img)              [per-layer]
-        Instance-level (Eq. 7-8):
-            S_ins(c) = mean over (M, H, W) of |f_t(c,...) - f_s(c)|
-            w_ins    = C * S_ins / sum(S_ins)              [per-layer]
-
-        Per-layer sum-normalization (Eq. 6 / Eq. 8) gives the channel weights
-        a mean of ~1 within each layer: highly sensitive channels get w > 1,
-        stable channels get w < 1. This preserves the relative sensitivity
-        ranking *within* a layer while keeping the magnitudes comparable
-        *across* layers.
+        Image-level (Eq. 5): S_img(c) = mean over (N, H, W) of |F_t(c,...) - F_s(c)|
+            — that is, the per-channel mean of absolute deviations from the source
+            per-channel mean, taken across the batch and spatial positions.
+        Instance-level (Eq. 7): same formulation but on RoI features (handled
+            in _compute_instance_sensitivity).
         """
         sensitivity: dict[str, torch.Tensor] = {}
 
         # --- Image-level sensitivity (Eq. 5) ---
-        img_raw: dict[str, torch.Tensor] = {}
         for name, feat in self.current_bn_feats.items():
             if name not in self.source_stats["bn"]:
                 continue
 
+            # feat is now (B, C, H, W) since hook stores spatial-preserved tensor.
             src_stats = self.source_stats["bn"][name]
             if isinstance(src_stats, dict):
+                # Prefer 'channel_mean' (spatial-aware mean over N,H,W).
+                # Fallback to 'mean' for backward compatibility with older stats files.
                 src_chan_mean = src_stats.get("channel_mean", src_stats["mean"]).detach()
             else:
                 src_chan_mean = src_stats.detach()
 
+            # Broadcast (C,) → (1, C, 1, 1), subtract, take abs, mean over (B, H, W).
             diff = (feat - src_chan_mean.view(1, -1, 1, 1)).abs()
             S_img = diff.mean(dim=(0, 2, 3))  # (C,)
-            img_raw[name] = S_img.detach()
+            sensitivity[name] = S_img.detach()
 
-        # --- Per-layer normalization (Eq. 6) ---
-        for name, S in img_raw.items():
-            C = S.numel()
-            denom = S.sum() + 1e-6
-            sensitivity[name] = C * S / denom  # mean ≈ 1
-
-        # --- Instance-level sensitivity (Eq. 7-8) ---
+        # --- Instance-level sensitivity (S_ins) ---
         if self.config.use_instance_sensitivity:
-            instance_sens_raw = self._compute_instance_sensitivity()
+            instance_sens = self._compute_instance_sensitivity()
 
-            for stage_name, S_ins in instance_sens_raw.items():
-                C_ins = S_ins.numel()
-                denom_ins = S_ins.sum() + 1e-6
-                w_ins = C_ins * S_ins / denom_ins  # mean ≈ 1
+            for name in list(sensitivity.keys()):
+                matched_stage = self._match_bn_to_stage(name)
+                if matched_stage and matched_stage in instance_sens:
+                    s_ins = instance_sens[matched_stage]
+                    s_img = sensitivity[name]
+                    if s_ins.shape == s_img.shape:
+                        sensitivity[name] = s_img + s_ins
 
-                # Add to all BN layers in this stage
-                for name in list(sensitivity.keys()):
-                    if self._match_bn_to_stage(name) == stage_name:
-                        s_img = sensitivity[name]
-                        if w_ins.shape == s_img.shape:
-                            sensitivity[name] = s_img + w_ins
+        # --- Normalize across all active channels (still global min-max for now) ---
+        # Step 2 will replace this with per-layer sum-normalization (Eq. 6, 8).
+        all_active = []
+        for name, sens in sensitivity.items():
+            mask = self.pruning_masks.get(name, torch.ones_like(sens))
+            active = sens[mask == 1]
+            if active.numel() > 0:
+                all_active.append(active)
+
+        if all_active:
+            all_cat = torch.cat(all_active)
+            s_min = all_cat.min()
+            s_max = all_cat.max()
+            denom = s_max - s_min + 1e-6
+            sensitivity = {
+                name: (sens - s_min) / denom
+                for name, sens in sensitivity.items()
+            }
 
         return sensitivity
 
