@@ -45,7 +45,7 @@ class SGPEngine(AdaptationEngine):
     channels via weighted sparsity regularisation while adapting the remaining
     domain-invariant channels through feature-distribution alignment.
 
-    Currently supports **Detectron2** models only (FasterRCNN / SwinRCNN).
+    Currently supports **Detectron2** model only (FasterRCNN).
 
     Reference:
         Wang et al., "Efficient Test-time Adaptive Object Detection via
@@ -66,10 +66,12 @@ class SGPEngine(AdaptationEngine):
         self.source_stats: dict | None = None
         self._hooks: list[torch.utils.hooks.RemovableHook] = []
         self._bn_params: list[nn.Parameter] = []
+
         # Instance-level: stage-output features captured by hooks
         self._stage_features: dict[str, torch.Tensor] = {}
         self._stage_hooks: list[torch.utils.hooks.RemovableHook] = []
         self._stage_strides: dict[str, int] = {}  # stage_name → output stride
+
         # Category-wise RoI statistics (for instance-level alignment)
         self._category_roi_stats: dict[int, dict] = {}  # category_id → {mean, std}
 
