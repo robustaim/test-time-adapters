@@ -1,6 +1,7 @@
 from typing import Callable, Optional
 from collections import defaultdict
 from os import path, makedirs
+from pathlib import Path
 from enum import Enum
 import requests
 import json
@@ -58,7 +59,8 @@ class ACDCDataset(BaseDataset):
     )
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_detection"
-    target_json_prefix = "instancesonly"
+    target_json_prefix = ""
+    target_json_suffix = ""
     dataset_name = "ACDC"
     default_download_key = (
         "images", "detection", "detection_ref",
@@ -100,17 +102,17 @@ class ACDCDataset(BaseDataset):
         self.target_transform = target_transform
         self.transforms = transforms
 
-        self.loader = lambda path: read_image(path, mode=ImageReadMode.RGB)
+        self.loader = lambda p: read_image(p, mode=ImageReadMode.RGB)
         cond = corruption_type.value
         if train:
             split = "val" if valid else "train"
-            json_name = f"{self.target_json_prefix}_{cond}_{split}_{self.target_load_path}.json"
+            json_name = f"{self.target_json_prefix}{split}{self.target_json_suffix}.json"
         else:
-            json_name = f"{self.target_json_prefix}_{cond}_test_image_info.json"
-        self.raw_path = path.join(self.root, self.target_load_path, cond, json_name)
-        self.samples, self.raw = self.load_data(self.raw_path)
+            json_name = f"{self.target_json_prefix}test_image_info.json"
+        self.raw_path = path.join(self.root, self.target_load_path, json_name)
+        self.samples, self.raw = self.load_data(self.raw_path, cond)
 
-    def load_data(self, raw_path) -> tuple[list, dict]:
+    def load_data(self, raw_path, condition: str) -> tuple[list, dict]:
         with open(raw_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
@@ -120,6 +122,8 @@ class ACDCDataset(BaseDataset):
 
         samples = []
         for img_info in raw['images']:
+            if condition not in img_info['file_name']:
+                continue
             img_id = img_info['id']
             img_path = path.join(self.root, self.rgb_load_path, img_info['file_name'])
             h, w = img_info['height'], img_info['width']
@@ -220,19 +224,63 @@ class ACDCDataset(BaseDataset):
 class ACDCDatasetForObjectDetection(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_detection"
-    target_json_prefix = "instancesonly"
-    default_download_key = ("images", "detection")
+    target_json_prefix = "instancesonly_"
+    target_json_suffix = "_gt_detection"
+    default_download_key = ("images", "detection", "detection_ref")
 
 
 class ACDCDatasetForPanopticSegmentation(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_panoptic"
-    target_json_prefix = "instancesonly"  # TODO: correct this
-    default_download_key = ("images", "panoptic_segmentation")
+    target_json_prefix = ""
+    target_json_suffix = "_gt_panoptic"
+    default_download_key = ("images", "panoptic_segmentation", "panoptic_segmentation_ref")
 
 
 class ACDCDatasetForSemanticSegmentation(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt"
-    target_json_prefix = "instancesonly"  # TODO: correct this
-    default_download_key = ("images", "semantic_segmentation")
+    default_download_key = ("images", "semantic_segmentation", "semantic_segmentation_ref")
+
+    def __init__(
+        self, root: str, force_download: bool = False,
+        train: bool = True, valid: bool = False, corruption_type: ACDCDataset.CorruptionType = ACDCDataset.CorruptionType.FOG,
+        transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
+    ):
+        BaseDataset.__init__(self)
+        self.root = path.join(root, self.dataset_name)
+        self.download(self.root, force=force_download, download_key=self.default_download_key)
+        self.train, self.valid = train, valid
+        self.transform = transform
+        self.target_transform = target_transform
+        self.transforms = transforms
+        self.loader = lambda p: read_image(p, mode=ImageReadMode.RGB)
+
+        cond = corruption_type.value
+        split = ("val" if valid else "train") if train else "test"
+        rgb_dir = Path(self.root) / self.rgb_load_path / cond / split
+        gt_dir = Path(self.root) / self.target_load_path / cond / split
+
+        self.samples = [
+            (str(gt_dir / p.name.replace("_rgb_anon", "_gt_labelTrainIds")), str(p))
+            for p in sorted(rgb_dir.glob("**/*.png"))
+            if (gt_dir / p.name.replace("_rgb_anon", "_gt_labelTrainIds")).exists()
+        ]
+
+    def load_data(self, raw_path, condition: str):
+        raise NotImplementedError
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        gt_path, img_path = self.samples[index]
+        sample = self.loader(img_path)
+        target = read_image(gt_path, mode=ImageReadMode.GRAY).squeeze(0).long()
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        if self.transforms is not None:
+            sample, target = self.transforms(sample, target)
+        return sample, target
