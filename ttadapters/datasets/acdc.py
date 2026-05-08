@@ -60,6 +60,11 @@ class ACDCDataset(BaseDataset):
     target_load_path = "gt_detection"
     target_json_prefix = "instancesonly"
     dataset_name = "ACDC"
+    default_download_key = (
+        "images", "detection", "detection_ref",
+        "panoptic_segmentation", "panoptic_segmentation_ref",
+        "semantic_segmentation", "semantic_segmentation_ref"
+    )
 
     categories = [
         {'id': 24, 'name': 'person', 'supercategory': 'human'},
@@ -88,7 +93,7 @@ class ACDCDataset(BaseDataset):
     ):
         super().__init__()
         self.root = path.join(root, self.dataset_name)
-        self.download(self.root, force=force_download)
+        self.download(self.root, force=force_download, download_key=self.default_download_key)
         self.train, self.valid = train, valid
 
         self.transform = transform
@@ -214,15 +219,18 @@ class ACDCDatasetForObjectDetection(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_detection"
     target_json_prefix = "instancesonly"
+    default_download_key = ("images", "detection")
 
 
 class ACDCDatasetForPanopticSegmentation(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_panoptic"
     target_json_prefix = "instancesonly"  # TODO: correct this
+    default_download_key = ("images", "panoptic_segmentation")
 
 
 class ACDCDatasetForSemanticSegmentation(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt"
     target_json_prefix = "instancesonly"  # TODO: correct this
+    default_download_key = ("images", "semantic_segmentation")
