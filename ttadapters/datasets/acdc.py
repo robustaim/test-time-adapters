@@ -157,18 +157,12 @@ class ACDCDataset(BaseDataset):
                 resp.raise_for_status()
                 dl_token = resp.json()['token']
 
-                # Step 3: stream download (avoid torchvision's double-request redirect check)
+                # Step 3: stream download (token is single-use — no HEAD request)
                 dl_url = f"https://acdc.vision.ee.ethz.ch/api/downloadPackage/{dl_token}/{file_name}"
                 zip_path = path.join(root, file_name)
-                try:
-                    head = requests.head(dl_url, allow_redirects=True, timeout=10)
-                    total = int(head.headers.get('content-length', 0)) or None
-                except Exception:
-                    total = None
                 with requests.get(dl_url, stream=True) as r:
                     r.raise_for_status()
-                    if total is None:
-                        total = int(r.headers.get('content-length', 0)) or None
+                    total = int(r.headers.get('content-length', 0)) or None
                     with open(zip_path, 'wb') as f, tqdm(
                         total=total, unit='B', unit_scale=True, unit_divisor=1024,
                         desc=file_name, dynamic_ncols=True, miniters=1, leave=True
