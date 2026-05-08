@@ -149,10 +149,11 @@ class ACDCDataset(BaseDataset):
         print(f"INFO: Downloading '{cls.dataset_name}' from https://acdc.vision.ee.ethz.ch to {root}...")
         for key in download_key:
             file_name = cls.download_urls[key]['name']
-            extract_dir = cls.download_urls[key]['directory']
-            downloaded = path.isfile(path.join(root, file_name))
-            extracted = path.isdir(path.join(root, extract_dir))
-            if force or not (downloaded or extracted):
+            zip_path = path.join(root, file_name)
+            sentinel = path.join(root, f".{file_name}.done")
+            already_extracted = path.isfile(sentinel)
+            already_downloaded = path.isfile(zip_path)
+            if force or not (already_downloaded or already_extracted):
                 # Step 1: resolve packageId dynamically by filename
                 packages = requests.get("https://acdc.vision.ee.ethz.ch/api/packages").json()['packages']
                 package_id = next(p['packageId'] for p in packages if p['name'] == file_name)
@@ -164,7 +165,6 @@ class ACDCDataset(BaseDataset):
 
                 # Step 3: stream download (token is single-use — no HEAD request)
                 dl_url = f"https://acdc.vision.ee.ethz.ch/api/downloadPackage/{dl_token}/{file_name}"
-                zip_path = path.join(root, file_name)
                 with requests.get(dl_url, stream=True) as r:
                     r.raise_for_status()
                     total = int(r.headers.get('content-length', 0)) or None
@@ -178,11 +178,13 @@ class ACDCDataset(BaseDataset):
                                 pbar.update(len(chunk))
 
                 cls.extract_method(from_path=zip_path, to_path=root)
-                print("INFO: Dataset archive downloaded and extracted.")
+                open(sentinel, 'w').close()
+                print(f"INFO: {file_name} downloaded and extracted.")
             else:
-                print("INFO: Dataset archive found in the root directory. Skipping download.")
-                if not extracted:
-                    cls.extract_method(from_path=path.join(root, file_name), to_path=root)
+                print(f"INFO: {file_name} already present. Skipping.")
+                if not already_extracted and already_downloaded:
+                    cls.extract_method(from_path=zip_path, to_path=root)
+                    open(sentinel, 'w').close()
 
     def __getitem__(self, index: int):
         img_path, raw_target = self.samples[index]
