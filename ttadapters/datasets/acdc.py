@@ -1,12 +1,16 @@
 from typing import Callable, Optional
 from collections import defaultdict
+from os import path, makedirs
 from enum import Enum
-from os import path
+import requests
 import json
 
+import torch
 from torchvision import datasets
 from torchvision.io import read_image, ImageReadMode
 from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
+
+from tqdm.auto import tqdm
 
 from .base import BaseDataset
 
@@ -66,9 +70,9 @@ class ACDCDataset(BaseDataset):
         {'id': 31, 'name': 'train', 'supercategory': 'vehicle'},
         {'id': 32, 'name': 'motorcycle', 'supercategory': 'vehicle'},
         {'id': 33, 'name': 'bicycle', 'supercategory': 'vehicle'}
-    ]  # TODO: dddd
-    classes = []
-    class_ids = []
+    ]
+    classes = [c['name'] for c in categories]
+    class_ids = [c['id'] for c in categories]
 
     class CorruptionType(Enum):
         FOG = "fog"
@@ -92,20 +96,41 @@ class ACDCDataset(BaseDataset):
         self.transforms = transforms
 
         self.loader = lambda path: read_image(path, mode=ImageReadMode.RGB)
+        cond = corruption_type.value
         if train:
-            if valid:
-                self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "val", self.target_load_path])
-            else:
-                self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "train", self.target_load_path])
+            split = "val" if valid else "train"
+            json_name = f"{self.target_json_prefix}_{cond}_{split}_{self.target_load_path}.json"
         else:
-            self.raw_path = "_".join([self.target_json_prefix, self.root, corruption_type.value, "test", "image_info"])
+            json_name = f"{self.target_json_prefix}_{cond}_test_image_info.json"
+        self.raw_path = path.join(self.root, self.target_load_path, cond, json_name)
         self.samples, self.raw = self.load_data(self.raw_path)
 
-    def load_data(self, raw_path) -> tuple[list, list]:
+    def load_data(self, raw_path) -> tuple[list, dict]:
         with open(raw_path, "r", encoding="utf-8") as f:
-            targets = json.load(f)
+            raw = json.load(f)
+
+        ann_by_image = defaultdict(list)
+        for ann in raw.get('annotations', []):
+            ann_by_image[ann['image_id']].append(ann)
 
         samples = []
+        for img_info in raw['images']:
+            img_id = img_info['id']
+            img_path = path.join(self.root, self.rgb_load_path, img_info['file_name'])
+            h, w = img_info['height'], img_info['width']
+            boxes, labels, areas, iscrowd = [], [], [], []
+            for ann in ann_by_image[img_id]:
+                x, y, bw, bh = ann['bbox']
+                boxes.append([x, y, x + bw, y + bh])
+                labels.append(ann['category_id'])
+                areas.append(ann['area'])
+                iscrowd.append(ann['iscrowd'])
+            samples.append((img_path, {'boxes': boxes, 'labels': labels, 'areas': areas,
+                                        'iscrowd': iscrowd, 'image_id': img_id, 'hw': (h, w)}))
+        return samples, raw
+
+    def __len__(self) -> int:
+        return len(self.samples)
 
     @classmethod
     def download(
@@ -115,15 +140,35 @@ class ACDCDataset(BaseDataset):
             "semantic_segmentation", "semantic_segmentation_ref"
         )
     ):
+        makedirs(root, exist_ok=True)
         print(f"INFO: Downloading '{cls.dataset_name}' from https://acdc.vision.ee.ethz.ch to {root}...")
         for key in download_key:
             file_name = cls.download_urls[key]['name']
-            download_url = cls.base_url + cls.download_urls[key]['name']
             extract_dir = cls.download_urls[key]['directory']
             downloaded = path.isfile(path.join(root, file_name))
             extracted = path.isdir(path.join(root, extract_dir))
             if force or not (downloaded or extracted):
-                cls.download_method(download_url, download_root=root, extract_root=root, filename=file_name)
+                # Step 1: resolve packageId dynamically by filename
+                packages = requests.get("https://acdc.vision.ee.ethz.ch/api/packages").json()['packages']
+                package_id = next(p['packageId'] for p in packages if p['name'] == file_name)
+
+                # Step 2: get temporary download token
+                resp = requests.get(cls.base_url + package_id)
+                resp.raise_for_status()
+                dl_token = resp.json()['token']
+
+                # Step 3: stream download (avoid torchvision's double-request redirect check)
+                dl_url = f"https://acdc.vision.ee.ethz.ch/api/downloadPackage/{dl_token}/{file_name}"
+                zip_path = path.join(root, file_name)
+                with requests.get(dl_url, stream=True) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get('content-length', 0))
+                    with open(zip_path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=file_name) as pbar:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):
+                            f.write(chunk)
+                            pbar.update(len(chunk))
+
+                cls.extract_method(from_path=zip_path, to_path=root)
                 print("INFO: Dataset archive downloaded and extracted.")
             else:
                 print("INFO: Dataset archive found in the root directory. Skipping download.")
@@ -131,15 +176,33 @@ class ACDCDataset(BaseDataset):
                     cls.extract_method(from_path=path.join(root, file_name), to_path=root)
 
     def __getitem__(self, index: int):
-        path, target = self.samples[index]
-        sample = self.loader(path)
+        img_path, raw_target = self.samples[index]
+        sample = self.loader(img_path)
+        h, w = raw_target['hw']
+        boxes = raw_target['boxes']
+        if boxes:
+            boxes_t = torch.as_tensor(boxes, dtype=torch.float32)
+            target = {
+                'boxes2d': BoundingBoxes(boxes_t, format=BoundingBoxFormat.XYXY, canvas_size=(h, w)),
+                'boxes2d_classes': torch.as_tensor(raw_target['labels'], dtype=torch.int64),
+                'area': torch.as_tensor(raw_target['areas'], dtype=torch.float32),
+                'iscrowd': torch.as_tensor(raw_target['iscrowd'], dtype=torch.int64),
+            }
+        else:
+            target = {
+                'boxes2d': BoundingBoxes(torch.zeros((0, 4), dtype=torch.float32), format=BoundingBoxFormat.XYXY, canvas_size=(h, w)),
+                'boxes2d_classes': torch.zeros(0, dtype=torch.int64),
+                'area': torch.zeros(0, dtype=torch.float32),
+                'iscrowd': torch.zeros(0, dtype=torch.int64),
+            }
+        target['image_id'] = raw_target['image_id']
+        target['original_hw'] = (h, w)
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
             target = self.target_transform(target)
         if self.transforms is not None:
             sample, target = self.transforms(sample, target)
-
         return sample, target
 
 
