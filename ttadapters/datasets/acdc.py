@@ -160,13 +160,23 @@ class ACDCDataset(BaseDataset):
                 # Step 3: stream download (avoid torchvision's double-request redirect check)
                 dl_url = f"https://acdc.vision.ee.ethz.ch/api/downloadPackage/{dl_token}/{file_name}"
                 zip_path = path.join(root, file_name)
+                try:
+                    head = requests.head(dl_url, allow_redirects=True, timeout=10)
+                    total = int(head.headers.get('content-length', 0)) or None
+                except Exception:
+                    total = None
                 with requests.get(dl_url, stream=True) as r:
                     r.raise_for_status()
-                    total = int(r.headers.get('content-length', 0))
-                    with open(zip_path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=file_name) as pbar:
-                        for chunk in r.iter_content(chunk_size=1024 * 1024):
-                            f.write(chunk)
-                            pbar.update(len(chunk))
+                    if total is None:
+                        total = int(r.headers.get('content-length', 0)) or None
+                    with open(zip_path, 'wb') as f, tqdm(
+                        total=total, unit='B', unit_scale=True, unit_divisor=1024,
+                        desc=file_name, dynamic_ncols=True, miniters=1, leave=True
+                    ) as pbar:
+                        for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                                pbar.update(len(chunk))
 
                 cls.extract_method(from_path=zip_path, to_path=root)
                 print("INFO: Dataset archive downloaded and extracted.")
