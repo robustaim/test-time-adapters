@@ -188,4 +188,5 @@ logs/
 trainer_output/
 
 # AI Agent
+.claude
 .omc
