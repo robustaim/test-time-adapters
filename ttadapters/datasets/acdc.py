@@ -108,7 +108,11 @@ class ACDCDataset(BaseDataset):
 
     def _build_json_path(self, cond: str, split: str, is_normal: bool) -> str:
         if is_normal:
-            json_name = f"instancesonly_{split}_gt_detection.json"
+            base_split = split.replace("_ref", "")
+            if "test" in split:
+                json_name = f"instancesonly_{base_split}_ref_image_info.json"
+            else:
+                json_name = f"instancesonly_{base_split}_gt_ref_detection.json"
             return path.join(self.root, self.target_load_path, json_name)
         if "test" in split:
             json_name = f"instancesonly_{cond}_{split}_image_info.json"
@@ -246,7 +250,11 @@ class ACDCDatasetForPanopticSegmentation(ACDCDataset):
 
     def _build_json_path(self, cond: str, split: str, is_normal: bool) -> str:
         if is_normal:
-            json_name = f"{split}_gt_panoptic.json"
+            base_split = split.replace("_ref", "")
+            if "test" in split:
+                json_name = f"{base_split}_ref_image_info.json"
+            else:
+                json_name = f"{base_split}_gt_ref_panoptic.json"
             return path.join(self.root, self.target_load_path, json_name)
         if "test" in split:
             json_name = f"{cond}_{split}_image_info.json"
