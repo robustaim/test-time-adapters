@@ -15,6 +15,9 @@ Dataset wrappers and **TTA scenarios**. Wraps standard CV datasets (COCO, SHIFT,
 | `shift.py` | SHIFT dataset (driving simulation). Discrete and continuous variants at 1×/10×/100× scaling. Includes `patch_fast_download_for_object_detection` (~26 KB). |
 | `cityscapes.py` | CityScapes wrappers — clean / corrupted / discrete / continuous (~32 KB). |
 | `acdc.py` | ACDC adverse-condition driving — detection / panoptic / semantic variants. |
+| `bdd100k.py` | BDD100K (USA) object-detection wrapper backed by Kaggle `solesensei/solesensei_bdd100k`. CityScapes-only labels. |
+| `idd.py` | IDD (Indian Driving Dataset) object-detection wrapper. Manual-download archive `idd-detection.tar.gz` is auto-extracted; CityScapes-only labels. |
+| `cross_country.py` | `CrossCountryDataset(ForObjectDetection)` — dispatches to CityScapes / BDD100k / IDD via the `corruption_type=DomainType.{BASE,BDD,IDD}` key, used by `CrossCountryScenarioForContinualTTA`. |
 | `got10k.py` | GOT-10k object-tracking + `PairedGOT10kDataset`. |
 
 ## Subdirectories

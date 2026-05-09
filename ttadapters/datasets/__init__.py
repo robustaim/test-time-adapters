@@ -17,6 +17,9 @@ from .acdc import (
     ACDCDataset, ACDCDatasetForObjectDetection,
     ACDCDatasetForPanopticSegmentation, ACDCDatasetForSemanticSegmentation
 )
+from .bdd100k import BDD100kDataset, BDD100kDatasetForObjectDetection
+from .idd import IDDDataset, IDDDatasetForObjectDetection
+from .cross_country import CrossCountryDataset, CrossCountryDatasetForObjectDetection
 
 from .base import BaseDataset, DatasetHolder, DataLoaderHolder, DataPreparation
 from . import scenarios

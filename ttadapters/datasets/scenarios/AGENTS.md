@@ -9,7 +9,7 @@ TTA experiment scenarios — orchestrates iteration over multiple shifted datase
 ## Key Files
 | File | Description |
 |------|-------------|
-| `__init__.py` | Public API: `BaseDataset`, `BaseScenario`, the four `Base{Standard,Gradual,Continual,Universal}TTAScenario` classes, plus concrete scenarios (`SHIFTContinuousScenarioForGradualTTA`, `CityScapesContinuousScenarioForGradualTTA`, `SHIFTDiscreteScenarioForContinualTTA`, `ACDCScenarioForContinualTTA`, `CityScapesDiscreteScenarioForContinualTTA`). |
+| `__init__.py` | Public API: `BaseDataset`, `BaseScenario`, the four `Base{Standard,Gradual,Continual,Universal}TTAScenario` classes, plus concrete scenarios (`SHIFTContinuousScenarioForGradualTTA`, `CityScapesContinuousScenarioForGradualTTA`, `SHIFTDiscreteScenarioForContinualTTA`, `ACDCScenarioForContinualTTA`, `CityScapesDiscreteScenarioForContinualTTA`, `CrossCountryScenarioForContinualTTA`). |
 | `base.py` | `ScenarioType` enum, `BaseScenario` (dict subclass keyed by shift step). `play(script, index, **kwargs)` is the iteration driver: builds a `DataLoader` per dataset, calls `script(key.value, loader, loader_len, **kwargs)`, accumulates per-step results, and finally yields an `"avg"` aggregate. |
 | `continual.py` | Concrete CTTA scenarios over SHIFT discrete, ACDC, and CityScapes discrete splits. |
 | `gradual.py` | Concrete gradual-TTA scenarios over SHIFT and CityScapes continuous splits. |
