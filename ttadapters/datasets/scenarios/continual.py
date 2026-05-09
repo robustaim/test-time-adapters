@@ -2,15 +2,13 @@ from .base import BaseContinualTTAScenario
 from .. import (
     SHIFTDiscreteSubsetForObjectDetection,
     CityScapesDiscreteDatasetForObjectDetection,
-    ACDCDatasetForObjectDetection,
-    CrossCountryDatasetForObjectDetection,
+    ACDCDatasetForObjectDetection
 )
 
 
 SHIFTDiscreteCorruptionType = SHIFTDiscreteSubsetForObjectDetection.SubsetType
 CityScapesDiscreteCorruptionType = CityScapesDiscreteDatasetForObjectDetection.CorruptionType
 ACDCCorruptionType = ACDCDatasetForObjectDetection.CorruptionType
-CrossCountryDomainType = CrossCountryDatasetForObjectDetection.DomainType
 
 
 class SHIFTDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
@@ -55,9 +53,7 @@ class ACDCScenarioForContinualTTA(BaseContinualTTAScenario):
 
 class CrossCountryScenarioForContinualTTA(BaseContinualTTAScenario):
     DEFAULT = [
-        CrossCountryDomainType.BASE,  # CityScapes (Germany)
-        CrossCountryDomainType.BDD,   # BDD100k    (USA)
-        CrossCountryDomainType.IDD,   # IDD        (India)
+
     ]
-    description = "CrossCountry Scenario For ContinualTTA"
-    dataset_class = CrossCountryDatasetForObjectDetection
+    description = "CityScapes-Discrete Scenario For ContinualTTA"
+    dataset_class = CityScapesDiscreteDatasetForObjectDetection
