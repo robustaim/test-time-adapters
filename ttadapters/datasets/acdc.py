@@ -12,12 +12,12 @@ from torchvision.io import read_image, ImageReadMode
 from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
 
 from tqdm.auto import tqdm
+from cityscapesscripts.helpers.labels import labels as cs_labels
 
 from .base import BaseDataset
 
 
 class ACDCDataset(BaseDataset):
-    download_method = datasets.utils.download_and_extract_archive
     extract_method = datasets.utils.extract_archive
     base_url = "https://acdc.vision.ee.ethz.ch/api/getPackageUri/"
     download_urls = dict(
@@ -34,7 +34,7 @@ class ACDCDataset(BaseDataset):
         panoptic_segmentation=dict(
             name="gt_panoptic_trainval.zip",
             directory="gt_panoptic",
-            description="Ground-truth annotations  for panoptic segmentation for train and val sets (2006 images)",
+            description="Ground-truth annotations for panoptic segmentation for train and val sets (2006 images)",
         ),
         panoptic_segmentation_ref=dict(
             name="gt_panoptic_trainval_ref.zip",
@@ -44,7 +44,7 @@ class ACDCDataset(BaseDataset):
         semantic_segmentation=dict(
             name="gt_trainval.zip",
             directory="gt",
-            description="Ground-truth annotations for semantic segmentation and uncertainty-aware semantic segmentation for train and val sets (2006 images)",
+            description="Ground-truth annotations for semantic segmentation for train and val sets (2006 images)",
         ),
         semantic_segmentation_ref=dict(
             name="gt_trainval_ref.zip",
@@ -54,13 +54,11 @@ class ACDCDataset(BaseDataset):
         images=dict(
             name="rgb_anon_trainvaltest.zip",
             directory="rgb_anon",
-            description="Anonymized adverse-condition images for train, val, and test sets distributed evenly among fog, night, rain, and snow (4006 images) and anonymized corresponding normal-condition images for train, val, and test sets (4006 images)",
+            description="Anonymized images for train, val, and test sets (fog/night/rain/snow + normal ref)",
         )
     )
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_detection"
-    target_json_prefix = ""
-    target_json_suffix = ""
     dataset_name = "ACDC"
     default_download_key = (
         "images", "detection", "detection_ref",
@@ -68,18 +66,13 @@ class ACDCDataset(BaseDataset):
         "semantic_segmentation", "semantic_segmentation_ref"
     )
 
+    # detection: things only (hasInstances)
     categories = [
-        {'id': 24, 'name': 'person', 'supercategory': 'human'},
-        {'id': 25, 'name': 'rider', 'supercategory': 'human'},
-        {'id': 26, 'name': 'car', 'supercategory': 'vehicle'},
-        {'id': 27, 'name': 'truck', 'supercategory': 'vehicle'},
-        {'id': 28, 'name': 'bus', 'supercategory': 'vehicle'},
-        {'id': 31, 'name': 'train', 'supercategory': 'vehicle'},
-        {'id': 32, 'name': 'motorcycle', 'supercategory': 'vehicle'},
-        {'id': 33, 'name': 'bicycle', 'supercategory': 'vehicle'}
+        {'id': l.id, 'name': l.name, 'supercategory': l.category}
+        for l in cs_labels if l.hasInstances and not l.ignoreInEval
     ]
-    classes = [c['name'] for c in categories]
-    class_ids = [c['id'] for c in categories]
+    classes = [l.name for l in cs_labels if l.hasInstances and not l.ignoreInEval]
+    class_ids = [l.id for l in cs_labels if l.hasInstances and not l.ignoreInEval]
 
     class CorruptionType(Enum):
         FOG = "fog"
@@ -97,23 +90,34 @@ class ACDCDataset(BaseDataset):
         self.root = path.join(root, self.dataset_name)
         self.download(self.root, force=force_download, download_key=self.default_download_key)
         self.train, self.valid = train, valid
-
         self.transform = transform
         self.target_transform = target_transform
         self.transforms = transforms
-
         self.loader = lambda p: read_image(p, mode=ImageReadMode.RGB)
-        cond = corruption_type.value
-        if train:
-            split = "val" if valid else "train"
-            json_name = f"{self.target_json_prefix}{split}{self.target_json_suffix}.json"
-        else:
-            json_name = f"{self.target_json_prefix}test_image_info.json"
-        self.raw_path = path.join(self.root, self.target_load_path, json_name)
-        self.samples, self.raw = self.load_data(self.raw_path, cond)
 
-    def load_data(self, raw_path, condition: str) -> tuple[list, dict]:
-        with open(raw_path, "r", encoding="utf-8") as f:
+        cond = corruption_type.value
+        is_normal = cond == "normal"
+        if train:
+            split = ("val_ref" if valid else "train_ref") if is_normal else ("val" if valid else "train")
+        else:
+            split = "test_ref" if is_normal else "test"
+
+        self.raw_path = self._build_json_path(cond, split, is_normal)
+        filter_cond = None if is_normal else cond
+        self.samples, self.raw = self.load_data(self.raw_path, filter_cond)
+
+    def _build_json_path(self, cond: str, split: str, is_normal: bool) -> str:
+        if is_normal:
+            json_name = f"instancesonly_{split}_gt_detection.json"
+            return path.join(self.root, self.target_load_path, json_name)
+        if "test" in split:
+            json_name = f"instancesonly_{cond}_{split}_image_info.json"
+        else:
+            json_name = f"instancesonly_{cond}_{split}_gt_detection.json"
+        return path.join(self.root, self.target_load_path, cond, json_name)
+
+    def load_data(self, raw_path: str, condition: Optional[str]) -> tuple[list, dict]:
+        with open(raw_path, 'r', encoding="utf-8") as f:
             raw = json.load(f)
 
         ann_by_image = defaultdict(list)
@@ -122,7 +126,7 @@ class ACDCDataset(BaseDataset):
 
         samples = []
         for img_info in raw['images']:
-            if condition not in img_info['file_name']:
+            if condition is not None and condition not in img_info['file_name']:
                 continue
             img_id = img_info['id']
             img_path = path.join(self.root, self.rgb_load_path, img_info['file_name'])
@@ -134,8 +138,10 @@ class ACDCDataset(BaseDataset):
                 labels.append(ann['category_id'])
                 areas.append(ann['area'])
                 iscrowd.append(ann['iscrowd'])
-            samples.append((img_path, {'boxes': boxes, 'labels': labels, 'areas': areas,
-                                        'iscrowd': iscrowd, 'image_id': img_id, 'hw': (h, w)}))
+            samples.append((img_path, {
+                'boxes': boxes, 'labels': labels, 'areas': areas,
+                'iscrowd': iscrowd, 'image_id': img_id, 'hw': (h, w)
+            }))
         return samples, raw
 
     def __len__(self) -> int:
@@ -158,16 +164,14 @@ class ACDCDataset(BaseDataset):
             already_extracted = path.isfile(sentinel)
             already_downloaded = path.isfile(zip_path)
             if force or not (already_downloaded or already_extracted):
-                # Step 1: resolve packageId dynamically by filename
                 packages = requests.get("https://acdc.vision.ee.ethz.ch/api/packages").json()['packages']
                 package_id = next(p['packageId'] for p in packages if p['name'] == file_name)
 
-                # Step 2: get temporary download token
                 resp = requests.get(cls.base_url + package_id)
                 resp.raise_for_status()
                 dl_token = resp.json()['token']
 
-                # Step 3: stream download (token is single-use — no HEAD request)
+                # token is single-use — no HEAD request before GET
                 dl_url = f"https://acdc.vision.ee.ethz.ch/api/downloadPackage/{dl_token}/{file_name}"
                 with requests.get(dl_url, stream=True) as r:
                     r.raise_for_status()
@@ -224,17 +228,75 @@ class ACDCDataset(BaseDataset):
 class ACDCDatasetForObjectDetection(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_detection"
-    target_json_prefix = "instancesonly_"
-    target_json_suffix = "_gt_detection"
     default_download_key = ("images", "detection", "detection_ref")
 
 
 class ACDCDatasetForPanopticSegmentation(ACDCDataset):
     rgb_load_path = "rgb_anon"
     target_load_path = "gt_panoptic"
-    target_json_prefix = ""
-    target_json_suffix = "_gt_panoptic"
     default_download_key = ("images", "panoptic_segmentation", "panoptic_segmentation_ref")
+
+    # panoptic: stuff + things
+    categories = [
+        {'id': l.id, 'name': l.name, 'supercategory': l.category}
+        for l in cs_labels if not l.ignoreInEval
+    ]
+    classes = [l.name for l in cs_labels if not l.ignoreInEval]
+    class_ids = [l.id for l in cs_labels if not l.ignoreInEval]
+
+    def _build_json_path(self, cond: str, split: str, is_normal: bool) -> str:
+        if is_normal:
+            json_name = f"{split}_gt_panoptic.json"
+            return path.join(self.root, self.target_load_path, json_name)
+        if "test" in split:
+            json_name = f"{cond}_{split}_image_info.json"
+        else:
+            json_name = f"{cond}_{split}_gt_panoptic.json"
+        return path.join(self.root, self.target_load_path, cond, json_name)
+
+    def load_data(self, raw_path: str, condition: Optional[str]) -> tuple[list, dict]:
+        with open(raw_path, 'r', encoding="utf-8") as f:
+            raw = json.load(f)
+
+        ann_by_image = {ann['image_id']: ann for ann in raw.get('annotations', [])}
+
+        samples = []
+        for img_info in raw['images']:
+            if condition is not None and condition not in img_info['file_name']:
+                continue
+            img_id = img_info['id']
+            ann = ann_by_image.get(img_id)
+            if ann is None:
+                continue
+            samples.append((path.join(self.root, self.rgb_load_path, img_info['file_name']), {
+                'mask_path': path.join(self.root, self.target_load_path, ann['file_name']),
+                'segments_info': ann.get('segments_info', []),
+                'image_id': img_id,
+                'hw': (img_info['height'], img_info['width']),
+            }))
+        return samples, raw
+
+    def __getitem__(self, index: int):
+        img_path, raw_target = self.samples[index]
+        sample = self.loader(img_path)
+        h, w = raw_target['hw']
+
+        mask_rgb = read_image(raw_target['mask_path'], mode=ImageReadMode.RGB)
+        panoptic_mask = mask_rgb[0].long() + mask_rgb[1].long() * 256 + mask_rgb[2].long() * 65536
+
+        target = {
+            'panoptic_mask': panoptic_mask,
+            'segments_info': raw_target['segments_info'],
+            'image_id': raw_target['image_id'],
+            'original_hw': (h, w),
+        }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        if self.transforms is not None:
+            sample, target = self.transforms(sample, target)
+        return sample, target
 
 
 class ACDCDatasetForSemanticSegmentation(ACDCDataset):
@@ -242,9 +304,18 @@ class ACDCDatasetForSemanticSegmentation(ACDCDataset):
     target_load_path = "gt"
     default_download_key = ("images", "semantic_segmentation", "semantic_segmentation_ref")
 
+    # semantic: trainId-based, excludes ignored/void classes
+    categories = [
+        {'id': l.trainId, 'name': l.name, 'supercategory': l.category}
+        for l in cs_labels if not l.ignoreInEval
+    ]
+    classes = [l.name for l in cs_labels if not l.ignoreInEval]
+    class_ids = [l.trainId for l in cs_labels if not l.ignoreInEval]
+
     def __init__(
         self, root: str, force_download: bool = False,
-        train: bool = True, valid: bool = False, corruption_type: ACDCDataset.CorruptionType = ACDCDataset.CorruptionType.FOG,
+        train: bool = True, valid: bool = False,
+        corruption_type: ACDCDataset.CorruptionType = ACDCDataset.CorruptionType.FOG,
         transform: Optional[Callable] = None, target_transform: Optional[Callable] = None, transforms: Optional[Callable] = None
     ):
         BaseDataset.__init__(self)
@@ -257,24 +328,45 @@ class ACDCDatasetForSemanticSegmentation(ACDCDataset):
         self.loader = lambda p: read_image(p, mode=ImageReadMode.RGB)
 
         cond = corruption_type.value
-        split = ("val" if valid else "train") if train else "test"
-        rgb_dir = Path(self.root) / self.rgb_load_path / cond / split
-        gt_dir = Path(self.root) / self.target_load_path / cond / split
+        is_normal = cond == "normal"
 
-        self.samples = [
-            (str(gt_dir / p.name.replace("_rgb_anon", "_gt_labelTrainIds")), str(p))
-            for p in sorted(rgb_dir.glob("**/*.png"))
-            if (gt_dir / p.name.replace("_rgb_anon", "_gt_labelTrainIds")).exists()
-        ]
+        if is_normal:
+            split = ("val_ref" if valid else "train_ref") if train else "test_ref"
+            self.samples = self._collect_ref_samples(split)
+        else:
+            split = ("val" if valid else "train") if train else "test"
+            self.samples = self._collect_adverse_samples(cond, split)
 
-    def load_data(self, raw_path, condition: str):
+    def _collect_adverse_samples(self, cond: str, split: str) -> list:
+        rgb_base = Path(self.root) / self.rgb_load_path / cond / split
+        gt_base = Path(self.root) / self.target_load_path / cond / split
+        samples = []
+        for rgb_path in sorted(rgb_base.glob("**/*_rgb_anon.png")):
+            gt_name = rgb_path.name.replace("_rgb_anon.png", "_gt_invIds.png")
+            gt_path = gt_base / rgb_path.parent.name / gt_name
+            if gt_path.exists():
+                samples.append((str(rgb_path), str(gt_path)))
+        return samples
+
+    def _collect_ref_samples(self, split: str) -> list:
+        samples = []
+        for cond in ("fog", "night", "rain", "snow"):
+            rgb_base = Path(self.root) / self.rgb_load_path / cond / split
+            gt_base = Path(self.root) / self.target_load_path / cond / split
+            if not rgb_base.exists():
+                continue
+            for rgb_path in sorted(rgb_base.glob("**/*_rgb_ref_anon.png")):
+                gt_name = rgb_path.name.replace("_rgb_ref_anon.png", "_gt_ref_labelTrainIds.png")
+                gt_path = gt_base / rgb_path.parent.name / gt_name
+                if gt_path.exists():
+                    samples.append((str(rgb_path), str(gt_path)))
+        return samples
+
+    def load_data(self, raw_path, condition):
         raise NotImplementedError
 
-    def __len__(self) -> int:
-        return len(self.samples)
-
     def __getitem__(self, index: int):
-        gt_path, img_path = self.samples[index]
+        img_path, gt_path = self.samples[index]
         sample = self.loader(img_path)
         target = read_image(gt_path, mode=ImageReadMode.GRAY).squeeze(0).long()
         if self.transform is not None:
