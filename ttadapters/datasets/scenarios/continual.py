@@ -49,11 +49,3 @@ class ACDCScenarioForContinualTTA(BaseContinualTTAScenario):
     ]
     description = "ACDC Scenario For ContinualTTA"
     dataset_class = ACDCDatasetForObjectDetection
-
-
-class CrossCountryScenarioForContinualTTA(BaseContinualTTAScenario):
-    DEFAULT = [
-
-    ]
-    description = "CityScapes-Discrete Scenario For ContinualTTA"
-    dataset_class = CityScapesDiscreteDatasetForObjectDetection
