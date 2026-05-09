@@ -83,7 +83,7 @@ class SGPConfig(AdaptationConfig):
     reactivation_prob: float = 0.01     # r — Bernoulli prob per pruned channel (paper Sec 4.1).
 
     # --- Instance-Level Sensitivity (paper Eq.7) ---
-    use_instance_sensitivity: bool = True   # enable per-BN-layer instance sensitivity (D8).
+    use_instance_sensitivity: bool = True   # enable instance-level sensitivity (per-BN RoI features) on top of image-level.
     roi_output_size: int = 7                # spatial size for RoI-Align (paper unspecified; standard).
     fg_confidence_threshold: float = 0.5    # paper Sec 3.3: "RoIs with background confidence < 0.5".
 
