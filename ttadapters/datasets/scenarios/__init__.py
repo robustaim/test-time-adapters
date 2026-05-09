@@ -11,6 +11,7 @@ from .gradual import (
 from .continual import (
     SHIFTDiscreteScenarioForContinualTTA,
     ACDCScenarioForContinualTTA,
-    CityScapesDiscreteScenarioForContinualTTA
+    CityScapesDiscreteScenarioForContinualTTA,
+    CrossCountryScenarioForContinualTTA
 )
 from .universal import *
