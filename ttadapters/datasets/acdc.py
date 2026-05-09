@@ -128,6 +128,8 @@ class ACDCDataset(BaseDataset):
         for ann in raw.get('annotations', []):
             ann_by_image[ann['image_id']].append(ann)
 
+        cat_id_to_idx = {cat_id: idx for idx, cat_id in enumerate(self.class_ids)}
+
         samples = []
         for img_info in raw['images']:
             if condition is not None and condition not in img_info['file_name']:
@@ -137,9 +139,12 @@ class ACDCDataset(BaseDataset):
             h, w = img_info['height'], img_info['width']
             boxes, labels, areas, iscrowd = [], [], [], []
             for ann in ann_by_image[img_id]:
+                cat_idx = cat_id_to_idx.get(ann['category_id'])
+                if cat_idx is None:
+                    continue
                 x, y, bw, bh = ann['bbox']
                 boxes.append([x, y, x + bw, y + bh])
-                labels.append(ann['category_id'])
+                labels.append(cat_idx)
                 areas.append(ann['area'])
                 iscrowd.append(ann['iscrowd'])
             samples.append((img_path, {
