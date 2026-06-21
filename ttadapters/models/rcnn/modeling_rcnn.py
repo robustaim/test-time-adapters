@@ -293,10 +293,10 @@ class DetectronDataPreparation(DataPreparation):
             if isinstance(tr, ResizeShortestEdge) and tr.short_edge_length[0] != img_size:
                 raise ValueError(f"ResizeShortestEdge is not set to {img_size} for valid_transforms")
 
-    def pre_process(batch):
+    def pre_process(self, batch):
         return batch
 
-    def post_process(batch, *args, **kwargs):
+    def post_process(self, batch, *args, **kwargs):
         return batch  # detectron handles resize in forward() during eval
 
     def transforms(self, *data):
