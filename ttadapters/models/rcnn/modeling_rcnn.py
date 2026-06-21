@@ -159,14 +159,15 @@ class DetectronTrainer(DefaultTrainer):
             del self._model
         return model  # model is passed in constructor
 
+    @staticmethod
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
     def build_train_loader(self, *args, **kwargs):
         if self.train_dataset is None:
             return None
-
-        def seed_worker(worker_id):
-            worker_seed = torch.initial_seed() % 2**32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
 
         generator = torch.Generator()
         generator.manual_seed(self.args.SEED * 2)
@@ -181,7 +182,7 @@ class DetectronTrainer(DefaultTrainer):
             ),
             num_workers=self.args.DATALOADER.NUM_WORKERS,
             collate_fn=self.train_dataset.collate_fn,
-            worker_init_fn=seed_worker,
+            worker_init_fn=self.seed_worker,
             generator=generator
         )
 
@@ -233,15 +234,17 @@ class DetectronTrainer(DefaultTrainer):
         with output:
             loader = self.build_test_loader()
             self.model.eval()
+            # Unwrap DDP so single-process eval path gets the actual model attributes
+            unwrapped = getattr(self.model, "module", self.model)
             result = DetectionEvaluator.evaluate(
-                model=self.model,
+                model=unwrapped,
                 desc=self.eval_dataset_name,
                 loader=loader,
                 loader_length=int(len(self.eval_dataset)/loader.batch_size+0.99),
                 classes=self.classes,
                 data_preparation=self.eval_dataset,
-                dtype=self.model.pixel_mean.dtype,
-                device=self.model.pixel_mean.device,
+                dtype=unwrapped.pixel_mean.dtype,
+                device=unwrapped.pixel_mean.device,
                 synchronize=False,
                 no_grad=True
             )
@@ -290,8 +293,11 @@ class DetectronDataPreparation(DataPreparation):
             if isinstance(tr, ResizeShortestEdge) and tr.short_edge_length[0] != img_size:
                 raise ValueError(f"ResizeShortestEdge is not set to {img_size} for valid_transforms")
 
-        self.pre_process: Callable = lambda batch: batch
-        self.post_process: Callable = lambda batch, *args, **kwargs: batch  # do nothing - detectron do resize in model.forward() while eval mode
+    def pre_process(batch):
+        return batch
+
+    def post_process(batch, *args, **kwargs):
+        return batch  # detectron handles resize in forward() during eval
 
     def transforms(self, *data):
         image, metadata = data[0] if len(data) == 1 else data
