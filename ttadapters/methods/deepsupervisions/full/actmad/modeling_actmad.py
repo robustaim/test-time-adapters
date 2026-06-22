@@ -6,6 +6,7 @@ import re
 
 import torch
 from torch import nn, optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -113,6 +114,10 @@ class ActMADEngine(AdaptationEngine):
         self.clean_var_list_final: Optional[List[torch.Tensor]] = None
         self.layer_names: Optional[List[str]] = None
         self.chosen_bn_layers: Optional[List[nn.Module]] = None
+        # Input H/W used while extracting source statistics; eval inputs are resized back to
+        # this so per-location activation matching stays valid across domains of differing
+        # aspect ratio. Restored from cache when statistics are loaded instead of extracted.
+        self._fit_input_hw: Optional[tuple] = None
 
         if self.config.loss_type == "L1":
             self._loss_fn = nn.L1Loss(reduction="mean")
@@ -133,15 +138,20 @@ class ActMADEngine(AdaptationEngine):
             self.clean_mean_list_final = saved_stats["clean_mean_list_final"]
             self.clean_var_list_final = saved_stats["clean_var_list_final"]
             self.layer_names = saved_stats["layer_names"]
+            # Restore the source extraction input size so eval inputs are resized to match
+            # (older caches without this key fall back to None -> no resize).
+            self._fit_input_hw = saved_stats.get("fit_input_hw")
 
             self._setup_chosen_bn_layers()
-            print(f"[ActMADEngine] Loaded statistics from {self.config.statistic_save_path}")
+            print(f"[{self.__class__.__name__}] Loaded statistics from {self.config.statistic_save_path}")
+            if self._fit_input_hw is not None:
+                print(f"[{self.__class__.__name__}] Restored source statistics input size {self._fit_input_hw[0]}x{self._fit_input_hw[1]}")
 
         elif self.config.statistic_save_path:
-            print(f"[ActMADEngine] Stats file not found: {self.config.statistic_save_path}. Will collect during fit().")
+            print(f"[{self.__class__.__name__}] Stats file not found: {self.config.statistic_save_path}. Will collect during fit().")
 
         else:
-            print("[ActMADEngine] No statistics path provided.")
+            print(f"[{self.__class__.__name__}] No statistics path provided.")
 
     def _get_bn_layers_info(self) -> List[tuple]:
         # Select normalization layers (BN/LN/FrozenBN) to adapt based on model type and configured target layers
@@ -232,7 +242,7 @@ class ActMADEngine(AdaptationEngine):
         n_chosen_layers = len(chosen_bn_layers)
 
         if n_chosen_layers == 0:
-            warnings.warn("[ActMADEngine] No normalization layers found!")
+            warnings.warn(f"[{self.__class__.__name__}] No normalization layers found!")
             return
 
         if self.config.base_type == "rtdetr":
@@ -247,7 +257,7 @@ class ActMADEngine(AdaptationEngine):
         clean_mean_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
         clean_var_act_list = [AverageMeter() for _ in range(n_chosen_layers)]
 
-        print(f"[ActMADEngine] Extracting statistics from {n_chosen_layers} layers...")
+        print(f"[{self.__class__.__name__}] Extracting statistics from {n_chosen_layers} layers...")
 
         with torch.no_grad():
             self.base_model.eval()
@@ -262,8 +272,12 @@ class ActMADEngine(AdaptationEngine):
 
                 if self.config.base_type == "rtdetr":
                     pixel_values = batch['pixel_values'].to(self.device)
+                    # Record the source input H/W so eval inputs can be pinned to the same
+                    # size; ActMAD matches per-location feature statistics, which requires
+                    # source and target feature maps to share spatial dimensions.
+                    self._fit_input_hw = tuple(pixel_values.shape[-2:])
                     _ = self.base_model(pixel_values=pixel_values)
-        
+
                 elif self.config.base_type == "yolo11":
                     img = batch['img'].to(self.device)
                     _ = self.base_model(img)
@@ -281,7 +295,7 @@ class ActMADEngine(AdaptationEngine):
         self.clean_var_list_final = [clean_var_act_list[i].avg for i in range(n_chosen_layers)]
 
         self._setup_chosen_bn_layers()
-        print(f"[ActMADEngine] Extracted statistics for {n_chosen_layers} layers")
+        print(f"[{self.__class__.__name__}] Extracted statistics for {n_chosen_layers} layers")
 
     def save_statistics(self, save_path: str):
         # Save statistics to the specified path
@@ -292,10 +306,11 @@ class ActMADEngine(AdaptationEngine):
         torch.save({
             "clean_mean_list_final": self.clean_mean_list_final,
             "clean_var_list_final": self.clean_var_list_final,
-            "layer_names": self.layer_names
+            "layer_names": self.layer_names,
+            "fit_input_hw": self._fit_input_hw
         }, save_path)
 
-        print(f"[ActMADEngine] Saved statistics to {save_path}")
+        print(f"[{self.__class__.__name__}] Saved statistics to {save_path}")
 
     def _setup_chosen_bn_layers(self):
         # Resolve configured layer names to actual normalization layers and store them for adaptation
@@ -336,7 +351,7 @@ class ActMADEngine(AdaptationEngine):
                 self.chosen_bn_layers.append(current_bn_dict[layer_name])
         
             else:
-                warnings.warn(f"[ActMADEngine] Layer {layer_name} not found!")
+                warnings.warn(f"[{self.__class__.__name__}] Layer {layer_name} not found!")
 
     def fit(self, source_preparation=None, batch_size=None, **kwargs):
         if self.clean_mean_list_final is None  and source_preparation is not None:
@@ -347,7 +362,7 @@ class ActMADEngine(AdaptationEngine):
             if self.config.statistic_save_path:
                 self.save_statistics(self.config.statistic_save_path)
             else:
-                print("[ActMADEngine] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
+                print(f"[{self.__class__.__name__}] Extracted statistics were not saved to cache cause `statistic_save_path` is not set")
 
     def online_parameters(self) -> Iterator[nn.Parameter]:
         return self.base_model.parameters()
@@ -402,7 +417,7 @@ class ActMADEngine(AdaptationEngine):
             batched_inputs = kwargs
 
         if self.clean_mean_list_final is None or self.chosen_bn_layers is None:
-            warnings.warn("[ActMADEngine] Statistics not loaded. Running without adaptation.")
+            warnings.warn(f"[{self.__class__.__name__}] Statistics not loaded. Running without adaptation.")
         
             if self.config.base_type == "rtdetr":
                 return self.base_model(**batched_inputs)
@@ -444,8 +459,16 @@ class ActMADEngine(AdaptationEngine):
 
         if self.config.base_type == "rtdetr":
             pixel_values = batched_inputs['pixel_values'].to(self.device)
+            # ActMAD matches per-location activation statistics against the source, so the
+            # feature maps must share spatial dims. When the target domain has a different
+            # aspect ratio (e.g. Cityscapes source -> ACDC target), resize the input back to
+            # the size used during source statistics extraction. Coordinates stay exact since
+            # this is a full resize (boxes normalize to x_orig / W_orig regardless of canvas).
+            fit_hw = getattr(self, '_fit_input_hw', None)
+            if fit_hw is not None and tuple(pixel_values.shape[-2:]) != tuple(fit_hw):
+                pixel_values = F.interpolate(pixel_values, size=tuple(fit_hw), mode="bilinear", align_corners=False)
             outputs = self.base_model(pixel_values=pixel_values)
-        
+
         elif self.config.base_type == "yolo11":
             img = batched_inputs if torch.is_tensor(batched_inputs) else batched_inputs['img']
             outputs = self.base_model(img.to(self.device))
