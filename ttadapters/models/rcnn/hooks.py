@@ -1,4 +1,5 @@
 from detectron2.engine.hooks import HookBase
+from detectron2.utils import comm
 from tqdm.auto import tqdm
 import torch
 
@@ -19,6 +20,10 @@ class TqdmProgressHook(HookBase):
     def after_step(self):
         storage = self.trainer.storage
         self.pbar.update(1)
+
+        # In DDP training, metrics are only written to EventStorage on rank 0
+        if not comm.is_main_process():
+            return
 
         if self.trainer.iter % 20 == 0:
             postfix = {

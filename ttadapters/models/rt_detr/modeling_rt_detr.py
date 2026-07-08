@@ -6,6 +6,7 @@ import gc
 from transformers import RTDetrConfig, RTDetrImageProcessorFast, RTDetrForObjectDetection as _RTDetrForObjectDetection
 from transformers.trainer import Trainer, TrainingArguments, is_sagemaker_mp_enabled, logger
 from transformers.trainer_utils import EvalPrediction
+from transformers.image_transforms import get_size_with_aspect_ratio
 
 from torchvision.transforms.v2.functional import convert_bounding_box_format
 from torchvision.tv_tensors import BoundingBoxFormat, BoundingBoxes
@@ -227,6 +228,17 @@ class RTDetrTrainer(Trainer):
 
 class RTDetrDataPreparation(DataPreparation):
     model_id = "PekingU/rtdetr_r50vd"
+    # RT-DETR HybridEncoder concatenates a 2x-upsampled stride-32 feature map with the
+    # stride-16 backbone feature map, so the input H/W must be divisible by this value.
+    # Aspect-preserving resize (shortest/longest edge) does not guarantee it (e.g. ACDC
+    # 1080x1920 -> 800x1422, and 1422 % 32 != 0), so we round the resized size up.
+    SIZE_DIVISOR = 32
+
+    @staticmethod
+    def _image_hw(image):
+        if isinstance(image, torch.Tensor):
+            return image.shape[-2], image.shape[-1]
+        return image.height, image.width  # PIL.Image
 
     def __init__(
         self,
@@ -313,7 +325,7 @@ class RTDetrDataPreparation(DataPreparation):
         else:
             return image, target
 
-    def pre_process(self, batch):
+    def pre_process(self, batch, size=None):
         images, targets = batch
 
         none_idx_found = False
@@ -329,7 +341,9 @@ class RTDetrDataPreparation(DataPreparation):
             for i, target in enumerate(targets):
                 target['image_id'] = i
 
-        return self.image_processor(images=images, annotations=targets, return_tensors="pt")
+        # `size` is forwarded per-call (no mutation of the shared image_processor state),
+        # which keeps preprocessing race-free under DataLoader prefetch / async evaluation.
+        return self.image_processor(images=images, annotations=targets, size=size, return_tensors="pt")
 
     def post_process(self, batch, target_sizes=None):
         return self.image_processor.post_process_object_detection(batch, target_sizes=target_sizes, threshold=self.confidence_threshold)
@@ -346,8 +360,16 @@ class RTDetrDataPreparation(DataPreparation):
         except TypeError:  # fallback to simple collate
             images = [item[0] for item in batch]
             targets = [item[1] for item in batch]
-        self.image_processor.size = {"shortest_edge": target_size, "longest_edge": self.longest_edge}
-        return self.pre_process((images, targets))
+
+        # Aspect-preserving resize, then round the result up to a multiple of SIZE_DIVISOR so
+        # RT-DETR's HybridEncoder feature-map concat never hits an off-by-one size mismatch.
+        # Resizing (not padding) keeps the image filling the canvas, so the predicted/GT boxes
+        # normalize to x_orig / W_orig regardless of the canvas size and post_process recovers
+        # them exactly from `orig_size` - no padding correction or shared state required.
+        oh, ow = get_size_with_aspect_ratio(self._image_hw(images[0]), target_size, self.longest_edge)
+        div = self.SIZE_DIVISOR
+        size = {"height": (oh + div - 1) // div * div, "width": (ow + div - 1) // div * div}
+        return self.pre_process((images, targets), size=size)
 
 
 class RTDetrForObjectDetection(BaseModel, _RTDetrForObjectDetection, ObjectDetectionMixin):

@@ -41,11 +41,11 @@ class CityScapesDiscreteScenarioForContinualTTA(BaseContinualTTAScenario):
 
 class ACDCScenarioForContinualTTA(BaseContinualTTAScenario):
     DEFAULT = [
-        ACDCCorruptionType.FOG,
-        ACDCCorruptionType.NIGHT,
-        ACDCCorruptionType.RAIN,
         ACDCCorruptionType.SNOW,
-        ACDCCorruptionType.NORMAL
+        ACDCCorruptionType.RAIN,
+        ACDCCorruptionType.NIGHT,
+        ACDCCorruptionType.FOG
     ]
+    SGPPAPER = DEFAULT
     description = "ACDC Scenario For ContinualTTA"
     dataset_class = ACDCDatasetForObjectDetection

@@ -12,10 +12,11 @@ class TargetKeyPreset(Enum):
     """
     RESNET = [  # ResNet: res2 (3 blocks) / stages 0 = 3 blocks
         r"\.res2.*\.conv[123]\.norm$",  # BottleneckBlock (Detectron2)
-        r"\.stages\.0.*\.layer\.[012]\.normalization$",  # RTDetrResNetBottleNeckLayer (RT-DETR)
+        r"\.stages\.0.*\.layer\.[012]\.normalization$",  # RTDetrResNetBottleNeckLayer (transformers, RT-DETR)
     ]
     SWIN = [  # Swin: layer0 (2 blocks) + layer1 (2 blocks) = 4 blocks
-        r"\.layers\.[01]\.blocks\..*\.norm[12]$"  # SwinTransformerBlock
+        r"\.layers\.[01]\.blocks\..*\.norm[12]$",  # SwinTransformerBlock (Detectron2)
+        r"\.layers\.[01]\.blocks\..*\.layernorm_(before|after)$"  # SwinLayer (transformers, Grounding DINO etc.)
     ]
     YOLO11_C3K2 = [  # YOLO11: backbone C3k2 only (model.2,4,6), concat-prior pathway BNs
         r"(^|\.)model\.[246]\.cv2\.bn$",  # C3k2 shortcut path final BN
@@ -70,7 +71,8 @@ class GITAConfig(AdaptationConfig):
         """Create configuration from preset."""
         from .....models import (
             FasterRCNNForObjectDetection, SwinRCNNForObjectDetection,
-            RTDetrForObjectDetection, YOLO11ForObjectDetection
+            RTDetrForObjectDetection, YOLO11ForObjectDetection,
+            GroundingDinoForZeroShotObjectDetection,
         )
         if isinstance(base_model, FasterRCNNForObjectDetection):
             return cls(cascade_target=TargetKeyPreset.RESNET.value, **kwargs)
@@ -83,6 +85,9 @@ class GITAConfig(AdaptationConfig):
                 cascade_target=TargetKeyPreset.YOLO11_STEM.value,
                 masked_processing=True, mask_value=114, **kwargs
             )
+        elif isinstance(base_model, GroundingDinoForZeroShotObjectDetection):
+            # Covers GroundingDinoForObjectDetection too (it subclasses ZS).
+            return cls(cascade_target=TargetKeyPreset.SWIN.value, **kwargs)
         else:
             raise ValueError(f"Unsupported base model type: {type(base_model)}")
 
