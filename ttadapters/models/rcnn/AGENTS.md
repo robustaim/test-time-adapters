@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-05-07 | Updated: 2026-05-07 -->
+<!-- Generated: 2026-05-07 | Updated: 2026-07-08 -->
 
 # rcnn
 
@@ -22,6 +22,7 @@ Detectron2-backed two-stage detectors. Provides `FasterRCNNForObjectDetection` (
 - `load_from("detectron2://...")` triggers the `DetectionCheckpointer` branch in `BaseModel.load_from` — `strict=False` is forced and `exclude_keys` is re-applied after the load.
 - Faster R-CNN expects BGR channel order; `transforms.py` is responsible for that. Don't bypass it when wiring a new dataset.
 - The `hooks.py` file registers forward hooks on FPN levels — TTA methods (ActMAD, GITA, CascadedNorm, FlowAdaptation, etc.) rely on these to extract intermediate activations. If a method needs new hooks, prefer adding them here and importing from method code.
+- **DDP-aware.** The trainer supports DistributedDataParallel: `hooks.py` only writes metrics to `EventStorage` on `comm.is_main_process()`, and the eval path unwraps DDP (`getattr(self.model, "module", self.model)`) before reading `pixel_mean` / running the model, so single-process eval still sees the real module attributes. `seed_worker` is a `@staticmethod` referenced as `self.seed_worker` for DataLoader `worker_init_fn` reproducibility. Preserve the unwrap when touching the eval path.
 
 ### Testing Requirements
 - Smoke-test: `model = FasterRCNNForObjectDetection.from_dataset(coco_dataset)` and run a forward pass on a single image.

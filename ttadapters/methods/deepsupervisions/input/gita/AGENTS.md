@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-05-07 | Updated: 2026-05-07 -->
+<!-- Generated: 2026-05-07 | Updated: 2026-07-08 -->
 
 # gita
 
@@ -25,6 +25,7 @@
 - `from_preset(YOLO11ForObjectDetection)` defaults to **`YOLO11_STEM`** (just `model.0.bn`) — the most aggressive variant. Override with `cascade_target=TargetKeyPreset.YOLO11_C3K2.value` (or `YOLO11`, `YOLO11_FIRST_STRIDE`) when running ablations.
 - `gamma_temperature=0.01` controls the soft gamma's sharpness; `gamma_range=(0.5, 2.0)` clamps the multiplicative range to "/2 to ×2".
 - `force_use_feature_stat` bypasses BN running stats and computes statistics from the live feature batch — useful when source stats are unreliable.
+- **Grounding DINO is supported** via `from_preset`: `GroundingDinoForZeroShotObjectDetection` (and its `GroundingDinoForObjectDetection` subclass) map to the `SWIN` preset, since Grounding DINO uses a Swin backbone. The `SWIN` preset regex was extended to also match `transformers`-style `layernorm_(before|after)` layers (Grounding DINO etc.), alongside the existing Detectron2 Swin `norm[12]` pattern.
 - The `ablations/` and `component_anal/` subdirectories contain *experimental copies* of `modeling_gita.py` plus notebooks; only the top-level `modeling_gita.py` is the canonical implementation.
 
 ### Testing Requirements

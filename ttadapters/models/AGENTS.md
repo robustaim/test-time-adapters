@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-05-07 | Updated: 2026-05-07 -->
+<!-- Generated: 2026-05-07 | Updated: 2026-07-08 -->
 
 # models
 
@@ -9,7 +9,7 @@ Backbone-agnostic model layer. Wraps three different detection ecosystems (Detec
 ## Key Files
 | File | Description |
 |------|-------------|
-| `__init__.py` | Public API: `from .rcnn import *`, `from .yolo11 import *`, `from .rt_detr import *`. |
+| `__init__.py` | Public API: `from .rcnn import *`, `from .yolo11 import *`, `from .rt_detr import *`, `from .grounding_dino import *`. |
 | `base.py` | `BaseModel(nn.Module, PushToHubMixin)`, `ModelProvider` enum (`Detectron2` / `HuggingFace` / `Ultralytics`), `WeightsInfo` dataclass, plus task mixins (`ImageClassificationMixin`, `ObjectDetectionMixin`, `SemanticSegmentationMixin`, `InstanceSegmentationMixin`, `PanopticSegmentationMixin`). |
 
 ## Subdirectories
@@ -18,6 +18,7 @@ Backbone-agnostic model layer. Wraps three different detection ecosystems (Detec
 | `rcnn/` | Detectron2-backed Faster R-CNN and Swin-RCNN detectors (see [rcnn/AGENTS.md](rcnn/AGENTS.md)) |
 | `rt_detr/` | HuggingFace RT-DETR detector (see [rt_detr/AGENTS.md](rt_detr/AGENTS.md)) |
 | `yolo11/` | Ultralytics YOLO11 detector (see [yolo11/AGENTS.md](yolo11/AGENTS.md)) |
+| `grounding_dino/` | HuggingFace open-vocabulary Grounding DINO detector (see [grounding_dino/AGENTS.md](grounding_dino/AGENTS.md)) |
 | `resnet/` | Image-classification ResNet wrapper (HuggingFace) (see [resnet/AGENTS.md](resnet/AGENTS.md)) |
 
 ## For AI Agents
