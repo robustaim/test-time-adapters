@@ -1,13 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "ttadapters"
-version = "1.0.0"
-description = "Pluggable Test-time Adapter Implementations"
+name = "test-time-adapters"
+version = "1.1.0rc1"
+description = "Ready-to-Go Test-time Adaptation/Training Implementations"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "robustaim" }]
+keywords = ["test-time-adaptation", "domain-adaptation", "pytorch", "deep-learning"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "accelerate",
     "transformers>=4.57.6",
-    "detectron2",
     "timm>=1.0.22",
     "muon-optimizer>=0.1.0",
 
@@ -30,10 +44,21 @@ dependencies = [
     "filetype>=1.2.0",
 ]
 [project.optional-dependencies]
+detectron2 = [ "detectron2" ]
 torch = [ "torch", "torchvision" ]
 torch-cu128 = [ "torch", "torchvision" ]
 wandb = [ "wandb>=0.23.1" ]
 
+
+[project.urls]
+Homepage = "https://github.com/robustaim/test-time-adapters"
+Repository = "https://github.com/robustaim/test-time-adapters"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ttadapters"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["ttadapters", "README.md", "LICENSE"]
 
 [tool.uv.sources]
 torch = [ { index = "torch-cu128" } ]
