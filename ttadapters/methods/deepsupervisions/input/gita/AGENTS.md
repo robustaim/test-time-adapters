@@ -13,12 +13,6 @@
 | `configuration_gita.py` | `GITAConfig` + `TargetKeyPreset` enum: `RESNET`, `SWIN`, `YOLO11_C3K2`, `YOLO11_STEM`, `YOLO11_FIRST_STRIDE`, `YOLO11`. Hyperparameters: `optim="Adam"`, `adapt_lr=1e-3`, `itm_type="gamma"`, `cascade_target: list[str]`, `disable_blending=False`, `blend_ratio=0.6`, `mask_value=114`, `masked_processing=False`, full CLAHE/gamma knobs, `use_kl_divergence=True`, `force_use_feature_stat=False`. |
 | `modeling_gita.py` | `GITAEngine` — main implementation (~30 KB). |
 
-## Subdirectories
-| Directory | Purpose |
-|-----------|---------|
-| `ablations/` | Ablation studies (AB1–AB2 + AAB1–AAB2 follow-ups) (see [ablations/AGENTS.md](ablations/AGENTS.md)) |
-| `component_anal/` | Component-level analyses (CA1, CA2) (see [component_anal/AGENTS.md](component_anal/AGENTS.md)) |
-
 ## For AI Agents
 
 ### Working In This Directory
@@ -26,7 +20,6 @@
 - `gamma_temperature=0.01` controls the soft gamma's sharpness; `gamma_range=(0.5, 2.0)` clamps the multiplicative range to "/2 to ×2".
 - `force_use_feature_stat` bypasses BN running stats and computes statistics from the live feature batch — useful when source stats are unreliable.
 - **Grounding DINO is supported** via `from_preset`: `GroundingDinoForZeroShotObjectDetection` (and its `GroundingDinoForObjectDetection` subclass) map to the `SWIN` preset, since Grounding DINO uses a Swin backbone. The `SWIN` preset regex was extended to also match `transformers`-style `layernorm_(before|after)` layers (Grounding DINO etc.), alongside the existing Detectron2 Swin `norm[12]` pattern.
-- The `ablations/` and `component_anal/` subdirectories contain *experimental copies* of `modeling_gita.py` plus notebooks; only the top-level `modeling_gita.py` is the canonical implementation.
 
 ### Testing Requirements
 - For YOLO11, smoke-test each of the four presets (`YOLO11`, `YOLO11_C3K2`, `YOLO11_STEM`, `YOLO11_FIRST_STRIDE`) — they exercise different regex matchers.
