@@ -22,7 +22,6 @@ The catalog of **test-time adaptation (TTA) methods**. Each method is a self-con
 | `entropies/` | Entropy-minimization TTA (TENT, TENT++, EATA, MEMO, DeYO) — empty stubs (see [entropies/AGENTS.md](entropies/AGENTS.md)) |
 | `pefts/` | Parameter-Efficient Fine-Tuning TTA (WHW low-rank, SGP pruning) (see [pefts/AGENTS.md](pefts/AGENTS.md)) |
 | `regularizers/` | Consistency-regularization TTA (Mean Teacher, TeST) (see [regularizers/AGENTS.md](regularizers/AGENTS.md)) |
-| `samplers/` | Sample selection / active learning helpers (ActMAD active sampler) (see [samplers/AGENTS.md](samplers/AGENTS.md)) |
 
 ## For AI Agents
 

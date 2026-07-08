@@ -46,17 +46,19 @@ A Ready-to-Go Playground for Test-time Learning Methods
   - [ ] Rotation Prediction (TTT, Self-Supervised)
   - [ ] Contrastive Learning (TTT++, Self-Supervised)
   - [ ] Masked Pixel Prediction (Masked TTT, Self-Supervised)
+- [x] Sample Selection
+  - [ ] De-biasing (DeYO)
 - [ ] Consistency Regularization
   - [x] Temporal EMA (Mean-Teacher, Self-Training/Semi-Supervised)
-  - [ ] Teacher-Student Augmentation Consistency (TeST, Self-Training/Semi-Supervised)
-- [x] Sample Selection
-  - [x] Active Learning (ActMAD)
-  - [ ] De-biasing (DeYO)
+  - [x] Teacher-Student Augmentation Consistency (TeST, Self-Training/Semi-Supervised)
+- [x] Deep Supervision (Cascaded, Not End-to-End)
+  - [x] Layer-wise Deep Supervision (ActMAD, Self-Supervised)
+  - [x] Gamma-based Intensity Transformation (GITA, Self-Supervised)
+  - [] Cascaded Norm Adaptation (Self-Supervised)
+  - [] Flow Adaptation (Self-Supervised)
 - [ ] Parameter-Efficient Adaptation
   - [x] Low-Rank Adaptation (WHW / When, Where, and How to Adapt?)
-  - [ ] Sensitivity-Guided Pruning (SGP)
-- [x] Layer-wise Supervision (Cascaded, Not End-to-End)
-  - [x] Cascaded Norm Adaptation (Self-Supervised)
+  - [x] Sensitivity-Guided Pruning (SGP)
 
 ### Methods by Adaptation Level
 - Model-Level Adaptation
@@ -70,7 +72,7 @@ A Ready-to-Go Playground for Test-time Learning Methods
 
 - Input-Level Adaptation
   - Input Transformation Module (ITM)
-  - Learning to Normalize (Cascaded Norm Adaptation)
+  - Learning to Normalize (GITA)
 
 - Sample-Level Adaptation
   - Sample Selection
@@ -162,8 +164,8 @@ uv add git+https://github.com/robustaim/test-time-adapters.git
 ### Reproduction of Results
 #### Environment Setup
 ```bash
-git clone https://github.com/robustaim/test-time-adapters.git ptta
-cd ptta
+git clone https://github.com/robustaim/test-time-adapters.git tta
+cd tta
 uv sync --extra torch-cu128  # only windows
 uv sync --extra torch  # only linux
 ```
@@ -175,7 +177,7 @@ python example.py
 
 #### Apply to Your Own Model
 ```python
-from ttadapters.methods import APTConfig, APTPlugin
+from ttadapters.methods import GITAConfig, GITAPlugin
 ```
 
 
